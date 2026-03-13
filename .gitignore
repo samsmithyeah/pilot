@@ -33,6 +33,3 @@ pilot-results/
 # Environment
 .env
 .env.local
-
-# Lock files (keep package-lock, ignore Cargo.lock for binaries)
-packages/pilot-core/Cargo.lock
