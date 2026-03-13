@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+packages/pilot-core/target/
+*.class
+*.dex
+*.apk
+
+# Android/Gradle
+agent/.gradle/
+agent/build/
+agent/app/build/
+agent/local.properties
+agent/gradle/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+pilot-results/
+
+# Environment
+.env
+.env.local
+
+# Lock files (keep package-lock, ignore Cargo.lock for binaries)
+packages/pilot-core/Cargo.lock
