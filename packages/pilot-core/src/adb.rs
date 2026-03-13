@@ -155,7 +155,10 @@ pub async fn screencap(serial: &str) -> Result<Vec<u8>> {
     let png = run_adb(Some(serial), &["exec-out", "screencap", "-p"], timeout).await?;
 
     if png.len() < 8 {
-        bail!("screencap returned too few bytes ({}), device may be locked", png.len());
+        bail!(
+            "screencap returned too few bytes ({}), device may be locked",
+            png.len()
+        );
     }
 
     // Validate PNG magic bytes

@@ -44,7 +44,10 @@ impl DeviceManager {
 
         // Mark devices no longer present as disconnected
         for device in &mut self.devices {
-            if !adb_devices.iter().any(|d| d.serial == device.serial && d.is_online()) {
+            if !adb_devices
+                .iter()
+                .any(|d| d.serial == device.serial && d.is_online())
+            {
                 if device.state == ConnectionState::Active {
                     info!(serial = %device.serial, "Active device disconnected");
                 }
@@ -170,9 +173,7 @@ impl DeviceManager {
                 Ok(serial)
             }
             n => {
-                bail!(
-                    "{n} devices connected but none selected. Use SetDevice to choose one."
-                );
+                bail!("{n} devices connected but none selected. Use SetDevice to choose one.");
             }
         }
     }
@@ -205,7 +206,10 @@ mod tests {
         let result = dm.set_active("nonexistent-serial");
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("not found"), "Error should mention 'not found': {msg}");
+        assert!(
+            msg.contains("not found"),
+            "Error should mention 'not found': {msg}"
+        );
     }
 
     #[test]
