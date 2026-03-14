@@ -49,6 +49,7 @@ data class ElementInfo(
     val isChecked: Boolean,
     val isFocused: Boolean,
     val isClickable: Boolean,
+    val isFocusable: Boolean,
     val isScrollable: Boolean,
     val isVisible: Boolean,
     val isSelected: Boolean,
@@ -81,6 +82,7 @@ data class ElementInfo(
             put("checked", isChecked)
             put("focused", isFocused)
             put("clickable", isClickable)
+            put("focusable", isFocusable)
             put("scrollable", isScrollable)
             put("visible", isVisible)
             put("selected", isSelected)
@@ -432,6 +434,7 @@ class ElementFinder(private val device: UiDevice) {
                     isChecked = elem.getAttribute("checked") == "true",
                     isFocused = elem.getAttribute("focused") == "true",
                     isClickable = elem.getAttribute("clickable") == "true",
+                    isFocusable = elem.getAttribute("focusable") == "true",
                     isScrollable = elem.getAttribute("scrollable") == "true",
                     isVisible = bounds.width() > 0 && bounds.height() > 0,
                     isSelected = elem.getAttribute("selected") == "true",
@@ -493,6 +496,7 @@ class ElementFinder(private val device: UiDevice) {
             isChecked = obj.isChecked,
             isFocused = obj.isFocused,
             isClickable = obj.isClickable,
+            isFocusable = obj.isFocusable,
             isScrollable = obj.isScrollable,
             isVisible = bounds.width() > 0 && bounds.height() > 0,
             isSelected = obj.isSelected,
