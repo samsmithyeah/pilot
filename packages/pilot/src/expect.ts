@@ -7,6 +7,7 @@
  */
 
 import type { ElementHandle } from "./element-handle.js";
+import type { ElementInfo } from "./grpc-client.js";
 import { selectorToProto } from "./selectors.js";
 
 const DEFAULT_ASSERTION_TIMEOUT_MS = 5_000;
@@ -170,7 +171,7 @@ export interface PilotAssertions {
 
   /** Assert the element has a specific attribute/property value. */
   toHaveAttribute(
-    name: string,
+    name: keyof ElementInfo,
     value: unknown,
     options?: { timeout?: number },
   ): Promise<void>;
