@@ -114,11 +114,17 @@ const ROLE_CLASS_MAP: Record<string, string[]> = {
 
 const EDITABLE_CLASSES = new Set(ROLE_CLASS_MAP["textfield"]);
 
-const CLASS_TO_ROLE_MAP: Record<string, string> = Object.fromEntries(
-  Object.entries(ROLE_CLASS_MAP)
-    .reverse()
-    .flatMap(([role, classes]) => classes.map((className) => [className, role])),
-);
+const CLASS_TO_ROLE_MAP: Record<string, string> = (() => {
+  const map: Record<string, string> = {};
+  for (const [role, classes] of Object.entries(ROLE_CLASS_MAP)) {
+    for (const className of classes) {
+      if (!(className in map)) {
+        map[className] = role;
+      }
+    }
+  }
+  return map;
+})();
 
 // ─── Assertion object ───
 

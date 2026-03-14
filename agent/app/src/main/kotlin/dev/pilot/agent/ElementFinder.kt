@@ -207,15 +207,13 @@ class ElementFinder(private val device: UiDevice) {
      * Reverse mapping from class name to role.
      */
     private val classToRoleMap: Map<String, String> by lazy {
-        val map = mutableMapOf<String, String>()
-        for ((role, classNames) in roleClassMap) {
-            for (className in classNames) {
-                if (!map.containsKey(className)) {
-                    map[className] = role
+        buildMap {
+            for ((role, classNames) in roleClassMap) {
+                for (className in classNames) {
+                    putIfAbsent(className, role)
                 }
             }
         }
-        map
     }
 
     /**
