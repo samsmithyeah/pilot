@@ -43,6 +43,7 @@ data class ElementInfo(
     val text: String?,
     val contentDescription: String?,
     val resourceId: String?,
+    val hint: String?,
     val bounds: Rect,
     val isEnabled: Boolean,
     val isChecked: Boolean,
@@ -62,6 +63,7 @@ data class ElementInfo(
             put("text", text ?: JSONObject.NULL)
             put("contentDescription", contentDescription ?: JSONObject.NULL)
             put("resourceId", resourceId ?: JSONObject.NULL)
+            put("hint", hint ?: JSONObject.NULL)
             put(
                 "bounds",
                 JSONObject().apply {
@@ -424,6 +426,7 @@ class ElementFinder(private val device: UiDevice) {
                     text = elem.getAttribute("text").ifEmpty { null },
                     contentDescription = elem.getAttribute("content-desc").ifEmpty { null },
                     resourceId = elem.getAttribute("resource-id").ifEmpty { null },
+                    hint = elem.getAttribute("hint").ifEmpty { null },
                     bounds = bounds,
                     isEnabled = elem.getAttribute("enabled") == "true",
                     isChecked = elem.getAttribute("checked") == "true",
@@ -451,6 +454,22 @@ class ElementFinder(private val device: UiDevice) {
         return Rect(left.toInt(), top.toInt(), right.toInt(), bottom.toInt())
     }
 
+    /**
+     * Extract hint text from a UiObject2 via AccessibilityNodeInfo.
+     * getHintText() is available on API 26+; returns null on older devices.
+     */
+    private fun extractHint(obj: UiObject2): String? {
+        if (android.os.Build.VERSION.SDK_INT < 26) return null
+        return try {
+            val nodeInfoField = obj.javaClass.getDeclaredMethod("getAccessibilityNodeInfo")
+            nodeInfoField.isAccessible = true
+            val nodeInfo = nodeInfoField.invoke(obj) as? android.view.accessibility.AccessibilityNodeInfo
+            nodeInfo?.hintText?.toString()
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     private fun cacheAndConvert(obj: UiObject2): ElementInfo {
         val elementId = UUID.randomUUID().toString()
         elementCache[elementId] = obj
@@ -467,6 +486,7 @@ class ElementFinder(private val device: UiDevice) {
             text = obj.text,
             contentDescription = obj.contentDescription,
             resourceId = obj.resourceName,
+            hint = extractHint(obj),
             bounds = bounds,
             isEnabled = obj.isEnabled,
             isChecked = obj.isChecked,

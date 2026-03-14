@@ -281,6 +281,9 @@ The `ElementInfo` object contains:
 | `hint` | `string` | Input hint text |
 | `checked` | `boolean` | Whether the element is checked |
 | `selected` | `boolean` | Whether the element is selected |
+| `focused` | `boolean` | Whether the element has input focus |
+| `role` | `string` | Accessibility role (e.g. "button", "textfield") |
+| `viewportRatio` | `number` | Fraction of element visible in viewport (0.0–1.0) |
 | `bounds` | `Bounds` | Element bounding rectangle |
 
 ### `elementHandle.exists(): Promise<boolean>`
