@@ -17,7 +17,7 @@
  *   await expect.poll(async () => fetchCount()).toBe(5);
  */
 
-import type { ElementHandle } from "./element-handle.js";
+import { ElementHandle } from "./element-handle.js";
 import type { ElementInfo } from "./grpc-client.js";
 import { selectorToProto } from "./selectors.js";
 
@@ -815,7 +815,11 @@ function deepEqual(a: unknown, b: unknown): boolean {
     const aKeys = Object.keys(aObj);
     const bKeys = Object.keys(bObj);
     if (aKeys.length !== bKeys.length) return false;
-    return aKeys.every((key) => deepEqual(aObj[key], bObj[key]));
+    return aKeys.every(
+      (key) =>
+        Object.prototype.hasOwnProperty.call(bObj, key) &&
+        deepEqual(aObj[key], bObj[key]),
+    );
   }
   return false;
 }
@@ -1278,13 +1282,15 @@ function createPollAssertions(
     const handler: ProxyHandler<GenericAssertions> = {
       get(_target, prop: string) {
         if (prop === "not") return buildProxy(!negated);
+        if (prop === "then") return undefined; // Support await
         return (...args: unknown[]) => {
           return wrapAssertion((value) => {
             const assertions = makeGeneric(value, negated);
             const method = assertions[prop as keyof GenericAssertions];
-            if (typeof method === "function") {
-              (method as (...a: unknown[]) => void)(...args);
+            if (typeof method !== "function") {
+              throw new Error(`expect.poll(): "${prop}" is not a valid assertion method`);
             }
+            (method as (...a: unknown[]) => void)(...args);
           })();
         };
       },
@@ -1298,13 +1304,7 @@ function createPollAssertions(
 // ─── Main expect function ───
 
 function isElementHandle(value: unknown): value is ElementHandle {
-  return (
-    value !== null &&
-    typeof value === "object" &&
-    "_client" in value &&
-    "_selector" in value &&
-    "_timeoutMs" in value
-  );
+  return value instanceof ElementHandle;
 }
 
 /**

@@ -103,6 +103,12 @@ describe("PILOT-42: Generic value assertions", () => {
       ).toThrow("to equal");
     });
 
+    it("fails for objects with same number of keys but different key names", () => {
+      vitestExpect(() =>
+        pilotExpect({ a: 1, b: 2 }).toEqual({ a: 1, c: 2 }),
+      ).toThrow("to equal");
+    });
+
     it("compares dates by value", () => {
       pilotExpect(new Date("2024-01-01")).toEqual(new Date("2024-01-01"));
     });
@@ -726,5 +732,12 @@ describe("PILOT-44: expect.poll()", () => {
 
   it("uses default timeout when none provided", async () => {
     await pilotExpect.poll(() => 42).toBe(42);
+  });
+
+  it("throws for invalid/misspelled assertion methods", async () => {
+    await vitestExpect(
+      (pilotExpect.poll(() => 5, { timeout: 100 }) as unknown as Record<string, (...args: unknown[]) => Promise<void>>)
+        .toBee(5),
+    ).rejects.toThrow('"toBee" is not a valid assertion method');
   });
 });
