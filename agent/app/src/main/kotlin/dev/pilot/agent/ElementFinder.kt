@@ -465,7 +465,8 @@ class ElementFinder(private val device: UiDevice) {
             nodeInfoField.isAccessible = true
             val nodeInfo = nodeInfoField.invoke(obj) as? android.view.accessibility.AccessibilityNodeInfo
             nodeInfo?.hintText?.toString()
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            android.util.Log.w("ElementFinder", "Failed to extract hint text for ${obj.className}", e)
             null
         }
     }

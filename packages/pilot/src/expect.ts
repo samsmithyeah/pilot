@@ -210,6 +210,16 @@ function matchesStringOrRegExp(
   return expected.test(actual);
 }
 
+function matchesExact(
+  actual: string,
+  expected: string | RegExp,
+): boolean {
+  if (typeof expected === "string") {
+    return actual === expected;
+  }
+  return expected.test(actual);
+}
+
 function createAssertions(
   handle: ElementHandle,
   negated: boolean,
@@ -534,10 +544,7 @@ function createAssertions(
           if (res.found && res.element) {
             // On Android, accessible name is contentDescription if set, otherwise text
             lastName = res.element.contentDescription || res.element.text;
-            if (typeof name === "string") {
-              return lastName === name;
-            }
-            return name.test(lastName);
+            return matchesExact(lastName, name);
           }
           return false;
         } catch {
@@ -568,10 +575,7 @@ function createAssertions(
           const res = await handle._client.findElement(handle._selector, 0);
           if (res.found && res.element) {
             lastDesc = res.element.hint;
-            if (typeof description === "string") {
-              return lastDesc === description;
-            }
-            return description.test(lastDesc);
+            return matchesExact(lastDesc, description);
           }
           return false;
         } catch {
