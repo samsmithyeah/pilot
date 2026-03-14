@@ -1265,7 +1265,7 @@ function createPollAssertions(
         check(value);
         return;
       } catch (err) {
-        throw lastError ?? (err instanceof Error ? err : new Error(String(err)));
+        throw err instanceof Error ? err : new Error(String(err));
       }
     };
   }
