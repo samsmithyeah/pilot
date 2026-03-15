@@ -1266,19 +1266,30 @@ function createPollAssertions(
     return createGenericAssertions(value, neg, throwOnFail);
   }
 
+  // Build a set of valid method names for eager validation
+  const validMethods = new Set(
+    Object.keys(createGenericAssertions(null, false, () => {})).filter(
+      (k) => k !== "not",
+    ),
+  );
+
   const buildProxy = (negated: boolean): GenericAssertions => {
     const handler: ProxyHandler<GenericAssertions> = {
       get(_target, prop: string) {
         if (prop === "not") return buildProxy(!negated);
         if (prop === "then") return undefined; // Support await
+        if (!validMethods.has(prop)) {
+          return () =>
+            Promise.reject(
+              new Error(
+                `expect.poll(): "${prop}" is not a valid assertion method`,
+              ),
+            );
+        }
         return (...args: unknown[]) => {
           return wrapAssertion((value) => {
             const assertions = makeGeneric(value, negated);
-            const method = assertions[prop as keyof GenericAssertions];
-            if (typeof method !== "function") {
-              throw new Error(`expect.poll(): "${prop}" is not a valid assertion method`);
-            }
-            (method as (...a: unknown[]) => void)(...args);
+            (assertions[prop as keyof GenericAssertions] as (...a: unknown[]) => void)(...args);
           })();
         };
       },

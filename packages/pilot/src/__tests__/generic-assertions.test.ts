@@ -670,10 +670,11 @@ describe("PILOT-44: expect.poll()", () => {
   });
 
   it("times out when condition is never met", async () => {
-    vi.useRealTimers();
-    await vitestExpect(
-      pilotExpect.poll(() => 1, { timeout: 200, intervals: [50] }).toBe(999),
-    ).rejects.toThrow("to be 999");
+    const promise = pilotExpect.poll(() => 1, { timeout: 200, intervals: [50] }).toBe(999);
+    // Attach rejection handler before advancing to prevent unhandled rejection
+    const expectation = vitestExpect(promise).rejects.toThrow("to be 999");
+    await vi.runAllTimersAsync();
+    await expectation;
   });
 
   it("works with async functions", async () => {
@@ -762,10 +763,9 @@ describe("PILOT-44: expect.poll()", () => {
   });
 
   it("throws for invalid/misspelled assertion methods", async () => {
-    vi.useRealTimers();
-    await vitestExpect(
-      (pilotExpect.poll(() => 5, { timeout: 100 }) as unknown as Record<string, (...args: unknown[]) => Promise<void>>)
-        .toBee(5),
-    ).rejects.toThrow('"toBee" is not a valid assertion method');
+    const promise = (pilotExpect.poll(() => 5, { timeout: 100 }) as unknown as Record<string, (...args: unknown[]) => Promise<void>>)
+      .toBee(5);
+    // Attach handler immediately to prevent unhandled rejection
+    await vitestExpect(promise).rejects.toThrow('"toBee" is not a valid assertion method');
   });
 });
