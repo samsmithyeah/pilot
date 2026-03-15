@@ -427,9 +427,21 @@ describe("PILOT-42: Generic value assertions", () => {
       );
     });
 
+    it("toBeGreaterThanOrEqual rejects strings", () => {
+      vitestExpect(() => pilotExpect("10").toBeGreaterThanOrEqual(5)).toThrow(
+        "Expected a number for toBeGreaterThanOrEqual but got string",
+      );
+    });
+
     it("toBeLessThan rejects strings", () => {
       vitestExpect(() => pilotExpect("3").toBeLessThan(5)).toThrow(
         "Expected a number for toBeLessThan but got string",
+      );
+    });
+
+    it("toBeLessThanOrEqual rejects strings", () => {
+      vitestExpect(() => pilotExpect("3").toBeLessThanOrEqual(5)).toThrow(
+        "Expected a number for toBeLessThanOrEqual but got string",
       );
     });
 
