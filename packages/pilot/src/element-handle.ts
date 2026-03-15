@@ -164,8 +164,7 @@ export class ElementHandle {
   /** @internal — Resolve all matching elements. Recursively resolves operands for and/or, then applies filters. */
   async _resolveAll(): Promise<ElementInfo[]> {
     if (this._options.andHandle) {
-      const left = this._options.andSelf ??
-        new ElementHandle(this._client, this._selector, this._timeoutMs);
+      const left = this._options.andSelf!;
 
       const [leftEls, rightEls] = await Promise.all([
         left._resolveAll(),
@@ -185,8 +184,7 @@ export class ElementHandle {
     }
 
     if (this._options.orHandle) {
-      const left = this._options.orSelf ??
-        new ElementHandle(this._client, this._selector, this._timeoutMs);
+      const left = this._options.orSelf!;
 
       const [leftEls, rightEls] = await Promise.all([
         left._resolveAll(),
@@ -282,11 +280,31 @@ export class ElementHandle {
     }
 
     if (elements.length === 0) {
-      throw new Error(
-        `Element not found: ${JSON.stringify(selectorToProto(this._selector))}`,
-      );
+      throw new Error(`Element not found: ${this._describe()}`);
     }
     return elements[0];
+  }
+
+  /** @internal — Build a human-readable description of this handle for error messages. */
+  private _describe(): string {
+    const sel = JSON.stringify(selectorToProto(this._selector));
+    if (this._options.andHandle) {
+      const left = this._options.andSelf?._describe() ?? sel;
+      const right = this._options.andHandle._describe();
+      let desc = `${left} AND ${right}`;
+      if (this._options.filters?.length) desc += `.filter(…×${this._options.filters.length})`;
+      return desc;
+    }
+    if (this._options.orHandle) {
+      const left = this._options.orSelf?._describe() ?? sel;
+      const right = this._options.orHandle._describe();
+      let desc = `${left} OR ${right}`;
+      if (this._options.filters?.length) desc += `.filter(…×${this._options.filters.length})`;
+      return desc;
+    }
+    let desc = sel;
+    if (this._options.filters?.length) desc += `.filter(…×${this._options.filters.length})`;
+    return desc;
   }
 
   /**
@@ -324,7 +342,7 @@ export class ElementHandle {
     if (!res.found || !res.element) {
       throw new Error(
         res.errorMessage ||
-          `Element not found: ${JSON.stringify(selectorToProto(this._selector))}`,
+          `Element not found: ${this._describe()}`,
       );
     }
     return res.element;
