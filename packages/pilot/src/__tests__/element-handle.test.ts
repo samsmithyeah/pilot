@@ -858,6 +858,59 @@ describe('or()', () => {
   });
 });
 
+// ─── Chaining multiple and()/or() ───
+
+describe('chaining and()', () => {
+  it('a.and(b).and(c) matches elements in all three', async () => {
+    const shared = makeElementInfo({ elementId: 'e1', text: 'Submit' });
+    const findElements = vi.fn(async (selector: any) => {
+      const proto = selectorToProto(selector);
+      if (proto.text === 'B') {
+        return makeFindElementsResponse([
+          shared,
+          makeElementInfo({ elementId: 'e2', text: 'Other' }),
+        ]);
+      }
+      if (proto.text === 'C') {
+        return makeFindElementsResponse([shared]);
+      }
+      // A
+      return makeFindElementsResponse([
+        shared,
+        makeElementInfo({ elementId: 'e3', text: 'Extra' }),
+      ]);
+    });
+    const client = makeMockClient({ findElements });
+
+    const a = new ElementHandle(client, text('A'), 5000);
+    const b = new ElementHandle(client, text('B'), 5000);
+    const c = new ElementHandle(client, text('C'), 5000);
+    const count = await a.and(b).and(c).count();
+    expect(count).toBe(1);
+    const result = await a.and(b).and(c).first().find();
+    expect(result.text).toBe('Submit');
+  });
+});
+
+describe('chaining or()', () => {
+  it('a.or(b).or(c) matches elements in any of the three', async () => {
+    const findElements = vi.fn(async (selector: any) => {
+      const proto = selectorToProto(selector);
+      if (proto.text === 'A') return makeFindElementsResponse([makeElementInfo({ elementId: 'e1', text: 'A' })]);
+      if (proto.text === 'B') return makeFindElementsResponse([makeElementInfo({ elementId: 'e2', text: 'B' })]);
+      if (proto.text === 'C') return makeFindElementsResponse([makeElementInfo({ elementId: 'e3', text: 'C' })]);
+      return makeFindElementsResponse([]);
+    });
+    const client = makeMockClient({ findElements });
+
+    const a = new ElementHandle(client, text('A'), 5000);
+    const b = new ElementHandle(client, text('B'), 5000);
+    const c = new ElementHandle(client, text('C'), 5000);
+    const count = await a.or(b).or(c).count();
+    expect(count).toBe(3);
+  });
+});
+
 // ─── Composition / integration ───
 
 describe('method composition', () => {

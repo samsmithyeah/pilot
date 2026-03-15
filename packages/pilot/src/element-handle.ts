@@ -125,6 +125,13 @@ export class ElementHandle {
 
   /** Return a handle matching elements that satisfy both this and the other handle's selector. */
   and(other: ElementHandle): ElementHandle {
+    if (this._options.andHandle) {
+      // Support chaining: a.and(b).and(c) → a.and(b.and(c))
+      return new ElementHandle(this._client, this._selector, this._timeoutMs, {
+        ...this._options,
+        andHandle: this._options.andHandle.and(other),
+      });
+    }
     return new ElementHandle(this._client, this._selector, this._timeoutMs, {
       ...this._options,
       andHandle: other,
@@ -133,6 +140,13 @@ export class ElementHandle {
 
   /** Return a handle matching elements that satisfy either this or the other handle's selector. */
   or(other: ElementHandle): ElementHandle {
+    if (this._options.orHandle) {
+      // Support chaining: a.or(b).or(c) → a.or(b.or(c))
+      return new ElementHandle(this._client, this._selector, this._timeoutMs, {
+        ...this._options,
+        orHandle: this._options.orHandle.or(other),
+      });
+    }
     return new ElementHandle(this._client, this._selector, this._timeoutMs, {
       ...this._options,
       orHandle: other,
@@ -153,6 +167,21 @@ export class ElementHandle {
 
   /** @internal — Resolve all matching elements. Recursively resolves operands for and/or, then applies filters. */
   async _resolveAll(): Promise<ElementInfo[]> {
+    // and() is checked before or() to give AND higher precedence,
+    // matching standard boolean operator semantics.
+    if (this._options.andHandle) {
+      const { andHandle, ...rest } = this._options;
+      const selfHandle = new ElementHandle(this._client, this._selector, this._timeoutMs, rest);
+
+      const [selfElements, otherElements] = await Promise.all([
+        selfHandle._resolveAll(),
+        andHandle._resolveAll(),
+      ]);
+
+      const otherIds = new Set(otherElements.map((e) => e.elementId));
+      return selfElements.filter((e) => otherIds.has(e.elementId));
+    }
+
     if (this._options.orHandle) {
       const { orHandle, ...rest } = this._options;
       const selfHandle = new ElementHandle(this._client, this._selector, this._timeoutMs, rest);
@@ -166,19 +195,6 @@ export class ElementHandle {
       return Array.from(
         new Map(combined.map((el) => [el.elementId, el])).values(),
       );
-    }
-
-    if (this._options.andHandle) {
-      const { andHandle, ...rest } = this._options;
-      const selfHandle = new ElementHandle(this._client, this._selector, this._timeoutMs, rest);
-
-      const [selfElements, otherElements] = await Promise.all([
-        selfHandle._resolveAll(),
-        andHandle._resolveAll(),
-      ]);
-
-      const otherIds = new Set(otherElements.map((e) => e.elementId));
-      return selfElements.filter((e) => otherIds.has(e.elementId));
     }
 
     // Base case: no and/or — resolve selector then apply filters
@@ -248,8 +264,9 @@ export class ElementHandle {
     if (nthIndex !== undefined) {
       const idx = nthIndex < 0 ? elements.length + nthIndex : nthIndex;
       if (idx < 0 || idx >= elements.length) {
+        const expectedCount = nthIndex >= 0 ? nthIndex + 1 : -nthIndex;
         throw new Error(
-          `nth(${nthIndex}): expected at least ${Math.abs(nthIndex < 0 ? nthIndex : nthIndex + 1)} element(s), but found ${elements.length}`,
+          `nth(${nthIndex}): expected at least ${expectedCount} element(s), but found ${elements.length}`,
         );
       }
       return elements[idx];
