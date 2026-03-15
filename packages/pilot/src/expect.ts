@@ -1150,9 +1150,30 @@ function createGenericAssertions(
           }
         }
       } else {
-        if (threw) {
+        if (!threw) return;
+
+        if (expected === undefined) {
           onFail(
             `Expected function not to throw, but it threw: ${thrownError instanceof Error ? thrownError.message : String(thrownError)}`,
+          );
+          return;
+        }
+
+        // .not.toThrow(expected) fails only if the thrown error matches
+        const message =
+          thrownError instanceof Error ? thrownError.message : String(thrownError);
+        let matches = false;
+        if (typeof expected === "string") {
+          matches = message.includes(expected);
+        } else if (expected instanceof RegExp) {
+          matches = expected.test(message);
+        } else if (expected instanceof Error) {
+          matches = message === expected.message;
+        }
+
+        if (matches) {
+          onFail(
+            `Expected function not to throw error matching ${formatValue(expected)}`,
           );
         }
       }
@@ -1236,8 +1257,10 @@ function createPollAssertions(
           const value = await fn();
           check(value);
           return; // Assertion passed
-        } catch {
-          // Will retry if timeout not exceeded
+        } catch (err) {
+          if (process.env.PILOT_DEBUG) {
+            console.log(`[pilot.poll] Intermediate error: ${err instanceof Error ? err.message : String(err)}`);
+          }
         }
 
         if (Date.now() >= deadline) break;

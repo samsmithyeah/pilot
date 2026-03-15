@@ -477,6 +477,40 @@ describe("PILOT-42: Generic value assertions", () => {
       ).toThrow("Expected function not to throw");
     });
 
+    it(".not.toThrow(expected) passes when thrown error does not match", () => {
+      pilotExpect(() => {
+        throw new Error("something unexpected");
+      }).not.toThrow("specific error");
+
+      pilotExpect(() => {
+        throw new Error("something unexpected");
+      }).not.toThrow(/specific/);
+
+      pilotExpect(() => {
+        throw new Error("something unexpected");
+      }).not.toThrow(new Error("specific error"));
+    });
+
+    it(".not.toThrow(expected) fails when thrown error matches", () => {
+      vitestExpect(() =>
+        pilotExpect(() => {
+          throw new Error("specific error occurred");
+        }).not.toThrow("specific error"),
+      ).toThrow("Expected function not to throw error matching");
+
+      vitestExpect(() =>
+        pilotExpect(() => {
+          throw new Error("error code: 42");
+        }).not.toThrow(/code: \d+/),
+      ).toThrow("Expected function not to throw error matching");
+
+      vitestExpect(() =>
+        pilotExpect(() => {
+          throw new Error("exact message");
+        }).not.toThrow(new Error("exact message")),
+      ).toThrow("Expected function not to throw error matching");
+    });
+
     it("errors if actual is not a function", () => {
       vitestExpect(() => pilotExpect(42).toThrow()).toThrow(
         "Expected a function for toThrow()",
