@@ -934,6 +934,39 @@ describe('method composition', () => {
     expect(selectorToProto(calledSelector)).toEqual({ contentDesc: 'Close button' });
   });
 
+  it('filter().and() applies filter before intersection, not after', async () => {
+    // a has elements e1 ("Apple"), e2 ("Banana"), e3 ("Cherry")
+    // b has elements e2 ("Banana")
+    // a.filter({ hasText: "an" }).and(b) should:
+    //   1. Filter a → [e2 "Banana"] (only one contains "an")
+    //   2. Intersect with b → [e2 "Banana"]
+    // NOT: intersect first → [e2], then filter → [e2] (same result here but different semantics)
+    const aEls = [
+      makeElementInfo({ elementId: 'e1', text: 'Apple' }),
+      makeElementInfo({ elementId: 'e2', text: 'Banana' }),
+      makeElementInfo({ elementId: 'e3', text: 'Cherry' }),
+    ];
+    const bEls = [
+      makeElementInfo({ elementId: 'e2', text: 'Banana' }),
+      makeElementInfo({ elementId: 'e3', text: 'Cherry' }),
+    ];
+    const findElements = vi.fn(async (selector: any) => {
+      const proto = selectorToProto(selector);
+      if (proto.text === 'B') return makeFindElementsResponse(bEls);
+      return makeFindElementsResponse(aEls);
+    });
+    const client = makeMockClient({ findElements });
+
+    const a = new ElementHandle(client, text('A'), 5000);
+    const b = new ElementHandle(client, text('B'), 5000);
+
+    // Without the fix, filter would be applied after and(), giving wrong results
+    const count = await a.filter({ hasText: 'an' }).and(b).count();
+    expect(count).toBe(1);
+    const result = await a.filter({ hasText: 'an' }).and(b).first().find();
+    expect(result.text).toBe('Banana');
+  });
+
   it('action selector falls back to original selector when no identifying info', async () => {
     const tap = vi.fn(async () => successResponse());
     const bareEl = makeElementInfo({

@@ -150,34 +150,45 @@ export class ElementHandle {
     );
   }
 
-  /** @internal — Resolve all matching elements, applying and/or, then filters. */
+  /** @internal — Resolve all matching elements. Recursively resolves operands for and/or, then applies filters. */
   async _resolveAll(): Promise<ElementInfo[]> {
-    let elements: ElementInfo[];
-
     if (this._options.orHandle) {
-      const [a, b] = await Promise.all([
-        this._client.findElements(this._selector, this._timeoutMs),
-        this._client.findElements(this._options.orHandle._selector, this._timeoutMs),
+      const { orHandle, ...rest } = this._options;
+      const selfHandle = new ElementHandle(this._client, this._selector, this._timeoutMs, rest);
+
+      const [selfElements, otherElements] = await Promise.all([
+        selfHandle._resolveAll(),
+        orHandle._resolveAll(),
       ]);
+
       const seen = new Set<string>();
-      elements = [];
-      for (const el of [...(a.elements ?? []), ...(b.elements ?? [])]) {
+      const elements: ElementInfo[] = [];
+      for (const el of [...selfElements, ...otherElements]) {
         if (!seen.has(el.elementId)) {
           seen.add(el.elementId);
           elements.push(el);
         }
       }
-    } else if (this._options.andHandle) {
-      const [a, b] = await Promise.all([
-        this._client.findElements(this._selector, this._timeoutMs),
-        this._client.findElements(this._options.andHandle._selector, this._timeoutMs),
-      ]);
-      const bIds = new Set((b.elements ?? []).map((e) => e.elementId));
-      elements = (a.elements ?? []).filter((e) => bIds.has(e.elementId));
-    } else {
-      const res = await this._client.findElements(this._selector, this._timeoutMs);
-      elements = res.elements ?? [];
+      return elements;
     }
+
+    if (this._options.andHandle) {
+      const { andHandle, ...rest } = this._options;
+      const selfHandle = new ElementHandle(this._client, this._selector, this._timeoutMs, rest);
+
+      const [selfElements, otherElements] = await Promise.all([
+        selfHandle._resolveAll(),
+        andHandle._resolveAll(),
+      ]);
+
+      const otherIds = new Set(otherElements.map((e) => e.elementId));
+      return selfElements.filter((e) => otherIds.has(e.elementId));
+    }
+
+    // Base case: no and/or — resolve selector then apply filters
+    let elements: ElementInfo[];
+    const res = await this._client.findElements(this._selector, this._timeoutMs);
+    elements = res.elements ?? [];
 
     if (this._options.filters) {
       for (const f of this._options.filters) {
@@ -312,7 +323,13 @@ export class ElementHandle {
     return elements.length;
   }
 
-  /** Return an array of ElementHandles, one for each matching element (PILOT-13). */
+  /**
+   * Return an array of ElementHandles, one for each matching element (PILOT-13).
+   *
+   * Note: each returned handle is lazy — actions or queries on individual handles
+   * will re-execute `findElements`. For large result sets, prefer using `count()`
+   * for simple cardinality checks.
+   */
   async all(): Promise<ElementHandle[]> {
     const elements = await this._resolveAll();
     return elements.map((_, i) =>
