@@ -267,10 +267,16 @@ async function runSuiteContext(
 
     // Collect soft assertion failures (PILOT-43)
     const softErrors = flushSoftErrors();
-    if (softErrors.length > 0 && status !== 'failed') {
-      status = 'failed';
+    if (softErrors.length > 0) {
       const messages = softErrors.map((e) => e.message).join('\n');
-      error = new Error(`${softErrors.length} soft assertion(s) failed:\n${messages}`);
+      const softErrorSummary = `${softErrors.length} soft assertion(s) failed:\n${messages}`;
+
+      if (status !== 'failed') {
+        status = 'failed';
+        error = new Error(softErrorSummary);
+      } else if (error) {
+        error.message += `\n\n--- Additionally ---\n${softErrorSummary}`;
+      }
 
       if (!screenshotPath && opts.config.screenshot !== 'never') {
         screenshotPath = await captureFailureScreenshot(

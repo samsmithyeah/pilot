@@ -853,6 +853,10 @@ function deepStrictEqual(a: unknown, b: unknown): boolean {
   return false;
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function matchesObjectSubset(
   actual: Record<string, unknown>,
   expected: Record<string, unknown>,
@@ -861,21 +865,8 @@ function matchesObjectSubset(
     if (!Object.prototype.hasOwnProperty.call(actual, key)) return false;
     const aVal = actual[key];
     const eVal = expected[key];
-    if (
-      typeof eVal === "object" &&
-      eVal !== null &&
-      !Array.isArray(eVal) &&
-      typeof aVal === "object" &&
-      aVal !== null &&
-      !Array.isArray(aVal)
-    ) {
-      if (
-        !matchesObjectSubset(
-          aVal as Record<string, unknown>,
-          eVal as Record<string, unknown>,
-        )
-      )
-        return false;
+    if (isPlainObject(eVal) && isPlainObject(aVal)) {
+      if (!matchesObjectSubset(aVal, eVal)) return false;
     } else {
       if (!deepEqual(aVal, eVal)) return false;
     }
@@ -1056,10 +1047,8 @@ function createGenericAssertions(
 
     toMatchObject(expected) {
       const pass =
-        typeof actual === "object" &&
-        actual !== null &&
-        !Array.isArray(actual) &&
-        matchesObjectSubset(actual as Record<string, unknown>, expected);
+        isPlainObject(actual) &&
+        matchesObjectSubset(actual, expected);
       assert(
         pass,
         `Expected ${formatValue(actual)} to match object ${formatValue(expected)}`,
