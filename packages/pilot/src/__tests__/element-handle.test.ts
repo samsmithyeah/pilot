@@ -1019,7 +1019,7 @@ describe('method composition', () => {
     expect(result.text).toBe('Banana');
   });
 
-  it('action selector falls back to original selector when no identifying info', async () => {
+  it('action throws when element has no identifying properties', async () => {
     const tap = vi.fn(async () => successResponse());
     const bareEl = makeElementInfo({
       elementId: 'e1',
@@ -1031,11 +1031,45 @@ describe('method composition', () => {
       findElements: vi.fn(async () => makeFindElementsResponse([bareEl])),
       tap,
     });
-    const sel = role('button');
-    const handle = new ElementHandle(client, sel, 5000);
-    await handle.first().tap();
+    const handle = new ElementHandle(client, role('button'), 5000);
+    await expect(handle.first().tap()).rejects.toThrow('Cannot target element for action');
+  });
 
-    const calledSelector = (tap.mock.calls[0] as any[])[0];
-    expect(calledSelector).toBe(sel);
+  it('a.and(b).filter(F) applies filter after intersection', async () => {
+    // a has e1 ("Apple"), e2 ("Banana"), e3 ("Cherry")
+    // b has e1 ("Apple"), e2 ("Banana")
+    // a.and(b) = [e1, e2], then .filter({ hasText: "an" }) = [e2 "Banana"]
+    // This is DIFFERENT from a.filter(F).and(b) which is:
+    //   a.filter(F) = [e2], then AND b = [e2]
+    const aEls = [
+      makeElementInfo({ elementId: 'e1', text: 'Apple' }),
+      makeElementInfo({ elementId: 'e2', text: 'Banana' }),
+      makeElementInfo({ elementId: 'e3', text: 'Cherry' }),
+    ];
+    const bEls = [
+      makeElementInfo({ elementId: 'e1', text: 'Apple' }),
+      makeElementInfo({ elementId: 'e2', text: 'Banana' }),
+    ];
+    const findElements = vi.fn(async (selector: any) => {
+      const proto = selectorToProto(selector);
+      if (proto.text === 'B') return makeFindElementsResponse(bEls);
+      return makeFindElementsResponse(aEls);
+    });
+    const client = makeMockClient({ findElements });
+
+    const a = new ElementHandle(client, text('A'), 5000);
+    const b = new ElementHandle(client, text('B'), 5000);
+
+    // a.and(b).filter(F): intersection first, then filter
+    const result = await a.and(b).filter({ hasText: 'an' }).count();
+    expect(result).toBe(1);
+    const el = await a.and(b).filter({ hasText: 'an' }).first().find();
+    expect(el.text).toBe('Banana');
+
+    // Verify it's different from a.filter(F).and(b) when results would differ:
+    // a.filter({ hasNotText: 'Apple' }) = [e2 Banana, e3 Cherry]
+    // then .and(b) = intersection with [e1, e2] = [e2 Banana]
+    const altResult = await a.filter({ hasNotText: 'Apple' }).and(b).count();
+    expect(altResult).toBe(1); // Only Banana in both
   });
 });

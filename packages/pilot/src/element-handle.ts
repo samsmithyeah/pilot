@@ -33,7 +33,11 @@ export interface FilterOptions {
 interface ElementHandleOptions {
   nthIndex?: number;
   filters?: FilterOptions[];
+  /** Left operand for and() — the full handle `this` was called on. */
+  andSelf?: ElementHandle;
   andHandle?: ElementHandle;
+  /** Left operand for or() — the full handle `this` was called on. */
+  orSelf?: ElementHandle;
   orHandle?: ElementHandle;
   resolvedElementsPromise?: Promise<ElementInfo[]>;
 }
@@ -123,32 +127,24 @@ export class ElementHandle {
 
   // ── Combining selectors (PILOT-17) ──
 
-  /** Return a handle matching elements that satisfy both this and the other handle's selector. */
+  /**
+   * Return a handle matching elements that satisfy both this and the other handle's selector.
+   * `this` (with all its modifiers) becomes the left operand, preserving call order.
+   */
   and(other: ElementHandle): ElementHandle {
-    if (this._options.andHandle) {
-      // Support chaining: a.and(b).and(c) → a.and(b.and(c))
-      return new ElementHandle(this._client, this._selector, this._timeoutMs, {
-        ...this._options,
-        andHandle: this._options.andHandle.and(other),
-      });
-    }
     return new ElementHandle(this._client, this._selector, this._timeoutMs, {
-      ...this._options,
+      andSelf: this,
       andHandle: other,
     });
   }
 
-  /** Return a handle matching elements that satisfy either this or the other handle's selector. */
+  /**
+   * Return a handle matching elements that satisfy either this or the other handle's selector.
+   * `this` (with all its modifiers) becomes the left operand, preserving call order.
+   */
   or(other: ElementHandle): ElementHandle {
-    if (this._options.orHandle) {
-      // Support chaining: a.or(b).or(c) → a.or(b.or(c))
-      return new ElementHandle(this._client, this._selector, this._timeoutMs, {
-        ...this._options,
-        orHandle: this._options.orHandle.or(other),
-      });
-    }
     return new ElementHandle(this._client, this._selector, this._timeoutMs, {
-      ...this._options,
+      orSelf: this,
       orHandle: other,
     });
   }
@@ -167,40 +163,53 @@ export class ElementHandle {
 
   /** @internal — Resolve all matching elements. Recursively resolves operands for and/or, then applies filters. */
   async _resolveAll(): Promise<ElementInfo[]> {
-    // and() is checked before or() to give AND higher precedence,
-    // matching standard boolean operator semantics.
     if (this._options.andHandle) {
-      const { andHandle, ...rest } = this._options;
-      const selfHandle = new ElementHandle(this._client, this._selector, this._timeoutMs, rest);
+      const left = this._options.andSelf ??
+        new ElementHandle(this._client, this._selector, this._timeoutMs);
 
-      const [selfElements, otherElements] = await Promise.all([
-        selfHandle._resolveAll(),
-        andHandle._resolveAll(),
+      const [leftEls, rightEls] = await Promise.all([
+        left._resolveAll(),
+        this._options.andHandle._resolveAll(),
       ]);
 
-      const otherIds = new Set(otherElements.map((e) => e.elementId));
-      return selfElements.filter((e) => otherIds.has(e.elementId));
+      const rightIds = new Set(rightEls.map((e) => e.elementId));
+      let elements = leftEls.filter((e) => rightIds.has(e.elementId));
+
+      // Apply post-combination filters (from .and(b).filter(F))
+      if (this._options.filters) {
+        for (const f of this._options.filters) {
+          elements = await this._applyFilter(elements, f);
+        }
+      }
+      return elements;
     }
 
     if (this._options.orHandle) {
-      const { orHandle, ...rest } = this._options;
-      const selfHandle = new ElementHandle(this._client, this._selector, this._timeoutMs, rest);
+      const left = this._options.orSelf ??
+        new ElementHandle(this._client, this._selector, this._timeoutMs);
 
-      const [selfElements, otherElements] = await Promise.all([
-        selfHandle._resolveAll(),
-        orHandle._resolveAll(),
+      const [leftEls, rightEls] = await Promise.all([
+        left._resolveAll(),
+        this._options.orHandle._resolveAll(),
       ]);
 
-      const combined = [...selfElements, ...otherElements];
-      return Array.from(
+      const combined = [...leftEls, ...rightEls];
+      let elements = Array.from(
         new Map(combined.map((el) => [el.elementId, el])).values(),
       );
+
+      // Apply post-combination filters (from .or(b).filter(F))
+      if (this._options.filters) {
+        for (const f of this._options.filters) {
+          elements = await this._applyFilter(elements, f);
+        }
+      }
+      return elements;
     }
 
     // Base case: no and/or — resolve selector then apply filters
-    let elements: ElementInfo[];
     const res = await this._client.findElements(this._selector, this._timeoutMs);
-    elements = res.elements ?? [];
+    let elements = res.elements ?? [];
 
     if (this._options.filters) {
       for (const f of this._options.filters) {
@@ -281,14 +290,17 @@ export class ElementHandle {
   }
 
   /**
-   * @internal — Build the best available selector to target a specific resolved element.
-   * Used by action methods on modified handles.
+   * @internal — Build a selector to target a specific resolved element.
+   * Throws if the element has no unique identifying properties.
    */
   private _selectorForElement(info: ElementInfo): Selector {
     if (info.resourceId) return idSelector(info.resourceId);
     if (info.contentDescription) return contentDescSelector(info.contentDescription);
     if (info.text) return textSelector(info.text);
-    return this._selector;
+    throw new Error(
+      'Cannot target element for action: element has no resourceId, contentDescription, or text. ' +
+        'Add accessibility identifiers to your app to use positional/filtered actions.',
+    );
   }
 
   /**
