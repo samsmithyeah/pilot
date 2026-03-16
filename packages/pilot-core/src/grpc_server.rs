@@ -1088,10 +1088,19 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
             Self::validate_activity(&req.activity)?;
         }
 
-        // Clear data first if requested
+        // Clear data first if requested — fail fast if this doesn't succeed,
+        // since launching with stale data would violate the caller's expectation.
         if req.clear_data {
             if let Err(e) = adb::shell(&serial, &format!("pm clear {}", req.package_name)).await {
                 error!(error = %e, "Failed to clear app data before launch");
+                let screenshot = self.error_screenshot().await;
+                return Ok(Response::new(proto::ActionResponse {
+                    request_id,
+                    success: false,
+                    error_type: "CLEAR_DATA_FAILED".to_string(),
+                    error_message: format!("Failed to clear app data: {e}"),
+                    screenshot,
+                }));
             }
         }
 
@@ -1147,12 +1156,12 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
             return Err(Status::invalid_argument("uri is required"));
         }
 
-        // Reject URIs containing shell metacharacters
-        if req.uri.contains('\'') || req.uri.contains(';') || req.uri.contains('`')
-            || req.uri.contains('$') || req.uri.contains('|') || req.uri.contains('\n')
-        {
+        // The URI is passed inside single quotes to `am start`, so only a single
+        // quote itself could break out of the shell string. Other metacharacters
+        // ($, |, ;, `) are treated as literals within single-quoted strings.
+        if req.uri.contains('\'') {
             return Err(Status::invalid_argument(
-                "uri contains invalid characters — shell metacharacters are not allowed",
+                "uri contains an invalid character: single quote (') is not allowed",
             ));
         }
 
@@ -1179,14 +1188,9 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
 
-        // Parse "mResumedActivity: ActivityRecord{... u0 com.example.app/.MainActivity t123}"
-        // The component token looks like "com.example.app/.MainActivity" and follows a "u0" token.
-        let package_name = output
-            .split_whitespace()
-            .find(|s| s.contains('/') && s.contains('.'))
-            .and_then(|s| s.split('/').next())
-            .unwrap_or("")
-            .to_string();
+        let package_name = parse_component_name(&output)
+            .map(|(pkg, _)| pkg)
+            .unwrap_or_default();
 
         Ok(Response::new(proto::GetCurrentPackageResponse {
             request_id,
@@ -1210,20 +1214,9 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
 
-        // Parse "mResumedActivity: ActivityRecord{... u0 com.example.app/.MainActivity t123}"
-        let activity = output
-            .split_whitespace()
-            .find(|s| s.contains('/') && s.contains('.'))
-            .and_then(|s| {
-                let parts: Vec<&str> = s.split('/').collect();
-                if parts.len() >= 2 {
-                    Some(parts[1].trim_end_matches('}'))
-                } else {
-                    None
-                }
-            })
-            .unwrap_or("")
-            .to_string();
+        let activity = parse_component_name(&output)
+            .map(|(_, act)| act)
+            .unwrap_or_default();
 
         Ok(Response::new(proto::GetCurrentActivityResponse {
             request_id,
@@ -1614,6 +1607,32 @@ pub(crate) fn json_float(v: &Value, key: &str) -> f32 {
     v.get(key).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32
 }
 
+/// Parse a component name (package/activity) from `dumpsys activity` output.
+///
+/// The output line looks like:
+///   `mResumedActivity: ActivityRecord{abcdef0 u0 com.example.app/.MainActivity t123}`
+///
+/// Returns `Some((package, activity))` or `None` if parsing fails.
+fn parse_component_name(dumpsys_output: &str) -> Option<(String, String)> {
+    // Look for a token that matches the pattern: word-chars-and-dots / word-chars-and-dots
+    // Component names contain [a-zA-Z0-9._$] separated by a single '/'.
+    for token in dumpsys_output.split_whitespace() {
+        let token = token.trim_end_matches('}');
+        if let Some(slash_pos) = token.find('/') {
+            let pkg = &token[..slash_pos];
+            let act = &token[slash_pos + 1..];
+            // A valid component has a package with at least one dot and a non-empty activity
+            if pkg.contains('.') && !act.is_empty()
+                && pkg.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
+                && act.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '$')
+            {
+                return Some((pkg.to_string(), act.to_string()));
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1916,5 +1935,42 @@ mod tests {
     fn json_bool_missing() {
         let v = json!({});
         assert!(!json_bool(&v, "flag"));
+    }
+
+    // ─── parse_component_name ───
+
+    #[test]
+    fn parse_component_name_typical() {
+        let output = "  mResumedActivity: ActivityRecord{abcdef0 u0 com.example.app/.MainActivity t123}";
+        let (pkg, act) = parse_component_name(output).unwrap();
+        assert_eq!(pkg, "com.example.app");
+        assert_eq!(act, ".MainActivity");
+    }
+
+    #[test]
+    fn parse_component_name_full_activity() {
+        let output = "  mResumedActivity: ActivityRecord{abc u0 com.example.app/com.example.app.settings.ProfileActivity t5}";
+        let (pkg, act) = parse_component_name(output).unwrap();
+        assert_eq!(pkg, "com.example.app");
+        assert_eq!(act, "com.example.app.settings.ProfileActivity");
+    }
+
+    #[test]
+    fn parse_component_name_empty_output() {
+        assert!(parse_component_name("").is_none());
+    }
+
+    #[test]
+    fn parse_component_name_no_match() {
+        assert!(parse_component_name("  mResumedActivity: null").is_none());
+    }
+
+    #[test]
+    fn parse_component_name_ignores_paths() {
+        // Should not match filesystem paths like /data/local/tmp
+        let output = "  mResumedActivity: /data/local/tmp ActivityRecord{abc u0 com.foo/.Bar t1}";
+        let (pkg, act) = parse_component_name(output).unwrap();
+        assert_eq!(pkg, "com.foo");
+        assert_eq!(act, ".Bar");
     }
 }
