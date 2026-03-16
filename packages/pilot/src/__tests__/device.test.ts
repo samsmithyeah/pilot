@@ -54,6 +54,9 @@ function makeMockClient(overrides: Partial<PilotGrpcClient> = {}): PilotGrpcClie
     openQuickSettings: vi.fn(async () => successResponse()),
     setColorScheme: vi.fn(async () => successResponse()),
     getColorScheme: vi.fn(async () => ({ requestId: '1', scheme: 'light' })),
+    wakeDevice: vi.fn(async () => successResponse()),
+    unlockDevice: vi.fn(async () => successResponse()),
+    startAgent: vi.fn(async () => successResponse()),
     ...overrides,
   } as unknown as PilotGrpcClient
 }
@@ -599,5 +602,71 @@ describe('Device.getColorScheme()', () => {
     const device = new Device(client)
     const scheme = await device.getColorScheme()
     expect(scheme).toBe('light')
+  })
+})
+
+// ─── wake() / unlock() ───
+
+describe('Device.wake()', () => {
+  it('delegates to client.wakeDevice', async () => {
+    const wakeDevice = vi.fn(async () => successResponse())
+    const client = makeMockClient({ wakeDevice })
+    const device = new Device(client)
+    await device.wake()
+    expect(wakeDevice).toHaveBeenCalled()
+  })
+
+  it('throws on failure', async () => {
+    const client = makeMockClient({
+      wakeDevice: vi.fn(async () => failureResponse('')),
+    })
+    const device = new Device(client)
+    await expect(device.wake()).rejects.toThrow('Wake device failed')
+  })
+})
+
+describe('Device.unlock()', () => {
+  it('delegates to client.unlockDevice', async () => {
+    const unlockDevice = vi.fn(async () => successResponse())
+    const client = makeMockClient({ unlockDevice })
+    const device = new Device(client)
+    await device.unlock()
+    expect(unlockDevice).toHaveBeenCalled()
+  })
+
+  it('throws on failure', async () => {
+    const client = makeMockClient({
+      unlockDevice: vi.fn(async () => failureResponse('')),
+    })
+    const device = new Device(client)
+    await expect(device.unlock()).rejects.toThrow('Unlock device failed')
+  })
+})
+
+// ─── startAgent() with APK paths ───
+
+describe('Device.startAgent()', () => {
+  it('delegates to client.startAgent with package name', async () => {
+    const startAgent = vi.fn(async () => successResponse())
+    const client = makeMockClient({ startAgent })
+    const device = new Device(client)
+    await device.startAgent('com.example.app')
+    expect(startAgent).toHaveBeenCalledWith('com.example.app', undefined, undefined)
+  })
+
+  it('passes APK paths through', async () => {
+    const startAgent = vi.fn(async () => successResponse())
+    const client = makeMockClient({ startAgent })
+    const device = new Device(client)
+    await device.startAgent('com.example.app', '/path/agent.apk', '/path/test.apk')
+    expect(startAgent).toHaveBeenCalledWith('com.example.app', '/path/agent.apk', '/path/test.apk')
+  })
+
+  it('throws on failure', async () => {
+    const client = makeMockClient({
+      startAgent: vi.fn(async () => failureResponse('Agent not installed')),
+    })
+    const device = new Device(client)
+    await expect(device.startAgent('com.example.app')).rejects.toThrow('Agent not installed')
   })
 })

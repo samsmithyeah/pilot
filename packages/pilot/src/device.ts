@@ -169,8 +169,12 @@ export class Device {
     }
   }
 
-  async startAgent(targetPackage: string): Promise<void> {
-    const res = await this._client.startAgent(targetPackage);
+  async startAgent(
+    targetPackage: string,
+    agentApkPath?: string,
+    agentTestApkPath?: string,
+  ): Promise<void> {
+    const res = await this._client.startAgent(targetPackage, agentApkPath, agentTestApkPath);
     if (!res.success) {
       throw new Error(res.errorMessage || 'Start agent failed');
     }
@@ -276,6 +280,20 @@ export class Device {
     return this._action(
       () => this._client.hideKeyboard(),
       'Hide keyboard failed',
+    );
+  }
+
+  async wake(): Promise<void> {
+    return this._action(
+      () => this._client.wakeDevice(),
+      'Wake device failed',
+    );
+  }
+
+  async unlock(): Promise<void> {
+    return this._action(
+      () => this._client.unlockDevice(),
+      'Unlock device failed',
     );
   }
 

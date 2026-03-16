@@ -335,10 +335,16 @@ export class PilotGrpcClient {
     });
   }
 
-  async startAgent(targetPackage: string): Promise<ActionResponse> {
+  async startAgent(
+    targetPackage: string,
+    agentApkPath?: string,
+    agentTestApkPath?: string,
+  ): Promise<ActionResponse> {
     return this.call<ActionResponse>('startAgent', {
       requestId: requestId(),
       targetPackage,
+      agentApkPath: agentApkPath ?? '',
+      agentTestApkPath: agentTestApkPath ?? '',
     });
   }
 
@@ -553,6 +559,18 @@ export class PilotGrpcClient {
 
   async getColorScheme(): Promise<GetColorSchemeResponse> {
     return this.call<GetColorSchemeResponse>('getColorScheme', {
+      requestId: requestId(),
+    });
+  }
+
+  async wakeDevice(): Promise<ActionResponse> {
+    return this.call<ActionResponse>('wakeDevice', {
+      requestId: requestId(),
+    });
+  }
+
+  async unlockDevice(): Promise<ActionResponse> {
+    return this.call<ActionResponse>('unlockDevice', {
       requestId: requestId(),
     });
   }

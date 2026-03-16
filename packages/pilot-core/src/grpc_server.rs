@@ -759,29 +759,72 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
 
         info!(serial = %serial, "Starting agent connection");
 
-        // If a target package was specified, launch it via am instrument or similar
-        if !req.target_package.is_empty() {
-            let instrument_cmd = format!(
-                "am instrument -w -e targetPackage {} com.pilot.agent/.PilotInstrumentation",
-                req.target_package
-            );
+        // Auto-install agent APKs if not already on device
+        let agent_installed = adb::is_package_installed(&serial, "dev.pilot.agent")
+            .await
+            .unwrap_or(false);
 
-            // Launch instrumentation in the background on the device
-            let bg_cmd = format!("nohup {} > /dev/null 2>&1 &", instrument_cmd);
-            if let Err(e) = adb::shell(&serial, &bg_cmd).await {
-                error!(error = %e, "Failed to start agent instrumentation");
+        if !agent_installed {
+            if req.agent_apk_path.is_empty() || req.agent_test_apk_path.is_empty() {
                 return Ok(Response::new(proto::ActionResponse {
                     request_id,
                     success: false,
-                    error_type: "AGENT_START_FAILED".to_string(),
-                    error_message: e.to_string(),
+                    error_type: "AGENT_NOT_INSTALLED".to_string(),
+                    error_message: "Pilot agent is not installed on the device. \
+                        Set agentApk and agentTestApk in your pilot config, \
+                        or install manually with: adb install <path-to-agent.apk>"
+                        .to_string(),
                     screenshot: Vec::new(),
                 }));
             }
 
-            // Give the agent a moment to start
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            info!("Agent not installed, installing APKs...");
+            if let Err(e) = adb::install_apk(&serial, &req.agent_apk_path).await {
+                return Ok(Response::new(proto::ActionResponse {
+                    request_id,
+                    success: false,
+                    error_type: "AGENT_INSTALL_FAILED".to_string(),
+                    error_message: format!("Failed to install agent APK: {e}"),
+                    screenshot: Vec::new(),
+                }));
+            }
+            if let Err(e) = adb::install_apk(&serial, &req.agent_test_apk_path).await {
+                return Ok(Response::new(proto::ActionResponse {
+                    request_id,
+                    success: false,
+                    error_type: "AGENT_INSTALL_FAILED".to_string(),
+                    error_message: format!("Failed to install agent test APK: {e}"),
+                    screenshot: Vec::new(),
+                }));
+            }
+            info!("Agent APKs installed successfully");
         }
+
+        // Launch the agent instrumentation
+        let instrument_cmd = if req.target_package.is_empty() {
+            "am instrument -w dev.pilot.agent/.PilotAgent".to_string()
+        } else {
+            format!(
+                "am instrument -w -e targetPackage {} dev.pilot.agent/.PilotAgent",
+                req.target_package
+            )
+        };
+
+        // Launch in background on device
+        let bg_cmd = format!("nohup {} > /dev/null 2>&1 &", instrument_cmd);
+        if let Err(e) = adb::shell(&serial, &bg_cmd).await {
+            error!(error = %e, "Failed to start agent instrumentation");
+            return Ok(Response::new(proto::ActionResponse {
+                request_id,
+                success: false,
+                error_type: "AGENT_START_FAILED".to_string(),
+                error_message: e.to_string(),
+                screenshot: Vec::new(),
+            }));
+        }
+
+        // Give the agent a moment to start
+        tokio::time::sleep(Duration::from_secs(2)).await;
 
         // Connect to the agent
         let mut agent = self.agent.write().await;
@@ -1530,6 +1573,46 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         Ok(Response::new(proto::GetColorSchemeResponse {
             request_id,
             scheme: scheme.to_string(),
+        }))
+    }
+
+    #[instrument(skip_all, fields(request_id))]
+    async fn wake_device(
+        &self,
+        request: Request<proto::WakeDeviceRequest>,
+    ) -> Result<Response<proto::ActionResponse>, Status> {
+        let req = request.into_inner();
+        let request_id = Self::request_id(&req.request_id);
+        self.adb_action(request_id, "input keyevent KEYCODE_WAKEUP")
+            .await
+    }
+
+    #[instrument(skip_all, fields(request_id))]
+    async fn unlock_device(
+        &self,
+        request: Request<proto::UnlockDeviceRequest>,
+    ) -> Result<Response<proto::ActionResponse>, Status> {
+        let req = request.into_inner();
+        let request_id = Self::request_id(&req.request_id);
+        let serial = self.active_serial().await?;
+
+        // Wake the screen first
+        let _ = adb::shell_lenient(&serial, "input keyevent KEYCODE_WAKEUP").await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Dismiss non-secure lock screen (KEYCODE_MENU)
+        let _ = adb::shell_lenient(&serial, "input keyevent 82").await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Swipe up as fallback for swipe-to-unlock screens
+        let _ = adb::shell_lenient(&serial, "input swipe 540 1800 540 800 300").await;
+
+        Ok(Response::new(proto::ActionResponse {
+            request_id,
+            success: true,
+            error_type: String::new(),
+            error_message: String::new(),
+            screenshot: Vec::new(),
         }))
     }
 }

@@ -469,6 +469,22 @@ Hide the soft keyboard if it is visible.
 await device.hideKeyboard();
 ```
 
+### `device.wake(): Promise<void>`
+
+Wake the device screen if it is off.
+
+```typescript
+await device.wake();
+```
+
+### `device.unlock(): Promise<void>`
+
+Wake the screen and dismiss the lock screen. Works with non-secure lock screens (no PIN/pattern). Useful for CI and emulator setups.
+
+```typescript
+await device.unlock();
+```
+
 ### `device.pressHome(): Promise<void>`
 
 Press the home button. Convenience method equivalent to `device.pressKey("HOME")`.

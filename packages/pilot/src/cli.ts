@@ -340,15 +340,26 @@ async function main(): Promise<void> {
     }
   }
 
-  // Connect to agent if APK is specified
-  if (config.apk) {
-    try {
-      // Extract package name from APK path or use a default
-      await device.startAgent('');
-      console.log(dim('Agent connected.'));
-    } catch {
-      // Agent connection is best-effort at this stage
-    }
+  // Wake and unlock device screen
+  try {
+    await device.wake();
+    await device.unlock();
+    console.log(dim('Device screen unlocked.'));
+  } catch {
+    // Non-fatal — device might already be awake/unlocked
+  }
+
+  // Start agent (with auto-install if APK paths configured)
+  try {
+    await device.startAgent(
+      '',
+      config.agentApk,
+      config.agentTestApk,
+    );
+    console.log(dim('Agent connected.'));
+  } catch (err) {
+    console.error(red(`Failed to start agent: ${err}`));
+    process.exit(1);
   }
 
   // Run tests

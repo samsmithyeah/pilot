@@ -170,6 +170,13 @@ pub async fn screencap(serial: &str) -> Result<Vec<u8>> {
     Ok(png)
 }
 
+/// Check if a package is installed on the device.
+#[instrument]
+pub async fn is_package_installed(serial: &str, package: &str) -> Result<bool> {
+    let stdout = shell_lenient(serial, &format!("pm list packages {package}")).await?;
+    Ok(stdout.contains(&format!("package:{package}")))
+}
+
 /// Execute a shell command on the device, returning stdout as a String.
 /// Unlike `shell()`, this does not fail on non-zero exit codes —
 /// it returns stdout regardless, which is needed for commands like
