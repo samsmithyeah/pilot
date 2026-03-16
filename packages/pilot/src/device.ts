@@ -7,7 +7,17 @@
  */
 
 import type { Selector } from './selectors.js';
-import { PilotGrpcClient, type ActionResponse, type SwipeOptions, type ScrollOptions, type ScreenshotResponse } from './grpc-client.js';
+import {
+  PilotGrpcClient,
+  type ActionResponse,
+  type SwipeOptions,
+  type ScrollOptions,
+  type ScreenshotResponse,
+  type LaunchAppOptions,
+  type AppState,
+  type Orientation,
+  type ColorScheme,
+} from './grpc-client.js';
 import { ElementHandle } from './element-handle.js';
 import type { PilotConfig } from './config.js';
 
@@ -164,6 +174,143 @@ export class Device {
     if (!res.success) {
       throw new Error(res.errorMessage || 'Start agent failed');
     }
+  }
+
+  // ── Device Management (PILOT-10) ──
+
+  async launchApp(packageName: string, options?: LaunchAppOptions): Promise<void> {
+    return this._action(
+      () => this._client.launchApp(packageName, options),
+      'Launch app failed',
+    );
+  }
+
+  async openDeepLink(uri: string): Promise<void> {
+    return this._action(
+      () => this._client.openDeepLink(uri),
+      'Open deep link failed',
+    );
+  }
+
+  async currentPackage(): Promise<string> {
+    const res = await this._client.getCurrentPackage();
+    return res.packageName;
+  }
+
+  async currentActivity(): Promise<string> {
+    const res = await this._client.getCurrentActivity();
+    return res.activity;
+  }
+
+  async terminateApp(packageName: string): Promise<void> {
+    return this._action(
+      () => this._client.terminateApp(packageName),
+      'Terminate app failed',
+    );
+  }
+
+  async getAppState(packageName: string): Promise<AppState> {
+    const res = await this._client.getAppState(packageName);
+    return res.state as AppState;
+  }
+
+  async sendToBackground(): Promise<void> {
+    return this.pressKey('HOME');
+  }
+
+  async bringToForeground(packageName: string): Promise<void> {
+    return this.launchApp(packageName);
+  }
+
+  async clearAppData(packageName: string): Promise<void> {
+    return this._action(
+      () => this._client.clearAppData(packageName),
+      'Clear app data failed',
+    );
+  }
+
+  async grantPermission(packageName: string, permission: string): Promise<void> {
+    return this._action(
+      () => this._client.grantPermission(packageName, permission),
+      'Grant permission failed',
+    );
+  }
+
+  async revokePermission(packageName: string, permission: string): Promise<void> {
+    return this._action(
+      () => this._client.revokePermission(packageName, permission),
+      'Revoke permission failed',
+    );
+  }
+
+  async setClipboard(text: string): Promise<void> {
+    return this._action(
+      () => this._client.setClipboard(text),
+      'Set clipboard failed',
+    );
+  }
+
+  async getClipboard(): Promise<string> {
+    const res = await this._client.getClipboard();
+    return res.text;
+  }
+
+  async setOrientation(orientation: Orientation): Promise<void> {
+    return this._action(
+      () => this._client.setOrientation(orientation),
+      'Set orientation failed',
+    );
+  }
+
+  async getOrientation(): Promise<Orientation> {
+    const res = await this._client.getOrientation();
+    return res.orientation as Orientation;
+  }
+
+  async isKeyboardShown(): Promise<boolean> {
+    const res = await this._client.isKeyboardShown();
+    return res.shown;
+  }
+
+  async hideKeyboard(): Promise<void> {
+    return this._action(
+      () => this._client.hideKeyboard(),
+      'Hide keyboard failed',
+    );
+  }
+
+  async pressHome(): Promise<void> {
+    return this.pressKey('HOME');
+  }
+
+  async openNotifications(): Promise<void> {
+    return this._action(
+      () => this._client.openNotifications(),
+      'Open notifications failed',
+    );
+  }
+
+  async openQuickSettings(): Promise<void> {
+    return this._action(
+      () => this._client.openQuickSettings(),
+      'Open quick settings failed',
+    );
+  }
+
+  async pressRecentApps(): Promise<void> {
+    return this.pressKey('APP_SWITCH');
+  }
+
+  async setColorScheme(scheme: ColorScheme): Promise<void> {
+    return this._action(
+      () => this._client.setColorScheme(scheme),
+      'Set color scheme failed',
+    );
+  }
+
+  async getColorScheme(): Promise<ColorScheme> {
+    const res = await this._client.getColorScheme();
+    return res.scheme as ColorScheme;
   }
 
   close(): void {

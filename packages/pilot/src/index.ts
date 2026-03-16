@@ -23,6 +23,9 @@ export {
 // Device
 export { Device, type DragOptions, type PinchOptions } from './device.js';
 
+// Device management types
+export type { LaunchAppOptions, AppState, Orientation, ColorScheme } from './grpc-client.js';
+
 // ElementHandle
 export { ElementHandle, type FilterOptions, type BoundingBox } from './element-handle.js';
 

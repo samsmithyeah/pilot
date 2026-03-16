@@ -84,6 +84,53 @@ export interface PingResponse {
   agentConnected: boolean;
 }
 
+// ─── Device Management (PILOT-10) ───
+
+export interface GetCurrentPackageResponse {
+  requestId: string;
+  packageName: string;
+}
+
+export interface GetCurrentActivityResponse {
+  requestId: string;
+  activity: string;
+}
+
+export interface GetAppStateResponse {
+  requestId: string;
+  state: string;
+}
+
+export interface GetClipboardResponse {
+  requestId: string;
+  text: string;
+}
+
+export interface GetOrientationResponse {
+  requestId: string;
+  orientation: string;
+}
+
+export interface IsKeyboardShownResponse {
+  requestId: string;
+  shown: boolean;
+}
+
+export interface GetColorSchemeResponse {
+  requestId: string;
+  scheme: string;
+}
+
+export type AppState = 'not_installed' | 'stopped' | 'background' | 'foreground';
+export type Orientation = 'portrait' | 'landscape';
+export type ColorScheme = 'dark' | 'light';
+
+export interface LaunchAppOptions {
+  activity?: string;
+  clearData?: boolean;
+  waitForIdle?: boolean;
+}
+
 // ─── Swipe / scroll options exposed to the SDK ───
 
 export interface SwipeOptions {
@@ -376,6 +423,137 @@ export class PilotGrpcClient {
       requestId: requestId(),
       selector: this.selectorProto(selector),
       timeoutMs: timeoutMs ?? 0,
+    });
+  }
+
+  // ── Device Management (PILOT-10) ──
+
+  async launchApp(packageName: string, options?: LaunchAppOptions): Promise<ActionResponse> {
+    return this.call<ActionResponse>('launchApp', {
+      requestId: requestId(),
+      packageName,
+      activity: options?.activity ?? '',
+      clearData: options?.clearData ?? false,
+      waitForIdle: options?.waitForIdle ?? false,
+    });
+  }
+
+  async openDeepLink(uri: string): Promise<ActionResponse> {
+    return this.call<ActionResponse>('openDeepLink', {
+      requestId: requestId(),
+      uri,
+    });
+  }
+
+  async getCurrentPackage(): Promise<GetCurrentPackageResponse> {
+    return this.call<GetCurrentPackageResponse>('getCurrentPackage', {
+      requestId: requestId(),
+    });
+  }
+
+  async getCurrentActivity(): Promise<GetCurrentActivityResponse> {
+    return this.call<GetCurrentActivityResponse>('getCurrentActivity', {
+      requestId: requestId(),
+    });
+  }
+
+  async terminateApp(packageName: string): Promise<ActionResponse> {
+    return this.call<ActionResponse>('terminateApp', {
+      requestId: requestId(),
+      packageName,
+    });
+  }
+
+  async getAppState(packageName: string): Promise<GetAppStateResponse> {
+    return this.call<GetAppStateResponse>('getAppState', {
+      requestId: requestId(),
+      packageName,
+    });
+  }
+
+  async clearAppData(packageName: string): Promise<ActionResponse> {
+    return this.call<ActionResponse>('clearAppData', {
+      requestId: requestId(),
+      packageName,
+    });
+  }
+
+  async grantPermission(packageName: string, permission: string): Promise<ActionResponse> {
+    return this.call<ActionResponse>('grantPermission', {
+      requestId: requestId(),
+      packageName,
+      permission,
+    });
+  }
+
+  async revokePermission(packageName: string, permission: string): Promise<ActionResponse> {
+    return this.call<ActionResponse>('revokePermission', {
+      requestId: requestId(),
+      packageName,
+      permission,
+    });
+  }
+
+  async setClipboard(text: string): Promise<ActionResponse> {
+    return this.call<ActionResponse>('setClipboard', {
+      requestId: requestId(),
+      text,
+    });
+  }
+
+  async getClipboard(): Promise<GetClipboardResponse> {
+    return this.call<GetClipboardResponse>('getClipboard', {
+      requestId: requestId(),
+    });
+  }
+
+  async setOrientation(orientation: string): Promise<ActionResponse> {
+    return this.call<ActionResponse>('setOrientation', {
+      requestId: requestId(),
+      orientation,
+    });
+  }
+
+  async getOrientation(): Promise<GetOrientationResponse> {
+    return this.call<GetOrientationResponse>('getOrientation', {
+      requestId: requestId(),
+    });
+  }
+
+  async isKeyboardShown(): Promise<IsKeyboardShownResponse> {
+    return this.call<IsKeyboardShownResponse>('isKeyboardShown', {
+      requestId: requestId(),
+    });
+  }
+
+  async hideKeyboard(): Promise<ActionResponse> {
+    return this.call<ActionResponse>('hideKeyboard', {
+      requestId: requestId(),
+    });
+  }
+
+  async openNotifications(): Promise<ActionResponse> {
+    return this.call<ActionResponse>('openNotifications', {
+      requestId: requestId(),
+    });
+  }
+
+  async openQuickSettings(): Promise<ActionResponse> {
+    return this.call<ActionResponse>('openQuickSettings', {
+      requestId: requestId(),
+    });
+  }
+
+  async setColorScheme(scheme: string): Promise<ActionResponse> {
+    return this.call<ActionResponse>('setColorScheme', {
+      requestId: requestId(),
+      scheme,
+    });
+  }
+
+  async getColorScheme(): Promise<GetColorSchemeResponse> {
+    return this.call<GetColorSchemeResponse>('getColorScheme', {
+      requestId: requestId(),
     });
   }
 

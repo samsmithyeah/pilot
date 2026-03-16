@@ -170,6 +170,25 @@ pub async fn screencap(serial: &str) -> Result<Vec<u8>> {
     Ok(png)
 }
 
+/// Execute a shell command on the device, returning stdout as a String.
+/// Unlike `shell()`, this does not fail on non-zero exit codes —
+/// it returns stdout regardless, which is needed for commands like
+/// `dumpsys` that may write to stdout before exiting with an error.
+#[instrument]
+pub async fn shell_lenient(serial: &str, command: &str) -> Result<String> {
+    let mut cmd = Command::new("adb");
+    cmd.arg("-s").arg(serial).arg("shell").arg(command);
+
+    debug!(serial = serial, command = command, "Running adb shell (lenient)");
+
+    let output = tokio::time::timeout(DEFAULT_TIMEOUT, cmd.output())
+        .await
+        .map_err(|_| anyhow!("adb command timed out after {DEFAULT_TIMEOUT:?}"))?
+        .context("Failed to execute adb")?;
+
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

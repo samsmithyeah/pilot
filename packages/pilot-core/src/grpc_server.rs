@@ -120,6 +120,34 @@ impl PilotServiceImpl {
             }
         }
     }
+
+    /// Run an ADB shell command and return a success/failure ActionResponse.
+    async fn adb_action(
+        &self,
+        request_id: String,
+        command: &str,
+    ) -> Result<Response<proto::ActionResponse>, Status> {
+        let serial = self.active_serial().await?;
+        match adb::shell(&serial, command).await {
+            Ok(_) => Ok(Response::new(proto::ActionResponse {
+                request_id,
+                success: true,
+                error_type: String::new(),
+                error_message: String::new(),
+                screenshot: Vec::new(),
+            })),
+            Err(e) => {
+                let screenshot = self.error_screenshot().await;
+                Ok(Response::new(proto::ActionResponse {
+                    request_id,
+                    success: false,
+                    error_type: "ADB_COMMAND_FAILED".to_string(),
+                    error_message: e.to_string(),
+                    screenshot,
+                }))
+            }
+        }
+    }
 }
 
 /// Convert a protobuf Selector into a JSON value for the agent protocol.
@@ -993,6 +1021,465 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
                 error_message: status.message().to_string(),
             })),
         }
+    }
+
+    // ── Device Management (PILOT-10) ──
+
+    #[instrument(skip_all, fields(request_id))]
+    async fn launch_app(
+        &self,
+        request: Request<proto::LaunchAppRequest>,
+    ) -> Result<Response<proto::ActionResponse>, Status> {
+        let req = request.into_inner();
+        let request_id = Self::request_id(&req.request_id);
+        let serial = self.active_serial().await?;
+
+        if req.package_name.is_empty() {
+            return Err(Status::invalid_argument("package_name is required"));
+        }
+
+        // Clear data first if requested
+        if req.clear_data {
+            if let Err(e) = adb::shell(&serial, &format!("pm clear {}", req.package_name)).await {
+                error!(error = %e, "Failed to clear app data before launch");
+            }
+        }
+
+        // Build am start command
+        let cmd = if req.activity.is_empty() {
+            format!(
+                "monkey -p {} -c android.intent.category.LAUNCHER 1",
+                req.package_name
+            )
+        } else {
+            format!("am start -n {}/{}", req.package_name, req.activity)
+        };
+
+        match adb::shell(&serial, &cmd).await {
+            Ok(_) => {
+                if req.wait_for_idle {
+                    // Give the app a moment to settle, then send waitForIdle to the agent
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+                Ok(Response::new(proto::ActionResponse {
+                    request_id,
+                    success: true,
+                    error_type: String::new(),
+                    error_message: String::new(),
+                    screenshot: Vec::new(),
+                }))
+            }
+            Err(e) => {
+                let screenshot = self.error_screenshot().await;
+                Ok(Response::new(proto::ActionResponse {
+                    request_id,
+                    success: false,
+                    error_type: "LAUNCH_FAILED".to_string(),
+                    error_message: e.to_string(),
+                    screenshot,
+                }))
+            }
+        }
+    }
+
+    #[instrument(skip_all, fields(request_id))]
+    async fn open_deep_link(
+        &self,
+        request: Request<proto::OpenDeepLinkRequest>,
+    ) -> Result<Response<proto::ActionResponse>, Status> {
+        let req = request.into_inner();
+        let request_id = Self::request_id(&req.request_id);
+
+        if req.uri.is_empty() {
+            return Err(Status::invalid_argument("uri is required"));
+        }
+
+        let cmd = format!(
+            "am start -a android.intent.action.VIEW -d '{}'",
+            req.uri
+        );
+        self.adb_action(request_id, &cmd).await
+    }
+
+    #[instrument(skip_all, fields(request_id))]
+    async fn get_current_package(
+        &self,
+        request: Request<proto::GetCurrentPackageRequest>,
+    ) -> Result<Response<proto::GetCurrentPackageResponse>, Status> {
+        let req = request.into_inner();
+        let request_id = Self::request_id(&req.request_id);
+        let serial = self.active_serial().await?;
+
+        let output = adb::shell(&serial, "dumpsys activity activities | grep mResumedActivity")
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        // Parse "mResumedActivity: ActivityRecord{... com.example.app/.MainActivity ...}"
+        let package_name = output
+            .split_whitespace()
+            .find(|s| s.contains('/'))
+            .and_then(|s| s.split('/').next())
+            .unwrap_or("")
+            .to_string();
+
+        Ok(Response::new(proto::GetCurrentPackageResponse {
+            request_id,
+            package_name,
+        }))
+    }
+
+    #[instrument(skip_all, fields(request_id))]
+    async fn get_current_activity(
+        &self,
+        request: Request<proto::GetCurrentActivityRequest>,
+    ) -> Result<Response<proto::GetCurrentActivityResponse>, Status> {
+        let req = request.into_inner();
+        let request_id = Self::request_id(&req.request_id);
+        let serial = self.active_serial().await?;
+
+        let output = adb::shell(&serial, "dumpsys activity activities | grep mResumedActivity")
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        // Parse "mResumedActivity: ActivityRecord{... com.example.app/.MainActivity ...}"
+        let activity = output
+            .split_whitespace()
+            .find(|s| s.contains('/'))
+            .and_then(|s| {
+                let parts: Vec<&str> = s.split('/').collect();
+                if parts.len() >= 2 {
+                    Some(parts[1].trim_end_matches('}'))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or("")
+            .to_string();
+
+        Ok(Response::new(proto::GetCurrentActivityResponse {
+            request_id,
+            activity,
+        }))
+    }
+
+    #[instrument(skip_all, fields(request_id))]
+    async fn terminate_app(
+        &self,
+        request: Request<proto::TerminateAppRequest>,
+    ) -> Result<Response<proto::ActionResponse>, Status> {
+        let req = request.into_inner();
+        let request_id = Self::request_id(&req.request_id);
+
+        if req.package_name.is_empty() {
+            return Err(Status::invalid_argument("package_name is required"));
+        }
+
+        let cmd = format!("am force-stop {}", req.package_name);
+        self.adb_action(request_id, &cmd).await
+    }
+
+    #[instrument(skip_all, fields(request_id))]
+    async fn get_app_state(
+        &self,
+        request: Request<proto::GetAppStateRequest>,
+    ) -> Result<Response<proto::GetAppStateResponse>, Status> {
+        let req = request.into_inner();
+        let request_id = Self::request_id(&req.request_id);
+        let serial = self.active_serial().await?;
+
+        if req.package_name.is_empty() {
+            return Err(Status::invalid_argument("package_name is required"));
+        }
+
+        // Check if app is installed
+        let installed = adb::shell_lenient(
+            &serial,
+            &format!("pm list packages {}", req.package_name),
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+        if !installed.contains(&req.package_name) {
+            return Ok(Response::new(proto::GetAppStateResponse {
+                request_id,
+                state: "not_installed".to_string(),
+            }));
+        }
+
+        // Check if app process is running and in foreground
+        let resumed = adb::shell_lenient(
+            &serial,
+            "dumpsys activity activities | grep mResumedActivity",
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+        if resumed.contains(&req.package_name) {
+            return Ok(Response::new(proto::GetAppStateResponse {
+                request_id,
+                state: "foreground".to_string(),
+            }));
+        }
+
+        // Check if process exists at all
+        let procs = adb::shell_lenient(
+            &serial,
+            &format!("pidof {}", req.package_name),
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+        let state = if procs.trim().is_empty() {
+            "stopped"
+        } else {
+            "background"
+        };
+
+        Ok(Response::new(proto::GetAppStateResponse {
+            request_id,
+            state: state.to_string(),
+        }))
+    }
+
+    #[instrument(skip_all, fields(request_id))]
+    async fn clear_app_data(
+        &self,
+        request: Request<proto::ClearAppDataRequest>,
+    ) -> Result<Response<proto::ActionResponse>, Status> {
+        let req = request.into_inner();
+        let request_id = Self::request_id(&req.request_id);
+
+        if req.package_name.is_empty() {
+            return Err(Status::invalid_argument("package_name is required"));
+        }
+
+        let cmd = format!("pm clear {}", req.package_name);
+        self.adb_action(request_id, &cmd).await
+    }
+
+    #[instrument(skip_all, fields(request_id))]
+    async fn grant_permission(
+        &self,
+        request: Request<proto::GrantPermissionRequest>,
+    ) -> Result<Response<proto::ActionResponse>, Status> {
+        let req = request.into_inner();
+        let request_id = Self::request_id(&req.request_id);
+
+        if req.package_name.is_empty() {
+            return Err(Status::invalid_argument("package_name is required"));
+        }
+        if req.permission.is_empty() {
+            return Err(Status::invalid_argument("permission is required"));
+        }
+
+        let cmd = format!("pm grant {} {}", req.package_name, req.permission);
+        self.adb_action(request_id, &cmd).await
+    }
+
+    #[instrument(skip_all, fields(request_id))]
+    async fn revoke_permission(
+        &self,
+        request: Request<proto::RevokePermissionRequest>,
+    ) -> Result<Response<proto::ActionResponse>, Status> {
+        let req = request.into_inner();
+        let request_id = Self::request_id(&req.request_id);
+
+        if req.package_name.is_empty() {
+            return Err(Status::invalid_argument("package_name is required"));
+        }
+        if req.permission.is_empty() {
+            return Err(Status::invalid_argument("permission is required"));
+        }
+
+        let cmd = format!("pm revoke {} {}", req.package_name, req.permission);
+        self.adb_action(request_id, &cmd).await
+    }
+
+    #[instrument(skip_all, fields(request_id))]
+    async fn set_clipboard(
+        &self,
+        request: Request<proto::SetClipboardRequest>,
+    ) -> Result<Response<proto::ActionResponse>, Status> {
+        let req = request.into_inner();
+        let request_id = Self::request_id(&req.request_id);
+
+        let cmd = format!("am broadcast -a clipper.set -e text '{}'", req.text.replace('\'', "'\\''"));
+        self.adb_action(request_id, &cmd).await
+    }
+
+    #[instrument(skip_all, fields(request_id))]
+    async fn get_clipboard(
+        &self,
+        request: Request<proto::GetClipboardRequest>,
+    ) -> Result<Response<proto::GetClipboardResponse>, Status> {
+        let req = request.into_inner();
+        let request_id = Self::request_id(&req.request_id);
+        let serial = self.active_serial().await?;
+
+        let output = adb::shell_lenient(
+            &serial,
+            "am broadcast -a clipper.get 2>/dev/null | grep -o 'data=\"[^\"]*\"' | sed 's/data=\"//;s/\"$//'",
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(proto::GetClipboardResponse {
+            request_id,
+            text: output.trim().to_string(),
+        }))
+    }
+
+    #[instrument(skip_all, fields(request_id))]
+    async fn set_orientation(
+        &self,
+        request: Request<proto::SetOrientationRequest>,
+    ) -> Result<Response<proto::ActionResponse>, Status> {
+        let req = request.into_inner();
+        let request_id = Self::request_id(&req.request_id);
+        let serial = self.active_serial().await?;
+
+        let rotation = match req.orientation.as_str() {
+            "portrait" => "0",
+            "landscape" => "1",
+            other => {
+                return Err(Status::invalid_argument(format!(
+                    "orientation must be 'portrait' or 'landscape', got '{other}'"
+                )));
+            }
+        };
+
+        // Disable auto-rotate and set rotation
+        if let Err(e) = adb::shell(&serial, "settings put system accelerometer_rotation 0").await {
+            error!(error = %e, "Failed to disable auto-rotate");
+        }
+
+        let cmd = format!("settings put system user_rotation {rotation}");
+        self.adb_action(request_id, &cmd).await
+    }
+
+    #[instrument(skip_all, fields(request_id))]
+    async fn get_orientation(
+        &self,
+        request: Request<proto::GetOrientationRequest>,
+    ) -> Result<Response<proto::GetOrientationResponse>, Status> {
+        let req = request.into_inner();
+        let request_id = Self::request_id(&req.request_id);
+        let serial = self.active_serial().await?;
+
+        let output = adb::shell(&serial, "settings get system user_rotation")
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let orientation = match output.trim() {
+            "1" | "3" => "landscape",
+            _ => "portrait",
+        };
+
+        Ok(Response::new(proto::GetOrientationResponse {
+            request_id,
+            orientation: orientation.to_string(),
+        }))
+    }
+
+    #[instrument(skip_all, fields(request_id))]
+    async fn is_keyboard_shown(
+        &self,
+        request: Request<proto::IsKeyboardShownRequest>,
+    ) -> Result<Response<proto::IsKeyboardShownResponse>, Status> {
+        let req = request.into_inner();
+        let request_id = Self::request_id(&req.request_id);
+        let serial = self.active_serial().await?;
+
+        let output = adb::shell_lenient(
+            &serial,
+            "dumpsys input_method | grep mInputShown",
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+        let shown = output.contains("mInputShown=true");
+
+        Ok(Response::new(proto::IsKeyboardShownResponse {
+            request_id,
+            shown,
+        }))
+    }
+
+    #[instrument(skip_all, fields(request_id))]
+    async fn hide_keyboard(
+        &self,
+        request: Request<proto::HideKeyboardRequest>,
+    ) -> Result<Response<proto::ActionResponse>, Status> {
+        let req = request.into_inner();
+        let request_id = Self::request_id(&req.request_id);
+        self.adb_action(request_id, "input keyevent KEYCODE_ESCAPE").await
+    }
+
+    #[instrument(skip_all, fields(request_id))]
+    async fn open_notifications(
+        &self,
+        request: Request<proto::OpenNotificationsRequest>,
+    ) -> Result<Response<proto::ActionResponse>, Status> {
+        let req = request.into_inner();
+        let request_id = Self::request_id(&req.request_id);
+        self.adb_action(request_id, "cmd statusbar expand-notifications").await
+    }
+
+    #[instrument(skip_all, fields(request_id))]
+    async fn open_quick_settings(
+        &self,
+        request: Request<proto::OpenQuickSettingsRequest>,
+    ) -> Result<Response<proto::ActionResponse>, Status> {
+        let req = request.into_inner();
+        let request_id = Self::request_id(&req.request_id);
+        self.adb_action(request_id, "cmd statusbar expand-settings").await
+    }
+
+    #[instrument(skip_all, fields(request_id))]
+    async fn set_color_scheme(
+        &self,
+        request: Request<proto::SetColorSchemeRequest>,
+    ) -> Result<Response<proto::ActionResponse>, Status> {
+        let req = request.into_inner();
+        let request_id = Self::request_id(&req.request_id);
+
+        let mode = match req.scheme.as_str() {
+            "dark" => "yes",
+            "light" => "no",
+            other => {
+                return Err(Status::invalid_argument(format!(
+                    "scheme must be 'dark' or 'light', got '{other}'"
+                )));
+            }
+        };
+
+        let cmd = format!("cmd uimode night {mode}");
+        self.adb_action(request_id, &cmd).await
+    }
+
+    #[instrument(skip_all, fields(request_id))]
+    async fn get_color_scheme(
+        &self,
+        request: Request<proto::GetColorSchemeRequest>,
+    ) -> Result<Response<proto::GetColorSchemeResponse>, Status> {
+        let req = request.into_inner();
+        let request_id = Self::request_id(&req.request_id);
+        let serial = self.active_serial().await?;
+
+        let output = adb::shell_lenient(&serial, "cmd uimode night")
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let scheme = if output.contains("Night mode: yes") {
+            "dark"
+        } else {
+            "light"
+        };
+
+        Ok(Response::new(proto::GetColorSchemeResponse {
+            request_id,
+            scheme: scheme.to_string(),
+        }))
     }
 }
 
