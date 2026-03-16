@@ -1,7 +1,7 @@
 {
   "private": true,
   "type": "module",
-  "imports": {
-    "pilot": "../packages/pilot/dist/index.js"
+  "dependencies": {
+    "pilot": "file:../packages/pilot"
   }
 }

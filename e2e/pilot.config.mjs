@@ -1,4 +1,4 @@
-import { defineConfig } from "../packages/pilot/dist/config.js"
+import { defineConfig } from "pilot"
 
 export default defineConfig({
   timeout: 30_000,
