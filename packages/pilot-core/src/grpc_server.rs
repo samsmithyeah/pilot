@@ -1182,7 +1182,7 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
 
         let output = adb::shell_lenient(
             &serial,
-            "dumpsys activity activities | grep mResumedActivity",
+            "dumpsys activity activities | grep -E 'mResumedActivity|ResumedActivity|topResumedActivity'",
         )
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
@@ -1208,7 +1208,7 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
 
         let output = adb::shell_lenient(
             &serial,
-            "dumpsys activity activities | grep mResumedActivity",
+            "dumpsys activity activities | grep -E 'mResumedActivity|ResumedActivity|topResumedActivity'",
         )
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
@@ -1264,7 +1264,7 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         // Check if app process is running and in foreground
         let resumed = adb::shell_lenient(
             &serial,
-            "dumpsys activity activities | grep mResumedActivity",
+            "dumpsys activity activities | grep -E 'mResumedActivity|ResumedActivity|topResumedActivity'",
         )
         .await
         .map_err(|e| Status::internal(e.to_string()))?;

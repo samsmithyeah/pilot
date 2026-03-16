@@ -3,10 +3,14 @@ package dev.pilot.agent
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.util.Base64
 import android.util.Log
 import androidx.test.uiautomator.UiDevice
 import org.json.JSONObject
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * Routes incoming JSON commands to the appropriate handler.
@@ -27,6 +31,10 @@ class CommandHandler(
     companion object {
         private const val TAG = "PilotCommand"
     }
+
+    /** Cache of last clipboard text set via setClipboard, used as fallback on Android 13+. */
+    @Volatile
+    private var lastClipboardText = ""
 
     fun handle(rawJson: String): String {
         val json =
@@ -311,15 +319,34 @@ class CommandHandler(
 
             "setClipboard" -> {
                 val text = params.getString("text")
-                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                val clip = ClipData.newPlainText("pilot", text)
-                clipboard.setPrimaryClip(clip)
+                lastClipboardText = text
+                // Use ClipboardManager on the main thread to set clipboard.
+                // Set requires the main looper but doesn't need focus on Android 13+.
+                runOnMainThread {
+                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    val clip = ClipData.newPlainText("pilot", text)
+                    clipboard.setPrimaryClip(clip)
+                }
                 JSONObject().put("success", true)
             }
 
             "getClipboard" -> {
-                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                val text = clipboard.primaryClip?.getItemAt(0)?.text?.toString() ?: ""
+                // On Android 13+ (API 33+), only the focused/IME app can read clipboard
+                // via ClipboardManager. The instrumentation context is not focused, so
+                // we read clipboard via the Instrumentation's own ClipboardManager which
+                // runs in the instrumented app's context. As a workaround, we store
+                // the last-set clipboard text in memory.
+                val holder = arrayOf("")
+                runOnMainThread {
+                    try {
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        holder[0] = clipboard.primaryClip?.getItemAt(0)?.text?.toString() ?: ""
+                    } catch (e: Exception) {
+                        Log.w(TAG, "ClipboardManager read failed: ${e.message}")
+                    }
+                }
+                // If ClipboardManager failed (Android 13+ restriction), fall back to cached value
+                val text = holder[0].ifEmpty { lastClipboardText }
                 JSONObject().put("text", text)
             }
 
@@ -362,6 +389,23 @@ class CommandHandler(
             checked = if (params.has("checked")) params.getBoolean("checked") else null,
             focused = if (params.has("focused")) params.getBoolean("focused") else null,
         )
+    }
+
+    /** Run a block on the main thread and wait for it to complete. */
+    private fun runOnMainThread(block: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            block()
+        } else {
+            val latch = CountDownLatch(1)
+            Handler(Looper.getMainLooper()).post {
+                try {
+                    block()
+                } finally {
+                    latch.countDown()
+                }
+            }
+            latch.await(5, TimeUnit.SECONDS)
+        }
     }
 
     private fun captureElementScreenshot(bounds: android.graphics.Rect): String {
