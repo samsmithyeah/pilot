@@ -5,11 +5,29 @@ import androidx.test.uiautomator.By
 import androidx.test.uiautomator.Direction
 import androidx.test.uiautomator.UiDevice
 import androidx.test.uiautomator.UiObject2
+import androidx.test.uiautomator.Until
 
 /**
  * Executes UI actions: tap, long press, text input, swipe, scroll, and key presses.
  */
 class ActionExecutor(private val device: UiDevice) {
+    companion object {
+        /** Interval between taps for double-tap gesture. */
+        private const val DOUBLE_TAP_INTERVAL_MS = 40L
+
+        /** Timeout for waiting for dropdown options to appear. */
+        private const val DROPDOWN_WAIT_TIMEOUT_MS = 3000L
+
+        /** Fallback timeout for scrollable container detection. */
+        private const val SCROLLABLE_FALLBACK_TIMEOUT_MS = 1000L
+
+        /** Minimum pixel margin for tapping outside an element during blur. */
+        private const val BLUR_TAP_MARGIN_PX = 50
+
+        /** Time to wait for idle after focus/blur actions. */
+        private const val FOCUS_IDLE_TIMEOUT_MS = 500L
+    }
+
     /**
      * Tap on an element's center point.
      */
@@ -280,6 +298,189 @@ class ActionExecutor(private val device: UiDevice) {
             "left" -> Direction.LEFT
             "right" -> Direction.RIGHT
             else -> throw ActionFailedException("Unknown direction: $direction. Use up/down/left/right.")
+        }
+    }
+
+    /**
+     * Double-tap on an element's center point.
+     */
+    fun doubleTap(element: UiObject2) {
+        try {
+            // Perform two rapid taps at the element's center.
+            // We use device.click() with a short interval to ensure the gesture
+            // is recognized as a double-tap by the target app.
+            val bounds = element.visibleBounds
+            val cx = bounds.centerX()
+            val cy = bounds.centerY()
+            device.click(cx, cy)
+            Thread.sleep(DOUBLE_TAP_INTERVAL_MS)
+            device.click(cx, cy)
+        } catch (e: Exception) {
+            throw ActionFailedException("Failed to double tap element: ${e.message}")
+        }
+    }
+
+    /**
+     * Drag from one element to another.
+     */
+    fun dragTo(
+        source: UiObject2,
+        target: UiObject2,
+    ) {
+        try {
+            val tgtBounds = target.visibleBounds
+            source.drag(android.graphics.Point(tgtBounds.centerX(), tgtBounds.centerY()))
+        } catch (e: Exception) {
+            throw ActionFailedException("Failed to drag element: ${e.message}")
+        }
+    }
+
+    /**
+     * Select an option from a spinner/dropdown by text.
+     */
+    fun selectOption(
+        element: UiObject2,
+        optionText: String,
+    ) {
+        try {
+            // Tap the spinner to open it
+            element.click()
+            // Wait for the option to appear then tap it
+            val option =
+                device.wait(Until.findObject(By.text(optionText)), DROPDOWN_WAIT_TIMEOUT_MS)
+                    ?: throw ElementNotFoundException("Option '$optionText' not found in dropdown")
+            option.click()
+        } catch (e: ElementNotFoundException) {
+            throw e
+        } catch (e: Exception) {
+            throw ActionFailedException("Failed to select option '$optionText': ${e.message}")
+        }
+    }
+
+    /**
+     * Select an option from a spinner/dropdown by index.
+     */
+    fun selectOptionByIndex(
+        element: UiObject2,
+        index: Int,
+    ) {
+        try {
+            // Tap the spinner to open it
+            element.click()
+            // Wait for a common dropdown container to appear
+            val popupSelector = By.clazz(java.util.regex.Pattern.compile(".*(ListView|RecyclerView|PopupWindow)$"))
+            val popup =
+                device.wait(Until.findObject(popupSelector), DROPDOWN_WAIT_TIMEOUT_MS)
+                    ?: device.wait(Until.findObject(By.scrollable(true)), SCROLLABLE_FALLBACK_TIMEOUT_MS)
+                    ?: throw ActionFailedException(
+                        "Could not find dropdown popup. " +
+                            "The spinner may use a custom popup that is not auto-detected.",
+                    )
+            val children = popup.children
+            if (index < 0 || index >= children.size) {
+                throw ActionFailedException("Index $index out of range (0..${children.size - 1})")
+            }
+            children[index].click()
+        } catch (e: ActionFailedException) {
+            throw e
+        } catch (e: Exception) {
+            throw ActionFailedException("Failed to select option at index $index: ${e.message}")
+        }
+    }
+
+    /**
+     * Pinch zoom on an element.
+     * Scale > 1.0 zooms in (pinch out), scale < 1.0 zooms out (pinch in).
+     */
+    fun pinchZoom(
+        element: UiObject2,
+        scale: Float,
+    ) {
+        try {
+            if (scale > 1.0f) {
+                // Pinch out (zoom in) — percentage is how far apart fingers end
+                val percent = ((scale - 1.0f) * 100).coerceIn(10f, 100f) / 100f
+                element.pinchOpen(percent)
+            } else {
+                // Pinch in (zoom out) — percentage is how far fingers move inward
+                val percent = ((1.0f - scale) * 100).coerceIn(10f, 100f) / 100f
+                element.pinchClose(percent)
+            }
+        } catch (e: Exception) {
+            throw ActionFailedException("Failed to pinch zoom: ${e.message}")
+        }
+    }
+
+    /**
+     * Focus an element (click to focus, typically shows keyboard for text fields).
+     */
+    fun focus(element: UiObject2) {
+        try {
+            element.click()
+            device.waitForIdle(FOCUS_IDLE_TIMEOUT_MS)
+        } catch (e: Exception) {
+            throw ActionFailedException("Failed to focus element: ${e.message}")
+        }
+    }
+
+    /**
+     * Blur an element by tapping outside its bounds to remove focus.
+     * Avoids pressBack() which could navigate away or close dialogs.
+     */
+    fun blur(element: UiObject2) {
+        try {
+            val bounds = element.visibleBounds
+            val screenWidth = device.displayWidth
+            val screenHeight = device.displayHeight
+
+            // Find a safe point outside the element to tap
+            val tapX: Int
+            val tapY: Int
+            if (bounds.top > BLUR_TAP_MARGIN_PX) {
+                // Tap above the element
+                tapX = bounds.centerX()
+                tapY = bounds.top / 2
+            } else if (bounds.bottom < screenHeight - BLUR_TAP_MARGIN_PX) {
+                // Tap below the element
+                tapX = bounds.centerX()
+                tapY = (bounds.bottom + screenHeight) / 2
+            } else if (bounds.left > BLUR_TAP_MARGIN_PX) {
+                // Tap to the left
+                tapX = bounds.left / 2
+                tapY = bounds.centerY()
+            } else if (bounds.right < screenWidth - BLUR_TAP_MARGIN_PX) {
+                // Tap to the right
+                tapX = (bounds.right + screenWidth) / 2
+                tapY = bounds.centerY()
+            } else {
+                // Element fills the screen — tap top-left corner as last resort
+                tapX = 1
+                tapY = 1
+            }
+
+            device.click(tapX, tapY)
+            device.waitForIdle(FOCUS_IDLE_TIMEOUT_MS)
+        } catch (e: Exception) {
+            throw ActionFailedException("Failed to blur element: ${e.message}")
+        }
+    }
+
+    /**
+     * Highlight an element for debugging.
+     *
+     * Currently validates that the element exists and is accessible by reading its
+     * bounds. A future version may draw an overlay rectangle on the device screen.
+     */
+    fun highlight(
+        element: UiObject2,
+        @Suppress("UNUSED_PARAMETER") durationMs: Long = 1000L,
+    ) {
+        try {
+            // Validate element exists and is accessible by reading its bounds.
+            // TODO: Draw an overlay rectangle on the device screen for visual debugging.
+            element.visibleBounds
+        } catch (e: Exception) {
+            throw ActionFailedException("Failed to highlight element: ${e.message}")
         }
     }
 

@@ -4,9 +4,16 @@ plugins {
     id("org.jlleitschuh.gradle.ktlint")
 }
 
+val coreKtxVersion = "1.15.0"
+val testRunnerVersion = "1.6.2"
+val testCoreVersion = "1.6.1"
+val uiautomatorVersion = "2.3.0"
+val coroutinesVersion = "1.8.1"
+val jsonVersion = "20240303"
+
 android {
     namespace = "dev.pilot.agent"
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "dev.pilot.agent"
@@ -44,17 +51,17 @@ android {
 }
 
 dependencies {
-    implementation("androidx.core:core-ktx:1.12.0")
-    implementation("androidx.test:runner:1.5.2")
-    implementation("androidx.test:core:1.5.0")
-    implementation("androidx.test.uiautomator:uiautomator:2.3.0")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
-    implementation("org.json:json:20231013")
+    implementation("androidx.core:core-ktx:$coreKtxVersion")
+    implementation("androidx.test:runner:$testRunnerVersion")
+    implementation("androidx.test:core:$testCoreVersion")
+    implementation("androidx.test.uiautomator:uiautomator:$uiautomatorVersion")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:$coroutinesVersion")
+    implementation("org.json:json:$jsonVersion")
 
-    androidTestImplementation("androidx.test:runner:1.5.2")
-    androidTestImplementation("androidx.test:core:1.5.0")
-    androidTestImplementation("androidx.test.uiautomator:uiautomator:2.3.0")
+    androidTestImplementation("androidx.test:runner:$testRunnerVersion")
+    androidTestImplementation("androidx.test:core:$testCoreVersion")
+    androidTestImplementation("androidx.test.uiautomator:uiautomator:$uiautomatorVersion")
 
     testImplementation("junit:junit:4.13.2")
-    testImplementation("org.json:json:20231013")
+    testImplementation("org.json:json:$jsonVersion")
 }
