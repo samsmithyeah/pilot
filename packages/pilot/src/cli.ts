@@ -368,6 +368,17 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  // Launch the app under test
+  if (config.package) {
+    try {
+      await device.launchApp(config.package);
+      console.log(dim(`Launched ${config.package}`));
+    } catch (err) {
+      console.error(red(`Failed to launch app: ${err}`));
+      process.exit(1);
+    }
+  }
+
   // Run tests
   const allResults: TestResult[] = [];
   const totalStart = Date.now();

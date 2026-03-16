@@ -40,6 +40,9 @@ export interface PilotConfig {
   /** Directory to write screenshots and artifacts to. */
   outputDir: string;
 
+  /** Android package name of the app under test. Launched automatically before tests. */
+  package?: string;
+
   /** Path to the Pilot agent APK. Used for auto-install if agent is not on device. */
   agentApk?: string;
 

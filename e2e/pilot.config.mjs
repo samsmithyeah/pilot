@@ -1,6 +1,7 @@
 import { defineConfig } from "pilot"
 
 export default defineConfig({
+  package: "com.samlovesit.StoryApp",
   timeout: 30_000,
   retries: 0,
   screenshot: "only-on-failure",
