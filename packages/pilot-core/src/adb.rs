@@ -179,7 +179,11 @@ pub async fn shell_lenient(serial: &str, command: &str) -> Result<String> {
     let mut cmd = Command::new("adb");
     cmd.arg("-s").arg(serial).arg("shell").arg(command);
 
-    debug!(serial = serial, command = command, "Running adb shell (lenient)");
+    debug!(
+        serial = serial,
+        command = command,
+        "Running adb shell (lenient)"
+    );
 
     let output = tokio::time::timeout(DEFAULT_TIMEOUT, cmd.output())
         .await

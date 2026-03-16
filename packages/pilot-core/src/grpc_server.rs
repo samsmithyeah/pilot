@@ -1121,7 +1121,9 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
                     let idle_cmd = AgentCommand::WaitForIdle {
                         timeout_ms: Some(10_000),
                     };
-                    let _ = self.send_agent_command_with_timeout(&idle_cmd, 10_000).await;
+                    let _ = self
+                        .send_agent_command_with_timeout(&idle_cmd, 10_000)
+                        .await;
                 }
                 Ok(Response::new(proto::ActionResponse {
                     request_id,
@@ -1165,10 +1167,7 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
             ));
         }
 
-        let cmd = format!(
-            "am start -a android.intent.action.VIEW -d '{}'",
-            req.uri
-        );
+        let cmd = format!("am start -a android.intent.action.VIEW -d '{}'", req.uri);
         self.adb_action(request_id, &cmd).await
     }
 
@@ -1250,12 +1249,10 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         Self::validate_package_name(&req.package_name)?;
 
         // Check if app is installed
-        let installed = adb::shell_lenient(
-            &serial,
-            &format!("pm list packages {}", req.package_name),
-        )
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
+        let installed =
+            adb::shell_lenient(&serial, &format!("pm list packages {}", req.package_name))
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
 
         if !installed.contains(&req.package_name) {
             return Ok(Response::new(proto::GetAppStateResponse {
@@ -1280,12 +1277,9 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         }
 
         // Check if process exists at all
-        let procs = adb::shell_lenient(
-            &serial,
-            &format!("pidof {}", req.package_name),
-        )
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
+        let procs = adb::shell_lenient(&serial, &format!("pidof {}", req.package_name))
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
 
         let state = if procs.trim().is_empty() {
             "stopped"
@@ -1353,9 +1347,7 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
 
         // Use the on-device agent for clipboard operations since it has access
         // to Android's ClipboardManager via the instrumentation context.
-        let command = AgentCommand::SetClipboard {
-            text: req.text,
-        };
+        let command = AgentCommand::SetClipboard { text: req.text };
         let result = self.send_agent_command(&command).await;
         self.make_action_response(request_id, result).await
     }
@@ -1449,12 +1441,9 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         let request_id = Self::request_id(&req.request_id);
         let serial = self.active_serial().await?;
 
-        let output = adb::shell_lenient(
-            &serial,
-            "dumpsys input_method | grep mInputShown",
-        )
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
+        let output = adb::shell_lenient(&serial, "dumpsys input_method | grep mInputShown")
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
 
         let shown = output.contains("mInputShown=true");
 
@@ -1471,7 +1460,8 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
     ) -> Result<Response<proto::ActionResponse>, Status> {
         let req = request.into_inner();
         let request_id = Self::request_id(&req.request_id);
-        self.adb_action(request_id, "input keyevent KEYCODE_ESCAPE").await
+        self.adb_action(request_id, "input keyevent KEYCODE_ESCAPE")
+            .await
     }
 
     #[instrument(skip_all, fields(request_id))]
@@ -1481,7 +1471,8 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
     ) -> Result<Response<proto::ActionResponse>, Status> {
         let req = request.into_inner();
         let request_id = Self::request_id(&req.request_id);
-        self.adb_action(request_id, "cmd statusbar expand-notifications").await
+        self.adb_action(request_id, "cmd statusbar expand-notifications")
+            .await
     }
 
     #[instrument(skip_all, fields(request_id))]
@@ -1491,7 +1482,8 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
     ) -> Result<Response<proto::ActionResponse>, Status> {
         let req = request.into_inner();
         let request_id = Self::request_id(&req.request_id);
-        self.adb_action(request_id, "cmd statusbar expand-settings").await
+        self.adb_action(request_id, "cmd statusbar expand-settings")
+            .await
     }
 
     #[instrument(skip_all, fields(request_id))]
@@ -1622,9 +1614,14 @@ fn parse_component_name(dumpsys_output: &str) -> Option<(String, String)> {
             let pkg = &token[..slash_pos];
             let act = &token[slash_pos + 1..];
             // A valid component has a package with at least one dot and a non-empty activity
-            if pkg.contains('.') && !act.is_empty()
-                && pkg.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
-                && act.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '$')
+            if pkg.contains('.')
+                && !act.is_empty()
+                && pkg
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
+                && act
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '$')
             {
                 return Some((pkg.to_string(), act.to_string()));
             }
@@ -1941,7 +1938,8 @@ mod tests {
 
     #[test]
     fn parse_component_name_typical() {
-        let output = "  mResumedActivity: ActivityRecord{abcdef0 u0 com.example.app/.MainActivity t123}";
+        let output =
+            "  mResumedActivity: ActivityRecord{abcdef0 u0 com.example.app/.MainActivity t123}";
         let (pkg, act) = parse_component_name(output).unwrap();
         assert_eq!(pkg, "com.example.app");
         assert_eq!(act, ".MainActivity");

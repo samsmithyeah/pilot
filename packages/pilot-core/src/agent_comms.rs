@@ -338,9 +338,7 @@ impl AgentCommand {
                 }
                 ("elementScreenshot", p)
             }
-            AgentCommand::SetClipboard { text } => {
-                ("setClipboard", json!({"text": text}))
-            }
+            AgentCommand::SetClipboard { text } => ("setClipboard", json!({"text": text})),
             AgentCommand::GetClipboard {} => ("getClipboard", json!({})),
         };
 

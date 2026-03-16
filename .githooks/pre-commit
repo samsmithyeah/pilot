@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -e
+
+# ─── Rust ───
+if git diff --cached --name-only | grep -q '^packages/pilot-core/'; then
+  echo "▸ Rust: cargo fmt --check"
+  (cd packages/pilot-core && cargo fmt -- --check)
+  echo "▸ Rust: cargo clippy"
+  (cd packages/pilot-core && cargo clippy -- -D warnings)
+  echo "▸ Rust: cargo test"
+  (cd packages/pilot-core && cargo test)
+fi
+
+# ─── TypeScript SDK ───
+if git diff --cached --name-only | grep -q '^packages/pilot/'; then
+  echo "▸ TypeScript: typecheck"
+  (cd packages/pilot && npm run typecheck)
+  echo "▸ TypeScript: lint"
+  (cd packages/pilot && npm run lint)
+  echo "▸ TypeScript: test"
+  (cd packages/pilot && npm run test)
+fi
+
+# ─── Proto ───
+if git diff --cached --name-only | grep -q '^proto/'; then
+  if command -v buf &>/dev/null; then
+    echo "▸ Proto: buf lint"
+    buf lint proto/
+  fi
+fi
+
+# ─── Android agent ───
+if git diff --cached --name-only | grep -q '^agent/'; then
+  echo "▸ Android: ktlintCheck"
+  (cd agent && ./gradlew ktlintCheck)
+fi
