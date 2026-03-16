@@ -133,6 +133,17 @@ describe('element() scoping', () => {
     expect(leaf._selector.parent!.parent).toBeDefined();
     expect(leaf._selector.parent!.parent!.kind.type).toBe('role');
   });
+
+  it('throws when called on a modified handle', () => {
+    const client = makeMockClient();
+    const handle = new ElementHandle(client, role('list'), 5000);
+    expect(() => handle.first().element(text('Item'))).toThrow(
+      'element() cannot be called on a modified handle',
+    );
+    expect(() => handle.filter({ hasText: 'x' }).element(text('Item'))).toThrow(
+      'element() cannot be called on a modified handle',
+    );
+  });
 });
 
 // ─── find() ───
@@ -463,6 +474,18 @@ describe('all()', () => {
     // Each handle's find() should resolve to the correct element by index
     const second = await items[1].find();
     expect(second.text).toBe('Banana');
+  });
+
+  it('handles from all() throw when re-indexed with first/last/nth', async () => {
+    const client = makeMockClient({
+      findElements: vi.fn(async () => makeFindElementsResponse(threeItems)),
+    });
+    const handle = new ElementHandle(client, role('listitem'), 5000);
+    const items = await handle.all();
+
+    expect(() => items[2].first()).toThrow('first() cannot be called on a handle returned by all()');
+    expect(() => items[0].last()).toThrow('last() cannot be called on a handle returned by all()');
+    expect(() => items[1].nth(0)).toThrow('nth() cannot be called on a handle returned by all()');
   });
 });
 

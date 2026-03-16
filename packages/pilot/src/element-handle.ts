@@ -83,8 +83,17 @@ export class ElementHandle {
 
   /**
    * Scope a child selector within this element.
+   *
+   * Cannot be called on modified handles (e.g. after `.first()`, `.filter()`, `.and()`).
+   * Use `.find()` to resolve the parent first if you need to scope within a specific element.
    */
   element(childSelector: Selector): ElementHandle {
+    if (this._hasModifiers()) {
+      throw new Error(
+        'element() cannot be called on a modified handle (e.g. after .first(), .filter(), .and()). ' +
+          'Resolve the parent with .find() first, then scope children using the resolved element\'s properties.',
+      );
+    }
     const scoped = childSelector.within(this._selector);
     return new ElementHandle(this._client, scoped, this._timeoutMs);
   }
@@ -93,6 +102,7 @@ export class ElementHandle {
 
   /** Return a new handle targeting the first match. */
   first(): ElementHandle {
+    this._assertNoResolvedCache('first');
     return new ElementHandle(this._client, this._selector, this._timeoutMs, {
       ...this._options,
       nthIndex: 0,
@@ -101,6 +111,7 @@ export class ElementHandle {
 
   /** Return a new handle targeting the last match. */
   last(): ElementHandle {
+    this._assertNoResolvedCache('last');
     return new ElementHandle(this._client, this._selector, this._timeoutMs, {
       ...this._options,
       nthIndex: -1,
@@ -109,10 +120,21 @@ export class ElementHandle {
 
   /** Return a new handle targeting the match at `index` (0-based). Negative indices count from the end. */
   nth(index: number): ElementHandle {
+    this._assertNoResolvedCache('nth');
     return new ElementHandle(this._client, this._selector, this._timeoutMs, {
       ...this._options,
       nthIndex: index,
     });
+  }
+
+  /** @internal — Prevent re-indexing on handles returned by all(). */
+  private _assertNoResolvedCache(method: string): void {
+    if (this._options.resolvedElementsPromise) {
+      throw new Error(
+        `${method}() cannot be called on a handle returned by all(). ` +
+          'Handles from all() already reference a specific element.',
+      );
+    }
   }
 
   // ── Filtering (PILOT-16) ──
