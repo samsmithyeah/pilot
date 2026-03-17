@@ -8,8 +8,9 @@ describe("Visibility screen", () => {
   // ─── Dismissable Banner ───
 
   test("banner is visible on load", async ({ device }) => {
-    await expect(device.element(id("banner"))).toBeVisible()
-    await expect(device.element(id("banner"))).toExist()
+    const banner = device.element(id("banner"))
+    await expect(banner).toBeVisible()
+    await expect(banner).toExist()
   })
 
   test("dismissing banner hides it", async ({ device }) => {

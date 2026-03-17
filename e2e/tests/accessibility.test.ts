@@ -53,8 +53,9 @@ describe("Accessibility screen", () => {
   })
 
   test("avatar has content description", async ({ device }) => {
-    await expect(device.element(id("desc-avatar"))).toBeVisible()
-    await expect(device.element(id("desc-avatar"))).toHaveAccessibleName("User avatar")
+    const avatar = device.element(id("desc-avatar"))
+    await expect(avatar).toBeVisible()
+    await expect(avatar).toHaveAccessibleName("User avatar")
   })
 
   // ─── Grouped Elements ───

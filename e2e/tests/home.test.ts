@@ -24,8 +24,9 @@ describe("Home screen", () => {
   })
 
   test("header element exists and has text", async ({ device }) => {
-    await expect(device.element(text("Test Screens"))).toExist()
-    await expect(device.element(text("Test Screens"))).toHaveText("Test Screens")
+    const header = device.element(text("Test Screens"))
+    await expect(header).toExist()
+    await expect(header).toHaveText("Test Screens")
   })
 
   test("can scroll to see more cards", async ({ device }) => {

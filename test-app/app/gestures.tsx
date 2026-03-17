@@ -12,11 +12,10 @@ export default function GesturesScreen() {
     const now = Date.now()
     if (now - lastTapRef.current < 300) {
       setLastGesture("Double tap")
-      setTapCount((c) => c + 1)
     } else {
       setLastGesture("Single tap")
-      setTapCount((c) => c + 1)
     }
+    setTapCount((c) => c + 1)
     lastTapRef.current = now
   }
 
