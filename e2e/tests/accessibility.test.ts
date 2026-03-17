@@ -1,4 +1,5 @@
-import { beforeAll, contentDesc, describe, expect, id, test, text } from "pilot"
+import { beforeAll, contentDesc, describe, expect, test, text } from "pilot"
+import { AccessibilityScreen } from "../screens/accessibility.screen.js"
 
 describe("Accessibility screen", () => {
   beforeAll(async ({ device }) => {
@@ -13,55 +14,65 @@ describe("Accessibility screen", () => {
   // PILOT-XXX: RN accessibilityRole not mapped to Android role
 
   test("button role element exists", async ({ device }) => {
-    await expect(device.element(id("role-button"))).toExist()
+    const screen = new AccessibilityScreen(device)
+    await expect(screen.roleButton).toExist()
   })
 
   test("link role element exists", async ({ device }) => {
-    await expect(device.element(id("role-link"))).toExist()
+    const screen = new AccessibilityScreen(device)
+    await expect(screen.roleLink).toExist()
   })
 
   test("header role element exists", async ({ device }) => {
-    await expect(device.element(id("role-header"))).toExist()
+    const screen = new AccessibilityScreen(device)
+    await expect(screen.roleHeader).toExist()
   })
 
   test("image role element exists", async ({ device }) => {
-    await expect(device.element(id("role-image"))).toExist()
+    const screen = new AccessibilityScreen(device)
+    await expect(screen.roleImage).toExist()
   })
 
   test("alert role element exists", async ({ device }) => {
-    await expect(device.element(id("role-alert"))).toExist()
+    const screen = new AccessibilityScreen(device)
+    await expect(screen.roleAlert).toExist()
   })
 
   // ─── Accessible Names ───
 
   test("button has accessible name 'Submit form'", async ({ device }) => {
-    await expect(device.element(id("role-button"))).toHaveAccessibleName("Submit form")
+    const screen = new AccessibilityScreen(device)
+    await expect(screen.roleButton).toHaveAccessibleName("Submit form")
   })
 
   test("image has accessible name 'Profile photo'", async ({ device }) => {
-    await expect(device.element(id("role-image"))).toHaveAccessibleName("Profile photo")
+    const screen = new AccessibilityScreen(device)
+    await expect(screen.roleImage).toHaveAccessibleName("Profile photo")
   })
 
   // ─── Content Descriptions ───
 
   test("close icon has content description", async ({ device }) => {
-    await expect(device.element(contentDesc("Close menu"))).toBeVisible()
+    const screen = new AccessibilityScreen(device)
+    await expect(screen.closeIcon).toBeVisible()
   })
 
   test("cart icon has content description", async ({ device }) => {
-    await expect(device.element(contentDesc("Shopping cart with 3 items"))).toBeVisible()
+    const screen = new AccessibilityScreen(device)
+    await expect(screen.cartIcon).toBeVisible()
   })
 
   test("avatar has content description", async ({ device }) => {
-    const avatar = device.element(id("desc-avatar"))
-    await expect(avatar).toBeVisible()
-    await expect(avatar).toHaveAccessibleName("User avatar")
+    const screen = new AccessibilityScreen(device)
+    await expect(screen.avatar).toBeVisible()
+    await expect(screen.avatar).toHaveAccessibleName("User avatar")
   })
 
   // ─── Grouped Elements ───
 
   test("grouped profile is visible after scrolling", async ({ device }) => {
+    const screen = new AccessibilityScreen(device)
     await device.swipe("up")
-    await expect(device.element(id("grouped-profile"))).toBeVisible()
+    await expect(screen.groupedProfile).toBeVisible()
   })
 })

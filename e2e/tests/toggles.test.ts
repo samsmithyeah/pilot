@@ -1,4 +1,5 @@
-import { beforeEach, contentDesc, describe, expect, role, test, text } from "pilot"
+import { beforeEach, contentDesc, describe, expect, test } from "pilot"
+import { TogglesScreen } from "../screens/toggles.screen.js"
 
 const PKG = "dev.pilot.testapp"
 
@@ -6,62 +7,72 @@ describe("Toggles screen", () => {
   beforeEach(async ({ device }) => {
     await device.restartApp(PKG)
     await device.tap(contentDesc("Toggles"))
-    await expect(device.element(text("Switches"))).toBeVisible()
+    const screen = new TogglesScreen(device)
+    await expect(screen.switchesHeading).toBeVisible()
   })
 
   // ─── Switches ───
 
   test("switches section heading is visible", async ({ device }) => {
-    await expect(device.element(text("Switches"))).toBeVisible()
+    const screen = new TogglesScreen(device)
+    await expect(screen.switchesHeading).toBeVisible()
   })
 
   test("dark mode switch starts unchecked", async ({ device }) => {
-    await expect(device.element(role("switch", "Dark Mode"))).not.toBeChecked()
+    const screen = new TogglesScreen(device)
+    await expect(screen.darkModeSwitch).not.toBeChecked()
   })
 
   test("notifications switch starts checked", async ({ device }) => {
-    await expect(device.element(role("switch", "Notifications"))).toBeChecked()
+    const screen = new TogglesScreen(device)
+    await expect(screen.notificationsSwitch).toBeChecked()
   })
 
   test("setChecked() can turn dark mode on and off", async ({ device }) => {
-    await device.element(role("switch", "Dark Mode")).setChecked(true)
-    await expect(device.element(role("switch", "Dark Mode"))).toBeChecked()
+    const screen = new TogglesScreen(device)
+    await screen.darkModeSwitch.setChecked(true)
+    await expect(screen.darkModeSwitch).toBeChecked()
 
-    await device.element(role("switch", "Dark Mode")).setChecked(false)
-    await expect(device.element(role("switch", "Dark Mode"))).not.toBeChecked()
+    await screen.darkModeSwitch.setChecked(false)
+    await expect(screen.darkModeSwitch).not.toBeChecked()
   })
 
   test("isChecked() returns current state", async ({ device }) => {
-    const checked = await device.element(role("switch", "Notifications")).isChecked()
+    const screen = new TogglesScreen(device)
+    const checked = await screen.notificationsSwitch.isChecked()
     expect(checked).toBe(true)
   })
 
   // ─── Checkboxes ───
 
   test("agree checkbox starts unchecked", async ({ device }) => {
-    await expect(device.element(role("checkbox", "I agree to terms"))).not.toBeChecked()
+    const screen = new TogglesScreen(device)
+    await expect(screen.agreeCheckbox).not.toBeChecked()
   })
 
   test("tapping checkbox toggles its state", async ({ device }) => {
-    await device.tap(role("checkbox", "I agree to terms"))
-    await expect(device.element(role("checkbox", "I agree to terms"))).toBeChecked()
+    const screen = new TogglesScreen(device)
+    await screen.agreeCheckbox.tap()
+    await expect(screen.agreeCheckbox).toBeChecked()
 
-    await device.tap(role("checkbox", "I agree to terms"))
-    await expect(device.element(role("checkbox", "I agree to terms"))).not.toBeChecked()
+    await screen.agreeCheckbox.tap()
+    await expect(screen.agreeCheckbox).not.toBeChecked()
   })
 
   // ─── Radio Buttons ───
 
   test("radio buttons are visible", async ({ device }) => {
+    const screen = new TogglesScreen(device)
     await device.swipe("up")
-    await expect(device.element(text("Small"))).toBeVisible()
-    await expect(device.element(text("Medium"))).toBeVisible()
-    await expect(device.element(text("Large"))).toBeVisible()
+    await expect(screen.smallLabel).toBeVisible()
+    await expect(screen.mediumLabel).toBeVisible()
+    await expect(screen.largeLabel).toBeVisible()
   })
 
   test("tapping small selects it", async ({ device }) => {
+    const screen = new TogglesScreen(device)
     await device.swipe("up")
-    await device.tap(role("radiobutton", "Small"))
-    await expect(device.element(role("radiobutton", "Small"))).toBeChecked()
+    await screen.radioSmall.tap()
+    await expect(screen.radioSmall).toBeChecked()
   })
 })

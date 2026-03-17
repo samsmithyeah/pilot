@@ -1,4 +1,5 @@
-import { beforeAll, contentDesc, describe, expect, id, test, text } from "pilot"
+import { beforeAll, contentDesc, describe, expect, test } from "pilot"
+import { VisibilityScreen } from "../screens/visibility.screen.js"
 
 describe("Visibility screen", () => {
   beforeAll(async ({ device }) => {
@@ -8,79 +9,92 @@ describe("Visibility screen", () => {
   // ─── Dismissable Banner ───
 
   test("banner is visible on load", async ({ device }) => {
-    const banner = device.element(id("banner"))
-    await expect(banner).toBeVisible()
-    await expect(banner).toExist()
+    const screen = new VisibilityScreen(device)
+    await expect(screen.banner).toBeVisible()
+    await expect(screen.banner).toExist()
   })
 
   test("dismissing banner hides it", async ({ device }) => {
-    await device.tap(id("dismiss-banner"))
-    await expect(device.element(id("banner"))).not.toBeVisible()
+    const screen = new VisibilityScreen(device)
+    await screen.dismissBannerButton.tap()
+    await expect(screen.banner).not.toBeVisible()
   })
 
   test("show banner button restores it", async ({ device }) => {
-    await device.tap(id("show-banner"))
-    await expect(device.element(id("banner"))).toBeVisible()
+    const screen = new VisibilityScreen(device)
+    await screen.showBannerButton.tap()
+    await expect(screen.banner).toBeVisible()
   })
 
   // ─── Expandable Section ───
 
   test("expand toggle is visible", async ({ device }) => {
-    await expect(device.element(id("expand-toggle"))).toBeVisible()
+    const screen = new VisibilityScreen(device)
+    await expect(screen.expandToggle).toBeVisible()
   })
 
   test("expanded content does not exist by default", async ({ device }) => {
-    await expect(device.element(id("expanded-content"))).not.toExist()
+    const screen = new VisibilityScreen(device)
+    await expect(screen.expandedContent).not.toExist()
   })
 
   test("expanding reveals content", async ({ device }) => {
-    await device.tap(id("expand-toggle"))
-    await expect(device.element(id("expanded-content"))).toBeVisible()
+    const screen = new VisibilityScreen(device)
+    await screen.expandToggle.tap()
+    await expect(screen.expandedContent).toBeVisible()
   })
 
   test("collapsing hides content", async ({ device }) => {
-    await device.tap(id("expand-toggle"))
-    await expect(device.element(id("expanded-content"))).not.toExist()
+    const screen = new VisibilityScreen(device)
+    await screen.expandToggle.tap()
+    await expect(screen.expandedContent).not.toExist()
   })
 
   // ─── Dynamic List ───
 
   test("dynamic list shows 3 items initially", async ({ device }) => {
-    await expect(device.element(text("3 items"))).toBeVisible()
+    const screen = new VisibilityScreen(device)
+    await expect(screen.itemCount(3)).toBeVisible()
   })
 
   test("adding an item increases the count", async ({ device }) => {
-    await device.tap(id("add-item"))
-    await expect(device.element(text("4 items"))).toBeVisible()
+    const screen = new VisibilityScreen(device)
+    await screen.addItemButton.tap()
+    await expect(screen.itemCount(4)).toBeVisible()
   })
 
   test("deleting an item decreases the count", async ({ device }) => {
-    await device.element(text("Delete")).first().tap()
-    await expect(device.element(text("3 items"))).toBeVisible()
+    const screen = new VisibilityScreen(device)
+    await screen.deleteButton.first().tap()
+    await expect(screen.itemCount(3)).toBeVisible()
   })
 
   // ─── Loading State ───
 
   test("content loaded is shown initially", async ({ device }) => {
-    await expect(device.element(text("Content loaded"))).toBeVisible()
+    const screen = new VisibilityScreen(device)
+    await expect(screen.contentLoaded).toBeVisible()
   })
 
   test("loading indicator appears and then disappears", async ({ device }) => {
+    const screen = new VisibilityScreen(device)
     await device.swipe("up")
-    await device.tap(id("start-loading"))
-    await expect(device.element(text("Loading..."))).toBeVisible()
-    await expect(device.element(text("Content loaded"))).toBeVisible({ timeout: 5000 })
+    await screen.startLoadingButton.tap()
+    await expect(screen.loadingIndicator).toBeVisible()
+    await expect(screen.contentLoaded).toBeVisible({ timeout: 5000 })
   })
 
   // ─── Error State ───
 
   test("triggering error shows the error message", async ({ device }) => {
-    await device.tap(id("toggle-error"))
-    await expect(device.element(text("An error occurred. Please try again."))).toBeVisible()
+    const screen = new VisibilityScreen(device)
+    await screen.toggleErrorButton.tap()
+    await expect(screen.errorText).toBeVisible()
   })
 
   test("clearing error hides the message", async ({ device }) => {
-    await device.tap(id("toggle-error"))
-    await expect(device.element(id("error-message"))).not.toBeVisible()
+    const screen = new VisibilityScreen(device)
+    await screen.toggleErrorButton.tap()
+    await expect(screen.errorMessage).not.toBeVisible()
   })
 })

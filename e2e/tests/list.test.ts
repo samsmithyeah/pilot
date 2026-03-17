@@ -1,4 +1,5 @@
-import { beforeAll, contentDesc, describe, expect, id, test, text, textContains } from "pilot"
+import { beforeAll, contentDesc, describe, expect, test, textContains } from "pilot"
+import { ListScreen } from "../screens/list.screen.js"
 
 describe("List screen", () => {
   beforeAll(async ({ device }) => {
@@ -8,23 +9,26 @@ describe("List screen", () => {
   // ─── Element Counting ───
 
   test("shows item count", async ({ device }) => {
-    await expect(device.element(id("item-count"))).toHaveText("30 items")
+    const screen = new ListScreen(device)
+    await expect(screen.itemCount).toHaveText("30 items")
   })
 
   test("shows initial selected count", async ({ device }) => {
-    await expect(device.element(id("selected-count"))).toContainText("0 selected")
+    const screen = new ListScreen(device)
+    await expect(screen.selectedCount).toContainText("0 selected")
   })
 
   // ─── Positional Selection ───
 
   test("first() selects the first matching element", async ({ device }) => {
-    const firstItem = device.element(text("Item 1"))
-    const info = await firstItem.find()
+    const screen = new ListScreen(device)
+    const info = await screen.itemByText("Item 1").find()
     expect(info.text).toBe("Item 1")
   })
 
   test("nth() selects item at specific index", async ({ device }) => {
-    const items = await device.element(textContains("Item ")).all()
+    const screen = new ListScreen(device)
+    const items = await screen.allItems.all()
     expect(items.length).toBeGreaterThan(1)
     const secondText = await items[1].getText()
     expect(secondText.length).toBeGreaterThan(0)
@@ -41,17 +45,19 @@ describe("List screen", () => {
   // ─── Selection ───
 
   test("tapping an item selects and deselects it", async ({ device }) => {
-    await device.tap(contentDesc("Item 1"))
-    await expect(device.element(id("selected-count"))).toContainText("1 selected")
+    const screen = new ListScreen(device)
+    await screen.firstItem.tap()
+    await expect(screen.selectedCount).toContainText("1 selected")
 
-    await device.tap(contentDesc("Item 1"))
-    await expect(device.element(id("selected-count"))).toContainText("0 selected")
+    await screen.firstItem.tap()
+    await expect(screen.selectedCount).toContainText("0 selected")
   })
 
   // ─── all() ───
 
   test("all() returns array of element handles", async ({ device }) => {
-    const items = await device.element(textContains("Item ")).all()
+    const screen = new ListScreen(device)
+    const items = await screen.allItems.all()
     expect(items.length).toBeGreaterThan(0)
     const firstText = await items[0].getText()
     expect(firstText.length).toBeGreaterThan(0)

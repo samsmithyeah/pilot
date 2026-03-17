@@ -1,4 +1,5 @@
-import { beforeAll, contentDesc, describe, expect, role, test, text } from "pilot"
+import { beforeAll, contentDesc, describe, expect, role, test } from "pilot"
+import { LoginScreen } from "../screens/login.screen.js"
 
 describe("Login screen", () => {
   beforeAll(async ({ device }) => {
@@ -8,50 +9,58 @@ describe("Login screen", () => {
   // ─── Layout & Visibility ───
 
   test("shows the sign in heading", async ({ device }) => {
-    await expect(device.element(text("Sign In"))).toBeVisible()
+    const login = new LoginScreen(device)
+    await expect(login.heading).toBeVisible()
   })
 
   test("shows email and password fields", async ({ device }) => {
-    await expect(device.element(role("textfield", "Email"))).toBeVisible()
-    await expect(device.element(role("textfield", "Password"))).toBeVisible()
+    const login = new LoginScreen(device)
+    await expect(login.emailField).toBeVisible()
+    await expect(login.passwordField).toBeVisible()
   })
 
   test("email field is editable", async ({ device }) => {
-    await expect(device.element(role("textfield", "Email"))).toHaveAttribute(
+    const login = new LoginScreen(device)
+    await expect(login.emailField).toHaveAttribute(
       "className",
       "android.widget.EditText",
     )
   })
 
   test("sign in button starts disabled", async ({ device }) => {
-    await expect(device.element(role("button", "Sign in"))).toBeDisabled()
+    const login = new LoginScreen(device)
+    await expect(login.signInButton).toBeDisabled()
   })
 
   test("forgot password link is visible", async ({ device }) => {
-    await expect(device.element(text("Forgot password?"))).toBeVisible()
+    const login = new LoginScreen(device)
+    await expect(login.forgotPasswordLink).toBeVisible()
   })
 
   // ─── Text Input ───
 
   test("can type into email field", async ({ device }) => {
-    await device.element(role("textfield", "Email")).type("test@example.com")
+    const login = new LoginScreen(device)
+    await login.emailField.type("test@example.com")
     // PILOT-133: type() wraps text in quotes — check with quotes for now
-    await expect(device.element(role("textfield", "Email"))).toContainText("test@example.com")
+    await expect(login.emailField).toContainText("test@example.com")
   })
 
   test("can type into password field", async ({ device }) => {
-    await device.element(role("textfield", "Password")).type("password123")
+    const login = new LoginScreen(device)
+    await login.passwordField.type("password123")
   })
 
   // ─── Focus & Keyboard ───
 
   test("focusing and blurring email field toggles keyboard", async ({ device }) => {
-    await device.focus(role("textfield", "Email"))
-    await expect(device.element(role("textfield", "Email"))).toBeFocused()
+    const emailSelector = role("textfield", "Email")
+    await device.focus(emailSelector)
+    await expect(device.element(emailSelector)).toBeFocused()
     let shown = await device.isKeyboardShown()
     expect(shown).toBe(true)
 
-    await device.blur(role("textfield", "Email"))
+    await device.blur(emailSelector)
     await device.hideKeyboard()
     shown = await device.isKeyboardShown()
     expect(shown).toBe(false)
@@ -60,16 +69,16 @@ describe("Login screen", () => {
   // ─── Clear & Retype ───
 
   test("clearAndType() replaces existing text", async ({ device }) => {
-    const emailField = device.element(role("textfield", "Email"))
-    await emailField.clearAndType("wrong@email.com")
-    await expect(emailField).toContainText("wrong@email.com")
+    const login = new LoginScreen(device)
+    await login.emailField.clearAndType("wrong@email.com")
+    await expect(login.emailField).toContainText("wrong@email.com")
   })
 
   test("clear() empties the field", async ({ device }) => {
-    const emailField = device.element(role("textfield", "Email"))
-    await emailField.clear()
+    const login = new LoginScreen(device)
+    await login.emailField.clear()
     // After clear, RN shows placeholder as text — check field exists
-    await expect(emailField).toBeVisible()
+    await expect(login.emailField).toBeVisible()
   })
 
   // ─── Form Submission ───
@@ -77,9 +86,10 @@ describe("Login screen", () => {
   // Test what we can — navigation and element visibility.
 
   test("can type credentials and submit", async ({ device }) => {
-    await device.element(role("textfield", "Email")).clearAndType("test@example.com")
-    await device.element(role("textfield", "Password")).clearAndType("password123")
+    const login = new LoginScreen(device)
+    await login.emailField.clearAndType("test@example.com")
+    await login.passwordField.clearAndType("password123")
     // Button may or may not enable due to quote bug — try tapping anyway
-    await device.tap(role("button", "Sign in"))
+    await login.signInButton.tap()
   })
 })

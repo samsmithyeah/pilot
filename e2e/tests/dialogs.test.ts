@@ -1,4 +1,5 @@
-import { beforeAll, contentDesc, describe, expect, id, role, test, text } from "pilot"
+import { beforeAll, contentDesc, describe, expect, test, text } from "pilot"
+import { DialogsScreen } from "../screens/dialogs.screen.js"
 
 describe("Dialogs screen", () => {
   beforeAll(async ({ device }) => {
@@ -12,40 +13,45 @@ describe("Dialogs screen", () => {
   // ─── Toast ───
 
   test("show toast button is visible", async ({ device }) => {
-    await expect(device.element(id("show-toast-button"))).toBeVisible()
+    const screen = new DialogsScreen(device)
+    await expect(screen.showToastButton).toBeVisible()
   })
 
   test("tapping show toast displays a toast", async ({ device }) => {
-    await device.tap(id("show-toast-button"))
-    await expect(device.element(text("Item saved successfully!"))).toBeVisible()
+    const screen = new DialogsScreen(device)
+    await screen.showToastButton.tap()
+    await expect(screen.toastSuccess).toBeVisible()
   })
 
   test("error toast shows error message", async ({ device }) => {
-    await device.tap(id("show-error-toast-button"))
-    await expect(device.element(text("Something went wrong"))).toBeVisible()
+    const screen = new DialogsScreen(device)
+    await screen.showErrorToastButton.tap()
+    await expect(screen.toastError).toBeVisible()
   })
 
   // ─── Snackbar ───
 
   test("can show and dismiss snackbar", async ({ device }) => {
+    const screen = new DialogsScreen(device)
     await device.waitForIdle()
-    await device.tap(id("show-snackbar-button"))
-    await expect(device.element(text("Message archived"))).toBeVisible()
-    await expect(device.element(text("DISMISS"))).toBeVisible()
+    await screen.showSnackbarButton.tap()
+    await expect(screen.snackbarMessage).toBeVisible()
+    await expect(screen.snackbarDismiss).toBeVisible()
 
-    await device.tap(text("DISMISS"))
-    await expect(device.element(id("snackbar"))).not.toBeVisible()
+    await screen.snackbarDismiss.tap()
+    await expect(screen.snackbar).not.toBeVisible()
   })
 
   // ─── Modal ───
 
   test("can show and cancel modal", async ({ device }) => {
-    await device.tap(id("show-modal-button"))
-    await expect(device.element(text("Modal Title"))).toBeVisible()
-    await expect(device.element(role("button", "Cancel"))).toBeVisible()
-    await expect(device.element(role("button", "Confirm"))).toBeVisible()
+    const screen = new DialogsScreen(device)
+    await screen.showModalButton.tap()
+    await expect(screen.modalTitle).toBeVisible()
+    await expect(screen.cancelButton).toBeVisible()
+    await expect(screen.confirmButton).toBeVisible()
 
-    await device.tap(role("button", "Cancel"))
-    await expect(device.element(id("modal"))).not.toBeVisible()
+    await screen.cancelButton.tap()
+    await expect(screen.modal).not.toBeVisible()
   })
 })

@@ -1,4 +1,5 @@
-import { beforeAll, contentDesc, describe, expect, id, test, text } from "pilot"
+import { beforeAll, contentDesc, describe, expect, test, text } from "pilot"
+import { SlowLoadScreen } from "../screens/slow-load.screen.js"
 
 describe("Slow load screen", () => {
   beforeAll(async ({ device }) => {
@@ -7,33 +8,38 @@ describe("Slow load screen", () => {
   })
 
   test("shows heading and description", async ({ device }) => {
-    await expect(device.element(text("Slow Loading"))).toBeVisible()
+    const screen = new SlowLoadScreen(device)
+    await expect(screen.heading).toBeVisible()
   })
 
   // ─── Data Fetching ───
 
   test("load buttons are visible", async ({ device }) => {
-    await expect(device.element(id("load-2s"))).toBeVisible()
-    await expect(device.element(id("load-5s"))).toBeVisible()
-    await expect(device.element(id("load-fail"))).toBeVisible()
+    const screen = new SlowLoadScreen(device)
+    await expect(screen.load2sButton).toBeVisible()
+    await expect(screen.load5sButton).toBeVisible()
+    await expect(screen.loadFailButton).toBeVisible()
   })
 
   test("2s load shows data after loading", async ({ device }) => {
-    await device.tap(id("load-2s"))
-    await expect(device.element(text("User Profile"))).toBeVisible({ timeout: 10000 })
-    await expect(device.element(text("John Doe"))).toBeVisible()
+    const screen = new SlowLoadScreen(device)
+    await screen.load2sButton.tap()
+    await expect(screen.profileHeading).toBeVisible({ timeout: 10000 })
+    await expect(screen.profileName).toBeVisible()
   })
 
   test("data rows show correct content", async ({ device }) => {
-    await expect(device.element(id("data-row-1"))).toBeVisible()
-    await expect(device.element(text("Email"))).toBeVisible()
-    await expect(device.element(text("john@example.com"))).toBeVisible()
+    const screen = new SlowLoadScreen(device)
+    await expect(screen.dataRow1).toBeVisible()
+    await expect(screen.emailLabel).toBeVisible()
+    await expect(screen.emailValue).toBeVisible()
   })
 
   test("failed load shows error", async ({ device }) => {
-    await device.tap(id("load-fail"))
-    await expect(device.element(id("fetch-error"))).toBeVisible({ timeout: 10000 })
-    await expect(device.element(text("Network request failed: timeout"))).toBeVisible()
+    const screen = new SlowLoadScreen(device)
+    await screen.loadFailButton.tap()
+    await expect(screen.fetchError).toBeVisible({ timeout: 10000 })
+    await expect(screen.errorMessage).toBeVisible()
   })
 
   // ─── Polling Counter ───
