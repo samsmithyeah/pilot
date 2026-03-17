@@ -1,9 +1,17 @@
 package dev.pilot.agent
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.util.Base64
 import android.util.Log
 import androidx.test.uiautomator.UiDevice
 import org.json.JSONObject
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Routes incoming JSON commands to the appropriate handler.
@@ -14,6 +22,7 @@ import org.json.JSONObject
  *         or: {"id": "uuid", "error": {"type": "...", "message": "..."}}
  */
 class CommandHandler(
+    private val context: Context,
     private val device: UiDevice,
     private val elementFinder: ElementFinder,
     private val actionExecutor: ActionExecutor,
@@ -23,6 +32,10 @@ class CommandHandler(
     companion object {
         private const val TAG = "PilotCommand"
     }
+
+    /** Cache of last clipboard text set via setClipboard, used as fallback on Android 13+. */
+    @Volatile
+    private var lastClipboardText = ""
 
     fun handle(rawJson: String): String {
         val json =
@@ -305,6 +318,40 @@ class CommandHandler(
                 JSONObject().put("data", base64).put("format", "png")
             }
 
+            "setClipboard" -> {
+                val text = params.getString("text")
+                lastClipboardText = text
+                // Use ClipboardManager on the main thread to set clipboard.
+                // Set requires the main looper but doesn't need focus on Android 13+.
+                runOnMainThread {
+                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    val clip = ClipData.newPlainText("pilot", text)
+                    clipboard.setPrimaryClip(clip)
+                }
+                JSONObject().put("success", true)
+            }
+
+            "getClipboard" -> {
+                // On Android 13+ (API 33+), only the focused/IME app can read clipboard
+                // via ClipboardManager. The instrumentation context is not focused, so
+                // we read clipboard via the Instrumentation's own ClipboardManager which
+                // runs in the instrumented app's context. As a workaround, we store
+                // the last-set clipboard text in memory.
+                val clipboardText =
+                    runOnMainThread {
+                        try {
+                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            clipboard.primaryClip?.getItemAt(0)?.text?.toString() ?: ""
+                        } catch (e: Exception) {
+                            Log.w(TAG, "ClipboardManager read failed: ${e.message}")
+                            ""
+                        }
+                    }
+                // If ClipboardManager failed (Android 13+ restriction), fall back to cached value
+                val text = clipboardText.ifEmpty { lastClipboardText }
+                JSONObject().put("text", text)
+            }
+
             "ping" -> {
                 JSONObject().put("pong", true)
             }
@@ -344,6 +391,29 @@ class CommandHandler(
             checked = if (params.has("checked")) params.getBoolean("checked") else null,
             focused = if (params.has("focused")) params.getBoolean("focused") else null,
         )
+    }
+
+    /** Run a block on the main thread and wait for it to complete. */
+    private fun <T> runOnMainThread(block: () -> T): T {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            return block()
+        } else {
+            val latch = CountDownLatch(1)
+            val result = AtomicReference<Result<T>>()
+            Handler(Looper.getMainLooper()).post {
+                try {
+                    result.set(Result.success(block()))
+                } catch (e: Exception) {
+                    result.set(Result.failure(e))
+                } finally {
+                    latch.countDown()
+                }
+            }
+            if (!latch.await(5, TimeUnit.SECONDS)) {
+                throw TimeoutException("runOnMainThread timed out after 5 seconds")
+            }
+            return result.get().getOrThrow()
+        }
     }
 
     private fun captureElementScreenshot(bounds: android.graphics.Rect): String {

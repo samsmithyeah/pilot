@@ -34,6 +34,29 @@ function makeMockClient(overrides: Partial<PilotGrpcClient> = {}): PilotGrpcClie
     blur: vi.fn(async () => successResponse()),
     selectOption: vi.fn(async () => successResponse()),
     highlight: vi.fn(async () => successResponse()),
+    pressKey: vi.fn(async () => successResponse()),
+    launchApp: vi.fn(async () => successResponse()),
+    openDeepLink: vi.fn(async () => successResponse()),
+    getCurrentPackage: vi.fn(async () => ({ requestId: '1', packageName: 'com.example.app' })),
+    getCurrentActivity: vi.fn(async () => ({ requestId: '1', activity: '.MainActivity' })),
+    terminateApp: vi.fn(async () => successResponse()),
+    getAppState: vi.fn(async () => ({ requestId: '1', state: 'foreground' })),
+    clearAppData: vi.fn(async () => successResponse()),
+    grantPermission: vi.fn(async () => successResponse()),
+    revokePermission: vi.fn(async () => successResponse()),
+    setClipboard: vi.fn(async () => successResponse()),
+    getClipboard: vi.fn(async () => ({ requestId: '1', text: 'clipboard text' })),
+    setOrientation: vi.fn(async () => successResponse()),
+    getOrientation: vi.fn(async () => ({ requestId: '1', orientation: 'portrait' })),
+    isKeyboardShown: vi.fn(async () => ({ requestId: '1', shown: false })),
+    hideKeyboard: vi.fn(async () => successResponse()),
+    openNotifications: vi.fn(async () => successResponse()),
+    openQuickSettings: vi.fn(async () => successResponse()),
+    setColorScheme: vi.fn(async () => successResponse()),
+    getColorScheme: vi.fn(async () => ({ requestId: '1', scheme: 'light' })),
+    wakeDevice: vi.fn(async () => successResponse()),
+    unlockDevice: vi.fn(async () => successResponse()),
+    startAgent: vi.fn(async () => successResponse()),
     ...overrides,
   } as unknown as PilotGrpcClient
 }
@@ -244,5 +267,406 @@ describe('Device.highlight()', () => {
     })
     const device = new Device(client)
     await expect(device.highlight(text('X'))).rejects.toThrow('Highlight failed')
+  })
+})
+
+// ─── Device Management (PILOT-10) ───
+
+// ─── launchApp() ───
+
+describe('Device.launchApp()', () => {
+  it('delegates to client.launchApp with package name', async () => {
+    const launchApp = vi.fn(async () => successResponse())
+    const client = makeMockClient({ launchApp })
+    const device = new Device(client)
+    await device.launchApp('com.example.app')
+    expect(launchApp).toHaveBeenCalledWith('com.example.app', undefined)
+  })
+
+  it('passes options through', async () => {
+    const launchApp = vi.fn(async () => successResponse())
+    const client = makeMockClient({ launchApp })
+    const device = new Device(client)
+    await device.launchApp('com.example.app', { activity: '.MainActivity', clearData: true })
+    expect(launchApp).toHaveBeenCalledWith('com.example.app', {
+      activity: '.MainActivity',
+      clearData: true,
+    })
+  })
+
+  it('throws on failure', async () => {
+    const client = makeMockClient({
+      launchApp: vi.fn(async () => failureResponse('')),
+    })
+    const device = new Device(client)
+    await expect(device.launchApp('com.example.app')).rejects.toThrow('Launch app failed')
+  })
+})
+
+// ─── openDeepLink() ───
+
+describe('Device.openDeepLink()', () => {
+  it('delegates to client.openDeepLink', async () => {
+    const openDeepLink = vi.fn(async () => successResponse())
+    const client = makeMockClient({ openDeepLink })
+    const device = new Device(client)
+    await device.openDeepLink('myapp://settings')
+    expect(openDeepLink).toHaveBeenCalledWith('myapp://settings')
+  })
+
+  it('throws on failure', async () => {
+    const client = makeMockClient({
+      openDeepLink: vi.fn(async () => failureResponse('')),
+    })
+    const device = new Device(client)
+    await expect(device.openDeepLink('myapp://x')).rejects.toThrow('Open deep link failed')
+  })
+})
+
+// ─── currentPackage() / currentActivity() ───
+
+describe('Device.currentPackage()', () => {
+  it('returns the package name', async () => {
+    const client = makeMockClient()
+    const device = new Device(client)
+    const pkg = await device.currentPackage()
+    expect(pkg).toBe('com.example.app')
+  })
+})
+
+describe('Device.currentActivity()', () => {
+  it('returns the activity name', async () => {
+    const client = makeMockClient()
+    const device = new Device(client)
+    const activity = await device.currentActivity()
+    expect(activity).toBe('.MainActivity')
+  })
+})
+
+// ─── terminateApp() ───
+
+describe('Device.terminateApp()', () => {
+  it('delegates to client.terminateApp', async () => {
+    const terminateApp = vi.fn(async () => successResponse())
+    const client = makeMockClient({ terminateApp })
+    const device = new Device(client)
+    await device.terminateApp('com.example.app')
+    expect(terminateApp).toHaveBeenCalledWith('com.example.app')
+  })
+
+  it('throws on failure', async () => {
+    const client = makeMockClient({
+      terminateApp: vi.fn(async () => failureResponse('')),
+    })
+    const device = new Device(client)
+    await expect(device.terminateApp('com.example.app')).rejects.toThrow('Terminate app failed')
+  })
+})
+
+// ─── getAppState() ───
+
+describe('Device.getAppState()', () => {
+  it('returns the app state', async () => {
+    const client = makeMockClient()
+    const device = new Device(client)
+    const state = await device.getAppState('com.example.app')
+    expect(state).toBe('foreground')
+  })
+})
+
+// ─── sendToBackground() / bringToForeground() ───
+
+describe('Device.sendToBackground()', () => {
+  it('presses HOME key', async () => {
+    const pressKey = vi.fn(async () => successResponse())
+    const client = makeMockClient({ pressKey })
+    const device = new Device(client)
+    await device.sendToBackground()
+    expect(pressKey).toHaveBeenCalledWith('HOME')
+  })
+})
+
+describe('Device.bringToForeground()', () => {
+  it('launches the app', async () => {
+    const launchApp = vi.fn(async () => successResponse())
+    const client = makeMockClient({ launchApp })
+    const device = new Device(client)
+    await device.bringToForeground('com.example.app')
+    expect(launchApp).toHaveBeenCalledWith('com.example.app', undefined)
+  })
+})
+
+// ─── clearAppData() ───
+
+describe('Device.clearAppData()', () => {
+  it('delegates to client.clearAppData', async () => {
+    const clearAppData = vi.fn(async () => successResponse())
+    const client = makeMockClient({ clearAppData })
+    const device = new Device(client)
+    await device.clearAppData('com.example.app')
+    expect(clearAppData).toHaveBeenCalledWith('com.example.app')
+  })
+
+  it('throws on failure', async () => {
+    const client = makeMockClient({
+      clearAppData: vi.fn(async () => failureResponse('')),
+    })
+    const device = new Device(client)
+    await expect(device.clearAppData('com.example.app')).rejects.toThrow('Clear app data failed')
+  })
+})
+
+// ─── Permission management ───
+
+describe('Device.grantPermission()', () => {
+  it('delegates to client.grantPermission', async () => {
+    const grantPermission = vi.fn(async () => successResponse())
+    const client = makeMockClient({ grantPermission })
+    const device = new Device(client)
+    await device.grantPermission('com.example.app', 'android.permission.CAMERA')
+    expect(grantPermission).toHaveBeenCalledWith('com.example.app', 'android.permission.CAMERA')
+  })
+
+  it('throws on failure', async () => {
+    const client = makeMockClient({
+      grantPermission: vi.fn(async () => failureResponse('')),
+    })
+    const device = new Device(client)
+    await expect(device.grantPermission('com.example.app', 'android.permission.CAMERA')).rejects.toThrow('Grant permission failed')
+  })
+})
+
+describe('Device.revokePermission()', () => {
+  it('delegates to client.revokePermission', async () => {
+    const revokePermission = vi.fn(async () => successResponse())
+    const client = makeMockClient({ revokePermission })
+    const device = new Device(client)
+    await device.revokePermission('com.example.app', 'android.permission.CAMERA')
+    expect(revokePermission).toHaveBeenCalledWith('com.example.app', 'android.permission.CAMERA')
+  })
+})
+
+// ─── Clipboard ───
+
+describe('Device.setClipboard()', () => {
+  it('delegates to client.setClipboard', async () => {
+    const setClipboard = vi.fn(async () => successResponse())
+    const client = makeMockClient({ setClipboard })
+    const device = new Device(client)
+    await device.setClipboard('Hello, world!')
+    expect(setClipboard).toHaveBeenCalledWith('Hello, world!')
+  })
+
+  it('throws on failure', async () => {
+    const client = makeMockClient({
+      setClipboard: vi.fn(async () => failureResponse('')),
+    })
+    const device = new Device(client)
+    await expect(device.setClipboard('x')).rejects.toThrow('Set clipboard failed')
+  })
+})
+
+describe('Device.getClipboard()', () => {
+  it('returns clipboard text', async () => {
+    const client = makeMockClient()
+    const device = new Device(client)
+    const text = await device.getClipboard()
+    expect(text).toBe('clipboard text')
+  })
+})
+
+// ─── Orientation ───
+
+describe('Device.setOrientation()', () => {
+  it('delegates to client.setOrientation', async () => {
+    const setOrientation = vi.fn(async () => successResponse())
+    const client = makeMockClient({ setOrientation })
+    const device = new Device(client)
+    await device.setOrientation('landscape')
+    expect(setOrientation).toHaveBeenCalledWith('landscape')
+  })
+
+  it('throws on failure', async () => {
+    const client = makeMockClient({
+      setOrientation: vi.fn(async () => failureResponse('')),
+    })
+    const device = new Device(client)
+    await expect(device.setOrientation('landscape')).rejects.toThrow('Set orientation failed')
+  })
+})
+
+describe('Device.getOrientation()', () => {
+  it('returns the orientation', async () => {
+    const client = makeMockClient()
+    const device = new Device(client)
+    const orientation = await device.getOrientation()
+    expect(orientation).toBe('portrait')
+  })
+})
+
+// ─── Keyboard ───
+
+describe('Device.isKeyboardShown()', () => {
+  it('returns keyboard visibility', async () => {
+    const client = makeMockClient()
+    const device = new Device(client)
+    const shown = await device.isKeyboardShown()
+    expect(shown).toBe(false)
+  })
+
+  it('returns true when keyboard is shown', async () => {
+    const client = makeMockClient({
+      isKeyboardShown: vi.fn(async () => ({ requestId: '1', shown: true })),
+    })
+    const device = new Device(client)
+    const shown = await device.isKeyboardShown()
+    expect(shown).toBe(true)
+  })
+})
+
+describe('Device.hideKeyboard()', () => {
+  it('delegates to client.hideKeyboard', async () => {
+    const hideKeyboard = vi.fn(async () => successResponse())
+    const client = makeMockClient({ hideKeyboard })
+    const device = new Device(client)
+    await device.hideKeyboard()
+    expect(hideKeyboard).toHaveBeenCalled()
+  })
+})
+
+// ─── Navigation convenience ───
+
+describe('Device.pressHome()', () => {
+  it('presses HOME key', async () => {
+    const pressKey = vi.fn(async () => successResponse())
+    const client = makeMockClient({ pressKey })
+    const device = new Device(client)
+    await device.pressHome()
+    expect(pressKey).toHaveBeenCalledWith('HOME')
+  })
+})
+
+describe('Device.openNotifications()', () => {
+  it('delegates to client.openNotifications', async () => {
+    const openNotifications = vi.fn(async () => successResponse())
+    const client = makeMockClient({ openNotifications })
+    const device = new Device(client)
+    await device.openNotifications()
+    expect(openNotifications).toHaveBeenCalled()
+  })
+})
+
+describe('Device.openQuickSettings()', () => {
+  it('delegates to client.openQuickSettings', async () => {
+    const openQuickSettings = vi.fn(async () => successResponse())
+    const client = makeMockClient({ openQuickSettings })
+    const device = new Device(client)
+    await device.openQuickSettings()
+    expect(openQuickSettings).toHaveBeenCalled()
+  })
+})
+
+describe('Device.pressRecentApps()', () => {
+  it('presses APP_SWITCH key', async () => {
+    const pressKey = vi.fn(async () => successResponse())
+    const client = makeMockClient({ pressKey })
+    const device = new Device(client)
+    await device.pressRecentApps()
+    expect(pressKey).toHaveBeenCalledWith('APP_SWITCH')
+  })
+})
+
+// ─── Color scheme ───
+
+describe('Device.setColorScheme()', () => {
+  it('delegates to client.setColorScheme', async () => {
+    const setColorScheme = vi.fn(async () => successResponse())
+    const client = makeMockClient({ setColorScheme })
+    const device = new Device(client)
+    await device.setColorScheme('dark')
+    expect(setColorScheme).toHaveBeenCalledWith('dark')
+  })
+
+  it('throws on failure', async () => {
+    const client = makeMockClient({
+      setColorScheme: vi.fn(async () => failureResponse('')),
+    })
+    const device = new Device(client)
+    await expect(device.setColorScheme('dark')).rejects.toThrow('Set color scheme failed')
+  })
+})
+
+describe('Device.getColorScheme()', () => {
+  it('returns the color scheme', async () => {
+    const client = makeMockClient()
+    const device = new Device(client)
+    const scheme = await device.getColorScheme()
+    expect(scheme).toBe('light')
+  })
+})
+
+// ─── wake() / unlock() ───
+
+describe('Device.wake()', () => {
+  it('delegates to client.wakeDevice', async () => {
+    const wakeDevice = vi.fn(async () => successResponse())
+    const client = makeMockClient({ wakeDevice })
+    const device = new Device(client)
+    await device.wake()
+    expect(wakeDevice).toHaveBeenCalled()
+  })
+
+  it('throws on failure', async () => {
+    const client = makeMockClient({
+      wakeDevice: vi.fn(async () => failureResponse('')),
+    })
+    const device = new Device(client)
+    await expect(device.wake()).rejects.toThrow('Wake device failed')
+  })
+})
+
+describe('Device.unlock()', () => {
+  it('delegates to client.unlockDevice', async () => {
+    const unlockDevice = vi.fn(async () => successResponse())
+    const client = makeMockClient({ unlockDevice })
+    const device = new Device(client)
+    await device.unlock()
+    expect(unlockDevice).toHaveBeenCalled()
+  })
+
+  it('throws on failure', async () => {
+    const client = makeMockClient({
+      unlockDevice: vi.fn(async () => failureResponse('')),
+    })
+    const device = new Device(client)
+    await expect(device.unlock()).rejects.toThrow('Unlock device failed')
+  })
+})
+
+// ─── startAgent() with APK paths ───
+
+describe('Device.startAgent()', () => {
+  it('delegates to client.startAgent with package name', async () => {
+    const startAgent = vi.fn(async () => successResponse())
+    const client = makeMockClient({ startAgent })
+    const device = new Device(client)
+    await device.startAgent('com.example.app')
+    expect(startAgent).toHaveBeenCalledWith('com.example.app', undefined, undefined)
+  })
+
+  it('passes APK paths through', async () => {
+    const startAgent = vi.fn(async () => successResponse())
+    const client = makeMockClient({ startAgent })
+    const device = new Device(client)
+    await device.startAgent('com.example.app', '/path/agent.apk', '/path/test.apk')
+    expect(startAgent).toHaveBeenCalledWith('com.example.app', '/path/agent.apk', '/path/test.apk')
+  })
+
+  it('throws on failure', async () => {
+    const client = makeMockClient({
+      startAgent: vi.fn(async () => failureResponse('Agent not installed')),
+    })
+    const device = new Device(client)
+    await expect(device.startAgent('com.example.app')).rejects.toThrow('Agent not installed')
   })
 })

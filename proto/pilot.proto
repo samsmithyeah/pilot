@@ -31,6 +31,29 @@ service PilotService {
   rpc Blur(BlurRequest) returns (ActionResponse);
   rpc Highlight(HighlightRequest) returns (ActionResponse);
   rpc TakeElementScreenshot(TakeElementScreenshotRequest) returns (ScreenshotResponse);
+
+  // ─── Device Management (PILOT-10) ───
+  rpc LaunchApp(LaunchAppRequest) returns (ActionResponse);
+  rpc OpenDeepLink(OpenDeepLinkRequest) returns (ActionResponse);
+  rpc GetCurrentPackage(GetCurrentPackageRequest) returns (GetCurrentPackageResponse);
+  rpc GetCurrentActivity(GetCurrentActivityRequest) returns (GetCurrentActivityResponse);
+  rpc TerminateApp(TerminateAppRequest) returns (ActionResponse);
+  rpc GetAppState(GetAppStateRequest) returns (GetAppStateResponse);
+  rpc ClearAppData(ClearAppDataRequest) returns (ActionResponse);
+  rpc GrantPermission(GrantPermissionRequest) returns (ActionResponse);
+  rpc RevokePermission(RevokePermissionRequest) returns (ActionResponse);
+  rpc SetClipboard(SetClipboardRequest) returns (ActionResponse);
+  rpc GetClipboard(GetClipboardRequest) returns (GetClipboardResponse);
+  rpc SetOrientation(SetOrientationRequest) returns (ActionResponse);
+  rpc GetOrientation(GetOrientationRequest) returns (GetOrientationResponse);
+  rpc IsKeyboardShown(IsKeyboardShownRequest) returns (IsKeyboardShownResponse);
+  rpc HideKeyboard(HideKeyboardRequest) returns (ActionResponse);
+  rpc OpenNotifications(OpenNotificationsRequest) returns (ActionResponse);
+  rpc OpenQuickSettings(OpenQuickSettingsRequest) returns (ActionResponse);
+  rpc SetColorScheme(SetColorSchemeRequest) returns (ActionResponse);
+  rpc GetColorScheme(GetColorSchemeRequest) returns (GetColorSchemeResponse);
+  rpc WakeDevice(WakeDeviceRequest) returns (ActionResponse);
+  rpc UnlockDevice(UnlockDeviceRequest) returns (ActionResponse);
 }
 
 // ─── Common Types ───
@@ -228,6 +251,8 @@ message SetDeviceRequest {
 message StartAgentRequest {
   string request_id = 1;
   string target_package = 2;
+  string agent_apk_path = 3;       // host path to agent APK (auto-install)
+  string agent_test_apk_path = 4;  // host path to agent test APK (auto-install)
 }
 
 message PingRequest {}
@@ -292,4 +317,140 @@ message TakeElementScreenshotRequest {
   string request_id = 1;
   Selector selector = 2;
   uint64 timeout_ms = 3;
+}
+
+// ─── Device Management (PILOT-10) ───
+
+message LaunchAppRequest {
+  string request_id = 1;
+  string package_name = 2;
+  string activity = 3;       // optional: specific activity to launch
+  bool clear_data = 4;       // clear app data before launch
+  bool wait_for_idle = 5;    // wait for UI to settle after launch
+}
+
+message OpenDeepLinkRequest {
+  string request_id = 1;
+  string uri = 2;
+}
+
+message GetCurrentPackageRequest {
+  string request_id = 1;
+}
+
+message GetCurrentPackageResponse {
+  string request_id = 1;
+  string package_name = 2;
+}
+
+message GetCurrentActivityRequest {
+  string request_id = 1;
+}
+
+message GetCurrentActivityResponse {
+  string request_id = 1;
+  string activity = 2;
+}
+
+message TerminateAppRequest {
+  string request_id = 1;
+  string package_name = 2;
+}
+
+message GetAppStateRequest {
+  string request_id = 1;
+  string package_name = 2;
+}
+
+message GetAppStateResponse {
+  string request_id = 1;
+  string state = 2;  // "not_installed" | "stopped" | "background" | "foreground"
+}
+
+message ClearAppDataRequest {
+  string request_id = 1;
+  string package_name = 2;
+}
+
+message GrantPermissionRequest {
+  string request_id = 1;
+  string package_name = 2;
+  string permission = 3;
+}
+
+message RevokePermissionRequest {
+  string request_id = 1;
+  string package_name = 2;
+  string permission = 3;
+}
+
+message SetClipboardRequest {
+  string request_id = 1;
+  string text = 2;
+}
+
+message GetClipboardRequest {
+  string request_id = 1;
+}
+
+message GetClipboardResponse {
+  string request_id = 1;
+  string text = 2;
+}
+
+message SetOrientationRequest {
+  string request_id = 1;
+  string orientation = 2;  // "portrait" | "landscape"
+}
+
+message GetOrientationRequest {
+  string request_id = 1;
+}
+
+message GetOrientationResponse {
+  string request_id = 1;
+  string orientation = 2;
+}
+
+message IsKeyboardShownRequest {
+  string request_id = 1;
+}
+
+message IsKeyboardShownResponse {
+  string request_id = 1;
+  bool shown = 2;
+}
+
+message HideKeyboardRequest {
+  string request_id = 1;
+}
+
+message OpenNotificationsRequest {
+  string request_id = 1;
+}
+
+message OpenQuickSettingsRequest {
+  string request_id = 1;
+}
+
+message SetColorSchemeRequest {
+  string request_id = 1;
+  string scheme = 2;  // "dark" | "light"
+}
+
+message GetColorSchemeRequest {
+  string request_id = 1;
+}
+
+message GetColorSchemeResponse {
+  string request_id = 1;
+  string scheme = 2;
+}
+
+message WakeDeviceRequest {
+  string request_id = 1;
+}
+
+message UnlockDeviceRequest {
+  string request_id = 1;
 }
