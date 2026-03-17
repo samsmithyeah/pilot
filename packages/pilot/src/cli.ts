@@ -448,10 +448,14 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // Launch the app under test
+  // Launch the app under test — force-stop first to ensure it starts fresh
+  // on the main activity regardless of any previous state.
   if (config.package) {
     try {
+      try { await device.terminateApp(config.package); } catch { /* may not be running */ }
+      await new Promise(r => setTimeout(r, 500));
       await device.launchApp(config.package);
+      await new Promise(r => setTimeout(r, 1_000));
       console.log(dim(`Launched ${config.package}`));
     } catch (err) {
       console.error(red(`Failed to launch app: ${err}`));
