@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -e
 
+CHANGED_FILES=$(git diff --cached --name-only)
+
 # ─── Rust ───
-if git diff --cached --name-only | grep -q '^packages/pilot-core/'; then
+if echo "$CHANGED_FILES" | grep -q '^packages/pilot-core/'; then
   echo "▸ Rust: cargo fmt --check"
   (cd packages/pilot-core && cargo fmt -- --check)
   echo "▸ Rust: cargo clippy"
@@ -12,7 +14,7 @@ if git diff --cached --name-only | grep -q '^packages/pilot-core/'; then
 fi
 
 # ─── TypeScript SDK ───
-if git diff --cached --name-only | grep -q '^packages/pilot/'; then
+if echo "$CHANGED_FILES" | grep -q '^packages/pilot/'; then
   echo "▸ TypeScript: typecheck"
   (cd packages/pilot && npm run typecheck)
   echo "▸ TypeScript: lint"
@@ -22,7 +24,7 @@ if git diff --cached --name-only | grep -q '^packages/pilot/'; then
 fi
 
 # ─── Proto ───
-if git diff --cached --name-only | grep -q '^proto/'; then
+if echo "$CHANGED_FILES" | grep -q '^proto/'; then
   if command -v buf &>/dev/null; then
     echo "▸ Proto: buf lint"
     buf lint proto/
@@ -30,7 +32,7 @@ if git diff --cached --name-only | grep -q '^proto/'; then
 fi
 
 # ─── Android agent ───
-if git diff --cached --name-only | grep -q '^agent/'; then
+if echo "$CHANGED_FILES" | grep -q '^agent/'; then
   echo "▸ Android: ktlintCheck"
   (cd agent && ./gradlew ktlintCheck)
 fi

@@ -404,7 +404,10 @@ class CommandHandler(
                     latch.countDown()
                 }
             }
-            latch.await(5, TimeUnit.SECONDS)
+            val completed = latch.await(5, TimeUnit.SECONDS)
+            if (!completed) {
+                throw TimeoutException("runOnMainThread timed out after 5 seconds")
+            }
         }
     }
 

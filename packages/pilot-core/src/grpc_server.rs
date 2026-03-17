@@ -197,6 +197,19 @@ impl PilotServiceImpl {
             }
         }
     }
+
+    /// Query dumpsys for the current resumed activity and return `(package, activity)`.
+    async fn get_current_component(&self) -> Result<Option<(String, String)>, Status> {
+        let serial = self.active_serial().await?;
+        let output = adb::shell_lenient(
+            &serial,
+            "dumpsys activity activities | grep -E 'mResumedActivity|ResumedActivity|topResumedActivity'",
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(parse_component_name(&output))
+    }
 }
 
 /// Convert a protobuf Selector into a JSON value for the agent protocol.
@@ -1134,16 +1147,30 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         // Clear data first if requested — fail fast if this doesn't succeed,
         // since launching with stale data would violate the caller's expectation.
         if req.clear_data {
-            if let Err(e) = adb::shell(&serial, &format!("pm clear {}", req.package_name)).await {
-                error!(error = %e, "Failed to clear app data before launch");
-                let screenshot = self.error_screenshot().await;
-                return Ok(Response::new(proto::ActionResponse {
-                    request_id,
-                    success: false,
-                    error_type: "CLEAR_DATA_FAILED".to_string(),
-                    error_message: format!("Failed to clear app data: {e}"),
-                    screenshot,
-                }));
+            match adb::shell(&serial, &format!("pm clear {}", req.package_name)).await {
+                Ok(output) if !output.trim().starts_with("Success") => {
+                    error!(output = %output.trim(), "pm clear did not report success");
+                    let screenshot = self.error_screenshot().await;
+                    return Ok(Response::new(proto::ActionResponse {
+                        request_id,
+                        success: false,
+                        error_type: "CLEAR_DATA_FAILED".to_string(),
+                        error_message: format!("Failed to clear app data: {}", output.trim()),
+                        screenshot,
+                    }));
+                }
+                Err(e) => {
+                    error!(error = %e, "Failed to clear app data before launch");
+                    let screenshot = self.error_screenshot().await;
+                    return Ok(Response::new(proto::ActionResponse {
+                        request_id,
+                        success: false,
+                        error_type: "CLEAR_DATA_FAILED".to_string(),
+                        error_message: format!("Failed to clear app data: {e}"),
+                        screenshot,
+                    }));
+                }
+                Ok(_) => {} // Success
             }
         }
 
@@ -1164,9 +1191,19 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
                     let idle_cmd = AgentCommand::WaitForIdle {
                         timeout_ms: Some(10_000),
                     };
-                    let _ = self
+                    if let Err(e) = self
                         .send_agent_command_with_timeout(&idle_cmd, 10_000)
-                        .await;
+                        .await
+                    {
+                        let screenshot = self.error_screenshot().await;
+                        return Ok(Response::new(proto::ActionResponse {
+                            request_id,
+                            success: false,
+                            error_type: "WAIT_FOR_IDLE_FAILED".to_string(),
+                            error_message: format!("App launched but UI did not become idle: {e}"),
+                            screenshot,
+                        }));
+                    }
                 }
                 Ok(Response::new(proto::ActionResponse {
                     request_id,
@@ -1221,16 +1258,10 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
     ) -> Result<Response<proto::GetCurrentPackageResponse>, Status> {
         let req = request.into_inner();
         let request_id = Self::request_id(&req.request_id);
-        let serial = self.active_serial().await?;
 
-        let output = adb::shell_lenient(
-            &serial,
-            "dumpsys activity activities | grep -E 'mResumedActivity|ResumedActivity|topResumedActivity'",
-        )
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
-
-        let package_name = parse_component_name(&output)
+        let package_name = self
+            .get_current_component()
+            .await?
             .map(|(pkg, _)| pkg)
             .unwrap_or_default();
 
@@ -1247,16 +1278,10 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
     ) -> Result<Response<proto::GetCurrentActivityResponse>, Status> {
         let req = request.into_inner();
         let request_id = Self::request_id(&req.request_id);
-        let serial = self.active_serial().await?;
 
-        let output = adb::shell_lenient(
-            &serial,
-            "dumpsys activity activities | grep -E 'mResumedActivity|ResumedActivity|topResumedActivity'",
-        )
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
-
-        let activity = parse_component_name(&output)
+        let activity = self
+            .get_current_component()
+            .await?
             .map(|(_, act)| act)
             .unwrap_or_default();
 
