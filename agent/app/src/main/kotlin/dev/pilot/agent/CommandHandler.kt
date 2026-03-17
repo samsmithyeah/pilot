@@ -11,6 +11,7 @@ import androidx.test.uiautomator.UiDevice
 import org.json.JSONObject
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Routes incoming JSON commands to the appropriate handler.
@@ -336,17 +337,18 @@ class CommandHandler(
                 // we read clipboard via the Instrumentation's own ClipboardManager which
                 // runs in the instrumented app's context. As a workaround, we store
                 // the last-set clipboard text in memory.
-                val holder = arrayOf("")
-                runOnMainThread {
-                    try {
-                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                        holder[0] = clipboard.primaryClip?.getItemAt(0)?.text?.toString() ?: ""
-                    } catch (e: Exception) {
-                        Log.w(TAG, "ClipboardManager read failed: ${e.message}")
+                val clipboardText =
+                    runOnMainThread {
+                        try {
+                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            clipboard.primaryClip?.getItemAt(0)?.text?.toString() ?: ""
+                        } catch (e: Exception) {
+                            Log.w(TAG, "ClipboardManager read failed: ${e.message}")
+                            ""
+                        }
                     }
-                }
                 // If ClipboardManager failed (Android 13+ restriction), fall back to cached value
-                val text = holder[0].ifEmpty { lastClipboardText }
+                val text = clipboardText.ifEmpty { lastClipboardText }
                 JSONObject().put("text", text)
             }
 
@@ -392,22 +394,25 @@ class CommandHandler(
     }
 
     /** Run a block on the main thread and wait for it to complete. */
-    private fun runOnMainThread(block: () -> Unit) {
+    private fun <T> runOnMainThread(block: () -> T): T {
         if (Looper.myLooper() == Looper.getMainLooper()) {
-            block()
+            return block()
         } else {
             val latch = CountDownLatch(1)
+            val result = AtomicReference<Result<T>>()
             Handler(Looper.getMainLooper()).post {
                 try {
-                    block()
+                    result.set(Result.success(block()))
+                } catch (e: Exception) {
+                    result.set(Result.failure(e))
                 } finally {
                     latch.countDown()
                 }
             }
-            val completed = latch.await(5, TimeUnit.SECONDS)
-            if (!completed) {
+            if (!latch.await(5, TimeUnit.SECONDS)) {
                 throw TimeoutException("runOnMainThread timed out after 5 seconds")
             }
+            return result.get().getOrThrow()
         }
     }
 
