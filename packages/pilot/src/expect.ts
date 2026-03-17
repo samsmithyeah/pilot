@@ -28,15 +28,20 @@ const POLL_INTERVAL_MS = 250;
 const POLL_FIND_TIMEOUT_MS = 100;
 
 /**
- * Repeatedly call `check` until it returns `true` or the timeout is exceeded.
+ * Repeatedly call `check` until it returns the expected value or the timeout
+ * is exceeded. When `expectFalse` is true the poll succeeds as soon as `check`
+ * returns `false` — used for negated assertions so they don't burn the entire
+ * timeout when the condition is already not met.
  */
 async function poll(
   check: () => Promise<boolean>,
   timeoutMs: number,
+  expectFalse = false,
 ): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (await check()) return true;
+    const value = await check();
+    if (expectFalse ? !value : value) return value;
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
   }
   // Final attempt
@@ -261,7 +266,7 @@ function createAssertions(
         } catch {
           return false;
         }
-      }, timeout);
+      }, timeout, negated);
 
       if (!negated && !result) {
         fail(`Expected element ${desc} to be visible, but it was not`);
@@ -281,7 +286,7 @@ function createAssertions(
         } catch {
           return false;
         }
-      }, timeout);
+      }, timeout, negated);
 
       if (!negated && !result) {
         fail(`Expected element ${desc} to be enabled, but it was not`);
@@ -306,7 +311,7 @@ function createAssertions(
         } catch {
           return false;
         }
-      }, timeout);
+      }, timeout, negated);
 
       if (!negated && !result) {
         fail(
@@ -330,7 +335,7 @@ function createAssertions(
         } catch {
           return false;
         }
-      }, timeout);
+      }, timeout, negated);
 
       if (!negated && !result) {
         fail(`Expected element ${desc} to exist, but it did not`);
@@ -352,7 +357,7 @@ function createAssertions(
         } catch {
           return false;
         }
-      }, timeout);
+      }, timeout, negated);
 
       if (!negated && !result) {
         fail(`Expected element ${desc} to be checked, but it was not`);
@@ -374,7 +379,7 @@ function createAssertions(
         } catch {
           return false;
         }
-      }, timeout);
+      }, timeout, negated);
 
       if (!negated && !result) {
         fail(`Expected element ${desc} to be disabled, but it was not`);
@@ -396,7 +401,7 @@ function createAssertions(
         } catch {
           return true;
         }
-      }, timeout);
+      }, timeout, negated);
 
       if (!negated && !result) {
         fail(`Expected element ${desc} to be hidden, but it was visible`);
@@ -423,7 +428,7 @@ function createAssertions(
         } catch {
           return false;
         }
-      }, timeout);
+      }, timeout, negated);
 
       if (!negated && !result) {
         fail(
@@ -447,7 +452,7 @@ function createAssertions(
         } catch {
           return false;
         }
-      }, timeout);
+      }, timeout, negated);
 
       if (!negated && !result) {
         fail(`Expected element ${desc} to be focused, but it was not`);
@@ -474,7 +479,7 @@ function createAssertions(
         } catch {
           return false;
         }
-      }, timeout);
+      }, timeout, negated);
 
       if (!negated && !result) {
         fail(
@@ -502,7 +507,7 @@ function createAssertions(
         } catch {
           return false;
         }
-      }, timeout);
+      }, timeout, negated);
 
       if (!negated && !result) {
         fail(
@@ -533,7 +538,7 @@ function createAssertions(
         } catch {
           return false;
         }
-      }, timeout);
+      }, timeout, negated);
 
       if (!negated && !result) {
         fail(
@@ -565,7 +570,7 @@ function createAssertions(
         } catch {
           return false;
         }
-      }, timeout);
+      }, timeout, negated);
 
       if (!negated && !result) {
         fail(
@@ -596,7 +601,7 @@ function createAssertions(
         } catch {
           return false;
         }
-      }, timeout);
+      }, timeout, negated);
 
       if (!negated && !result) {
         fail(
@@ -629,7 +634,7 @@ function createAssertions(
         } catch {
           return false;
         }
-      }, timeout);
+      }, timeout, negated);
 
       if (!negated && !result) {
         fail(
@@ -658,7 +663,7 @@ function createAssertions(
         } catch {
           return false;
         }
-      }, timeout);
+      }, timeout, negated);
 
       if (!negated && !result) {
         fail(
@@ -690,7 +695,7 @@ function createAssertions(
         } catch {
           return false;
         }
-      }, timeout);
+      }, timeout, negated);
 
       if (!negated && !result) {
         fail(`Expected element ${desc} to be editable, but it was not`);
@@ -721,7 +726,7 @@ function createAssertions(
         } catch {
           return false;
         }
-      }, timeout);
+      }, timeout, negated);
 
       if (!negated && !result) {
         const ratioInfo =
