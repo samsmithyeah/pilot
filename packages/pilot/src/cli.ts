@@ -440,24 +440,17 @@ async function main(): Promise<void> {
 
   // ─── Parallel mode ───
   if (config.workers > 1) {
-    // Pre-flight: verify ADB is available (skip device-specific check in parallel mode
-    // since the dispatcher manages device assignment and may launch emulators)
-    await checkDeviceHealth(undefined);
-
-    // Need a client to discover devices
-    const client = await ensureDaemonRunning(config.daemonAddress, config.daemonBin);
-
+    // The dispatcher manages its own daemons — one per worker — each with
+    // exclusive ADB access to its assigned device. No discovery daemon needed.
     const { runParallel } = await import('./dispatcher.js');
     const fullResult = await runParallel({
       config,
-      client,
       reporter,
       testFiles,
       workers: config.workers,
     });
 
     await reporter.onRunEnd(fullResult);
-    client.close();
     process.exit(fullResult.status === 'failed' ? 1 : 0);
   }
 

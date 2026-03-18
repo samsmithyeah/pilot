@@ -182,6 +182,7 @@ process.on('message', async (msg: MainToWorkerMessage) => {
     }
   } catch (err) {
     const error = err instanceof Error ? err : new Error(String(err))
+    process.stderr.write(`Worker ${workerId} error: ${error.message}\n`)
     send({
       type: 'error',
       workerId,
