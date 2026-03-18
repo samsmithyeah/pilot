@@ -41,11 +41,13 @@ function configFromSerialized(s: SerializedConfig, daemonAddress: string): Pilot
     daemonAddress,
     rootDir: s.rootDir,
     outputDir: s.outputDir,
+    apk: s.apk,
     package: s.package,
     agentApk: s.agentApk,
     agentTestApk: s.agentTestApk,
     workers: 1,
     fullyParallel: false,
+    launchEmulators: false,
   }
 }
 
@@ -69,6 +71,22 @@ async function handleInit(msg: InitMessage): Promise<void> {
     await device.setDevice(msg.deviceSerial)
   }
 
+  // Wake and unlock device screen
+  try {
+    await device.wake()
+    await device.unlock()
+  } catch {
+    // Non-fatal
+  }
+
+  // Install app under test if APK path is configured
+  if (config.apk) {
+    const resolvedApk = path.resolve(config.rootDir, config.apk)
+    await device.installApk(resolvedApk)
+    // Give package manager time to index the new app
+    await new Promise((r) => setTimeout(r, 2_000))
+  }
+
   // Start agent
   const resolvedAgentApk = config.agentApk
     ? path.resolve(config.rootDir, config.agentApk)
@@ -81,7 +99,13 @@ async function handleInit(msg: InitMessage): Promise<void> {
   // Launch app under test
   if (config.package) {
     try { await device.terminateApp(config.package) } catch { /* may not be running */ }
-    await device.launchApp(config.package)
+    try {
+      await device.launchApp(config.package)
+    } catch (err) {
+      throw new Error(
+        `Worker ${workerId} (${msg.deviceSerial}): Failed to launch app: ${err instanceof Error ? err.message : err}`,
+      )
+    }
   }
 
   send({ type: 'ready', workerId })

@@ -17,6 +17,8 @@ describe('defineConfig()', () => {
     expect(config.workers).toBe(1);
     expect(config.fullyParallel).toBe(false);
     expect(config.shard).toBeUndefined();
+    expect(config.launchEmulators).toBe(false);
+    expect(config.avd).toBeUndefined();
   });
 
   it('returns defaults when called with empty object', () => {

@@ -79,6 +79,21 @@ export interface PilotConfig {
    * Usually set via the `--shard=x/y` CLI flag.
    */
   shard?: { current: number; total: number };
+
+  /**
+   * Automatically launch emulators to fill the requested worker count.
+   * When true and `workers > 1`, the dispatcher will start Android emulators
+   * for any workers that don't have an already-running device.
+   * Defaults to false.
+   */
+  launchEmulators: boolean;
+
+  /**
+   * Android Virtual Device (AVD) name to use when launching emulators.
+   * Required when `launchEmulators` is true. Run `emulator -list-avds` to see
+   * available AVDs.
+   */
+  avd?: string;
 }
 
 const DEFAULT_CONFIG: PilotConfig = {
@@ -91,6 +106,7 @@ const DEFAULT_CONFIG: PilotConfig = {
   outputDir: 'pilot-results',
   workers: 1,
   fullyParallel: false,
+  launchEmulators: false,
 };
 
 /**

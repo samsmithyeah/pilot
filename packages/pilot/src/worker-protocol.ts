@@ -78,6 +78,7 @@ export interface SerializedConfig {
   screenshot: 'always' | 'only-on-failure' | 'never'
   rootDir: string
   outputDir: string
+  apk?: string
   package?: string
   agentApk?: string
   agentTestApk?: string

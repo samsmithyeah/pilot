@@ -440,8 +440,9 @@ async function main(): Promise<void> {
 
   // ─── Parallel mode ───
   if (config.workers > 1) {
-    // Pre-flight: just check that ADB is available (individual workers manage their own devices)
-    await checkDeviceHealth(config.device);
+    // Pre-flight: verify ADB is available (skip device-specific check in parallel mode
+    // since the dispatcher manages device assignment and may launch emulators)
+    await checkDeviceHealth(undefined);
 
     // Need a client to discover devices
     const client = await ensureDaemonRunning(config.daemonAddress, config.daemonBin);

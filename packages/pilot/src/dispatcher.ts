@@ -21,6 +21,7 @@ import type {
   SerializedConfig,
 } from './worker-protocol.js'
 import { deserializeTestResult, deserializeSuiteResult } from './worker-protocol.js'
+import { provisionEmulators, cleanupEmulators, type LaunchedEmulator } from './emulator.js'
 
 const DIM = '\x1b[2m'
 const YELLOW = '\x1b[33m'
@@ -57,15 +58,34 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
     d.state === 'Discovered' || d.state === 'Active',
   )
 
-  if (onlineDevices.length === 0) {
-    throw new Error('No online devices found. Connect a device or start an emulator.')
+  // Auto-launch emulators if enabled and we don't have enough devices
+  let launchedEmulators: LaunchedEmulator[] = []
+  let deviceSerials: string[]
+
+  if (config.launchEmulators && onlineDevices.length < Math.min(opts.workers, testFiles.length)) {
+    const provision = await provisionEmulators({
+      existingSerials: onlineDevices.map((d) => d.serial),
+      workers: Math.min(opts.workers, testFiles.length),
+      avd: config.avd,
+    })
+    launchedEmulators = provision.launched
+    deviceSerials = provision.allSerials
+  } else {
+    deviceSerials = onlineDevices.map((d) => d.serial)
   }
 
-  const workerCount = Math.min(opts.workers, onlineDevices.length, testFiles.length)
+  if (deviceSerials.length === 0) {
+    throw new Error(
+      'No online devices found. Connect a device, start an emulator, ' +
+      'or set `launchEmulators: true` in your config.',
+    )
+  }
+
+  const workerCount = Math.min(opts.workers, deviceSerials.length, testFiles.length)
 
   if (workerCount < opts.workers) {
-    const reason = onlineDevices.length < opts.workers
-      ? `only ${onlineDevices.length} device(s) available`
+    const reason = deviceSerials.length < opts.workers
+      ? `only ${deviceSerials.length} device(s) available`
       : `only ${testFiles.length} test file(s) to run`
     process.stderr.write(
       `${YELLOW}Warning: Requested ${opts.workers} workers but ${reason}. Using ${workerCount} worker(s).${RESET}\n`,
@@ -86,7 +106,7 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
     for (let i = 0; i < workerCount; i++) {
       const daemonPort = baseDaemonPort + 1 + i
       const agentPort = baseAgentPort + 1 + i
-      const deviceSerial = onlineDevices[i].serial
+      const deviceSerial = deviceSerials[i]
 
       // Spawn a dedicated pilot-core daemon for this worker
       const daemonBin = process.env.PILOT_DAEMON_BIN ?? config.daemonBin ?? 'pilot-core'
@@ -138,6 +158,7 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
       screenshot: config.screenshot,
       rootDir: config.rootDir,
       outputDir: config.outputDir,
+      apk: config.apk,
       package: config.package,
       agentApk: config.agentApk,
       agentTestApk: config.agentTestApk,
@@ -263,6 +284,11 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
       try {
         worker.daemonProcess?.kill()
       } catch { /* daemon may already be dead */ }
+    }
+
+    // Shut down any emulators we launched
+    if (launchedEmulators.length > 0) {
+      cleanupEmulators(launchedEmulators)
     }
   }
 
