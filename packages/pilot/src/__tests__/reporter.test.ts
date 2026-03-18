@@ -304,10 +304,15 @@ describe('DotReporter', () => {
     reporter.onTestEnd!(makeTestResult({ status: 'failed', error: new Error('x') }))
     reporter.onTestEnd!(makeTestResult({ status: 'skipped' }))
 
-    // Should have written 3 chars (plus newline and header)
-    const chars = stdoutSpy.mock.calls.map((c: unknown[]) => c[0]).join('')
-    // Contains the dot chars (may include ANSI codes)
-    expect(chars).toBeTruthy()
+    // Should have written dot characters (with ANSI color codes)
+    // 3 test results + 1 header newline = at least 4 write calls
+    expect(stdoutSpy.mock.calls.length).toBeGreaterThanOrEqual(4)
+    // Strip ANSI codes and verify the actual dot characters
+    const raw = stdoutSpy.mock.calls.map((c: unknown[]) => c[0]).join('')
+    const stripped = raw.replace(/\x1b\[\d+m/g, '')
+    expect(stripped).toContain('·')
+    expect(stripped).toContain('F')
+    expect(stripped).toContain('×')
   })
 
   it('prints failure summary on onRunEnd', () => {
