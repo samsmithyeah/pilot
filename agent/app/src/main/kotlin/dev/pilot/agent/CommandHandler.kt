@@ -155,10 +155,18 @@ class CommandHandler(
 
             "typeText" -> {
                 val text = params.getString("text")
-                val hasSelector =
-                    params.has("role") || params.has("id") ||
-                        params.has("contentDesc") || params.has("className") || params.has("testId") ||
-                        params.has("hint") || params.has("textContains") || params.has("elementId")
+                val selectorKeys =
+                    listOf(
+                        "role",
+                        "id",
+                        "contentDesc",
+                        "className",
+                        "testId",
+                        "hint",
+                        "textContains",
+                        "elementId",
+                    )
+                val hasSelector = selectorKeys.any(params::has)
                 if (hasSelector) {
                     // Remove "text" from params before resolving selector, since "text" here
                     // is the value to type, not a text selector. Without this, parseSelectorParams
@@ -363,15 +371,9 @@ class CommandHandler(
     private fun parseSelectorParams(params: JSONObject): ElementSelector {
         // Handle "role" which can be either a string or a {"role": "...", "name": "..."} object
         val roleObj = params.opt("role")
-        val role: String?
-        val name: String?
-        if (roleObj is JSONObject) {
-            role = roleObj.optString("role", null)?.ifEmpty { null }
-            name = roleObj.optString("name", null)?.ifEmpty { null }
-        } else {
-            role = params.optString("role", null)?.ifEmpty { null }
-            name = params.optString("name", null)?.ifEmpty { null }
-        }
+        val source = if (roleObj is JSONObject) roleObj else params
+        val role = source.optString("role", null)?.ifEmpty { null }
+        val name = source.optString("name", null)?.ifEmpty { null }
 
         // Handle "resourceId" (sent by daemon) or "id" (legacy)
         val resourceId = params.optString("resourceId", null) ?: params.optString("id", null)

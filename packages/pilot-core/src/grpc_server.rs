@@ -206,15 +206,21 @@ impl PilotServiceImpl {
         request_id: String,
         launch_cmd: &str,
         wait_for_idle: bool,
+        idle_timeout_ms: u64,
     ) -> Result<Response<proto::ActionResponse>, Status> {
+        let idle_timeout = if idle_timeout_ms > 0 {
+            idle_timeout_ms
+        } else {
+            10_000
+        };
         match adb::shell(serial, launch_cmd).await {
             Ok(_) => {
                 if wait_for_idle {
                     let idle_cmd = AgentCommand::WaitForIdle {
-                        timeout_ms: Some(10_000),
+                        timeout_ms: Some(idle_timeout),
                     };
                     if let Err(e) = self
-                        .send_agent_command_with_timeout(&idle_cmd, 10_000)
+                        .send_agent_command_with_timeout(&idle_cmd, idle_timeout)
                         .await
                     {
                         let screenshot = self.error_screenshot().await;
@@ -1233,8 +1239,14 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
             format!("am start -n {}/{}", req.package_name, req.activity)
         };
 
-        self.launch_and_idle(&serial, request_id, &cmd, req.wait_for_idle)
-            .await
+        self.launch_and_idle(
+            &serial,
+            request_id,
+            &cmd,
+            req.wait_for_idle,
+            req.idle_timeout_ms,
+        )
+        .await
     }
 
     #[instrument(skip_all, fields(request_id))]
@@ -1333,8 +1345,14 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
             req.package_name
         );
 
-        self.launch_and_idle(&serial, request_id, &launch_cmd, req.wait_for_idle)
-            .await
+        self.launch_and_idle(
+            &serial,
+            request_id,
+            &launch_cmd,
+            req.wait_for_idle,
+            req.idle_timeout_ms,
+        )
+        .await
     }
 
     #[instrument(skip_all, fields(request_id))]

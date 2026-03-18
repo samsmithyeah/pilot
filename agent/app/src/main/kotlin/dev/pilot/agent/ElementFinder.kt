@@ -330,10 +330,11 @@ class ElementFinder(private val device: UiDevice) {
 
         val results =
             if (parent != null) {
-                parent.findObjects(bySelector) ?: emptyList()
+                parent.findObjects(bySelector)
             } else {
-                device.findObjects(bySelector) ?: emptyList()
+                device.findObjects(bySelector)
             }
+                ?: emptyList()
 
         // Post-filter by role name: match contentDescription, text, or descendant text
         if (selector.role != null && selector.name != null) {
