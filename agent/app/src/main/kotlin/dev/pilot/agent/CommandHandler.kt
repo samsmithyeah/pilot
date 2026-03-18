@@ -77,12 +77,9 @@ class CommandHandler(
     private fun resolveElement(params: JSONObject): ElementInfo {
         val elementId = params.optString("elementId", null)
         if (elementId != null) {
-            // Use cached element
-            val obj = elementFinder.getElement(elementId)
-            return elementFinder.findElement(
-                ElementSelector(className = obj.className),
-                null,
-            )
+            // Use cached element directly — avoids a new search by className
+            // which is not guaranteed to be unique.
+            return elementFinder.getElementInfo(elementId)
         }
         // Selector-based: auto-wait then find
         val selector = parseSelectorParams(params)

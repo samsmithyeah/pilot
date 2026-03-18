@@ -304,6 +304,15 @@ class ElementFinder(private val device: UiDevice) {
     }
 
     /**
+     * Get the ElementInfo for a cached element, reading its current properties
+     * directly from the UiObject2 rather than performing a new search.
+     */
+    fun getElementInfo(elementId: String): ElementInfo {
+        val obj = getElement(elementId)
+        return toElementInfo(obj, elementId)
+    }
+
+    /**
      * Get the bounds of a cached element for action execution.
      */
     fun getElementBounds(elementId: String): Rect {
@@ -482,9 +491,10 @@ class ElementFinder(private val device: UiDevice) {
         }
     }
 
-    private fun cacheAndConvert(obj: UiObject2): ElementInfo {
-        val elementId = UUID.randomUUID().toString()
-        elementCache[elementId] = obj
+    private fun toElementInfo(
+        obj: UiObject2,
+        elementId: String,
+    ): ElementInfo {
         val bounds =
             try {
                 obj.visibleBounds
@@ -512,6 +522,12 @@ class ElementFinder(private val device: UiDevice) {
             role = resolveRole(className),
             viewportRatio = computeViewportRatio(bounds),
         )
+    }
+
+    private fun cacheAndConvert(obj: UiObject2): ElementInfo {
+        val elementId = UUID.randomUUID().toString()
+        elementCache[elementId] = obj
+        return toElementInfo(obj, elementId)
     }
 
     /**
