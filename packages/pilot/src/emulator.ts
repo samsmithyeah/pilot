@@ -554,9 +554,9 @@ function extractHierarchyXml(raw: string): string {
 export function detectBlockingSystemDialog(rawHierarchy: string): string | undefined {
   const hierarchy = rawHierarchy.toLowerCase()
   const patterns = [
-    /isn(?:'|&apos;|’)t responding/,
+    /isn(?:’|&apos;|’)t responding/,
     /keeps stopping/,
-    /wait/,
+    /text="wait"/,
     /close app/,
     /app info/,
   ]
@@ -1056,13 +1056,17 @@ export async function provisionEmulators(opts: {
   // Launch emulators
   const launched: LaunchedEmulator[] = []
   const badAvds = new Set<string>()
+  const existingCount = existingSerials.length
+  const existingNote = existingCount > 0
+    ? ` (${existingCount} already connected, need ${workers} total)`
+    : ''
   if (avd) {
     process.stderr.write(
-      `${DIM}Launching ${needed} emulator(s) using AVD ${avd}...${RESET}\n`,
+      `${DIM}Launching ${needed} emulator(s) using AVD ${avd}${existingNote}...${RESET}\n`,
     )
   } else {
     process.stderr.write(
-      `${DIM}Launching ${needed} emulator(s) from available AVDs (${launchCandidates.join(', ')})...${RESET}\n`,
+      `${DIM}Launching ${needed} emulator(s) from available AVDs (${launchCandidates.join(', ')})${existingNote}...${RESET}\n`,
     )
   }
 

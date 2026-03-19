@@ -18,7 +18,18 @@ import {
   waitForDeviceStability,
 } from '../emulator.js'
 
+const manifestFile = path.join(os.tmpdir(), 'pilot-emulators.json')
+
 describe('emulator utilities', () => {
+  // Clean the PID manifest before/after all tests so provisionEmulators
+  // tests don't leak fake entries that confuse real `npx pilot test` runs.
+  beforeEach(() => {
+    try { fs.unlinkSync(manifestFile) } catch { /* ok */ }
+  })
+  afterEach(() => {
+    try { fs.unlinkSync(manifestFile) } catch { /* ok */ }
+  })
+
   describe('findAvailablePort', () => {
     it('returns base port when no ports are used', () => {
       expect(findAvailablePort(new Set())).toBe(5554)
@@ -313,16 +324,6 @@ describe('emulator utilities', () => {
   })
 
   describe('PID manifest', () => {
-    const manifestFile = path.join(os.tmpdir(), 'pilot-emulators.json')
-
-    beforeEach(() => {
-      try { fs.unlinkSync(manifestFile) } catch { /* ok */ }
-    })
-
-    afterEach(() => {
-      try { fs.unlinkSync(manifestFile) } catch { /* ok */ }
-    })
-
     it('records and unrecords launched emulators', () => {
       const launched = [
         makeLaunchedEmulator('TestAVD', 5554),
