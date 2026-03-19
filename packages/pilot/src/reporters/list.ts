@@ -18,6 +18,7 @@ import {
   formatDuration,
   formatError,
   formatSummaryLine,
+  workerTag,
 } from './base.js'
 
 export class ListReporter implements PilotReporter {
@@ -42,7 +43,8 @@ export class ListReporter implements PilotReporter {
     const icon = statusIcon(test.status)
     const duration = dim(`(${formatDuration(test.durationMs)})`)
     const counter = dim(`[${this._testIndex}]`)
-    process.stdout.write(`  ${icon} ${counter} ${test.fullName} ${duration}\n`)
+    const worker = workerTag(test.workerIndex)
+    process.stdout.write(`  ${icon} ${counter} ${worker}${test.fullName} ${duration}\n`)
 
     if (test.error) {
       process.stdout.write(formatError(test.error) + '\n')
@@ -70,12 +72,12 @@ export class ListReporter implements PilotReporter {
       process.stdout.write(bold(red('Failures:\n\n')))
       for (const test of result.tests) {
         if (test.status === 'failed' && test.error) {
-          process.stdout.write(`  ${red('✗')} ${test.fullName}\n`)
+          process.stdout.write(`  ${red('✗')} ${workerTag(test.workerIndex)}${test.fullName}\n`)
           process.stdout.write(formatError(test.error) + '\n\n')
         }
       }
     }
 
-    process.stdout.write(formatSummaryLine(passed, failed, skipped, result.duration) + '\n\n')
+    process.stdout.write(formatSummaryLine(passed, failed, skipped, result.duration, result.setupDuration) + '\n\n')
   }
 }

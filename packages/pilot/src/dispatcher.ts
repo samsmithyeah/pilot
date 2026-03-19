@@ -183,6 +183,7 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
   const allResults: TestResult[] = []
   const allSuites: SuiteResult[] = []
   const totalStart = Date.now()
+  let setupDuration = 0
   const maxUsefulWorkers = Math.min(opts.workers, testFiles.length)
   let firstDaemonAssigned = false
 
@@ -297,6 +298,8 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
         `${YELLOW}Warning: Requested ${opts.workers} workers but ${reason}. Using ${workerCount} worker(s).${RESET}\n`,
       )
     }
+
+    setupDuration = Date.now() - totalStart
 
     process.stderr.write(
       `${DIM}Running ${testFiles.length} test file(s) across ${workerCount} worker(s)${RESET}\n`,
@@ -485,6 +488,7 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
   return {
     status: hasFailed ? 'failed' : 'passed',
     duration: totalDuration,
+    setupDuration,
     tests: allResults,
     suites: allSuites,
   }

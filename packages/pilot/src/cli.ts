@@ -592,6 +592,7 @@ async function main(): Promise<void> {
   let client: PilotGrpcClient | undefined;
   let device: Device | undefined;
   let sequentialExitCode = 1;
+  const sequentialStart = Date.now();
 
   try {
     const target = await ensureSequentialTargetDevice(config);
@@ -709,7 +710,7 @@ async function main(): Promise<void> {
     // Run tests
     const allResults: TestResult[] = [];
     const allSuites: SuiteResult[] = [];
-    const totalStart = Date.now();
+    const setupDuration = Date.now() - sequentialStart;
 
     const screenshotDir =
       config.screenshot !== 'never'
@@ -760,11 +761,12 @@ async function main(): Promise<void> {
       reporter.onTestFileEnd(file, fileResults);
     }
 
-    const totalDurationMs = Date.now() - totalStart;
+    const totalDurationMs = Date.now() - sequentialStart;
     const hasFailed = allResults.some((r) => r.status === 'failed');
     const fullResult: FullResult = {
       status: hasFailed ? 'failed' : 'passed',
       duration: totalDurationMs,
+      setupDuration,
       tests: allResults,
       suites: allSuites,
     };
