@@ -1,9 +1,15 @@
-import { describe, it, expect, vi } from 'vitest'
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest'
+import * as fs from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
 import {
   findAvailablePort,
   serialForPort,
   readUiHierarchyViaAdb,
   detectBlockingSystemDialog,
+  dismissSystemDialogsViaAdb,
+  recordLaunchedEmulators,
+  unrecordLaunchedEmulators,
   probeDeviceHealth,
   filterHealthyDevices,
   prefilterDevicesForStrategy,
@@ -90,8 +96,9 @@ describe('emulator utilities', () => {
       })
     })
 
-    it('rejects a device showing a blocking system dialog', () => {
-      const exec = makeExec({
+    it('rejects a device showing a blocking system dialog that persists after dismissal', () => {
+      // The dialog persists even after dismissal attempts — all dumps return the ANR.
+      const exec = makePermissiveExec({
         'adb|-s|emulator-5554|shell|echo|__pilot_health_ok__': '__pilot_health_ok__\n',
         'adb|-s|emulator-5554|shell|getprop|sys.boot_completed': '1\n',
         'adb|-s|emulator-5554|shell|pm|path|android': 'package:/system/framework/framework-res.apk\n',
@@ -99,11 +106,10 @@ describe('emulator utilities', () => {
           'UI hierchary dumped to: /dev/tty\n<hierarchy><node text="Pixel Launcher isn&apos;t responding" /></hierarchy>\n',
       })
 
-      expect(probeDeviceHealth('emulator-5554', exec)).toEqual({
-        serial: 'emulator-5554',
-        healthy: false,
-        reason: 'blocking system dialog detected (<hierarchy><node text="Pixel Launcher isn&apos;t responding" /></hierarchy>)',
-      })
+      const result = probeDeviceHealth('emulator-5554', exec)
+      expect(result.serial).toBe('emulator-5554')
+      expect(result.healthy).toBe(false)
+      expect(result.reason).toContain('blocking system dialog detected')
     })
   })
 
@@ -121,6 +127,68 @@ describe('emulator utilities', () => {
       expect(
         detectBlockingSystemDialog('<hierarchy><node text="Pixel Launcher isn&apos;t responding" /></hierarchy>'),
       ).toContain('Pixel Launcher')
+    })
+  })
+
+  describe('dismissSystemDialogsViaAdb', () => {
+    it('returns false when no blocking dialog is present', () => {
+      const exec = makeExec({
+        'adb|-s|emulator-5554|exec-out|uiautomator|dump|/dev/tty':
+          'UI hierchary dumped to: /dev/tty\n<hierarchy><node text="Home" /></hierarchy>\n',
+      })
+
+      expect(dismissSystemDialogsViaAdb('emulator-5554', exec)).toBe(false)
+    })
+
+    it('sends keyevents and force-stops launcher when ANR is detected', () => {
+      const calls: string[] = []
+      const exec = ((file: string, args: string[]) => {
+        const key = [file, ...args].join('|')
+        calls.push(key)
+
+        // First dump: ANR present. Second dump: ANR gone.
+        if (key.includes('uiautomator|dump')) {
+          if (calls.filter((c) => c.includes('uiautomator|dump')).length === 1) {
+            return 'UI hierchary dumped to: /dev/tty\n<hierarchy><node text="Pixel Launcher isn&apos;t responding" /></hierarchy>\n'
+          }
+          return 'UI hierchary dumped to: /dev/tty\n<hierarchy><node text="Home" /></hierarchy>\n'
+        }
+
+        return ''
+      }) as unknown as typeof import('node:child_process').execFileSync
+
+      const result = dismissSystemDialogsViaAdb('emulator-5554', exec)
+      expect(result).toBe(true)
+      expect(calls.some((c) => c.includes('KEYCODE_ENTER'))).toBe(true)
+      expect(calls.some((c) => c.includes('force-stop'))).toBe(true)
+      expect(calls.some((c) => c.includes('KEYCODE_HOME'))).toBe(true)
+    })
+  })
+
+  describe('probeDeviceHealth with ANR auto-dismissal', () => {
+    it('auto-dismisses a blocking dialog and reports healthy', () => {
+      let dumpCount = 0
+      const exec = ((file: string, args: string[]) => {
+        const key = [file, ...args].join('|')
+
+        if (key.includes('echo|__pilot_health_ok__')) return '__pilot_health_ok__\n'
+        if (key.includes('getprop|sys.boot_completed')) return '1\n'
+        if (key.includes('pm|path|android')) return 'package:/system/framework/framework-res.apk\n'
+
+        if (key.includes('uiautomator|dump')) {
+          dumpCount++
+          // First two dumps show ANR, third is clear (after dismissal)
+          if (dumpCount <= 1) {
+            return 'UI hierchary dumped to: /dev/tty\n<hierarchy><node text="Pixel Launcher isn&apos;t responding" /></hierarchy>\n'
+          }
+          return 'UI hierchary dumped to: /dev/tty\n<hierarchy><node text="Home" /></hierarchy>\n'
+        }
+
+        return ''
+      }) as unknown as typeof import('node:child_process').execFileSync
+
+      const result = probeDeviceHealth('emulator-5554', exec)
+      expect(result.healthy).toBe(true)
     })
   })
 
@@ -241,6 +309,44 @@ describe('emulator utilities', () => {
       expect(() => selectDevicesForStrategy(['emulator-5554'], 'avd-only', undefined)).toThrow(
         'deviceStrategy "avd-only" requires `avd` to be set in config',
       )
+    })
+  })
+
+  describe('PID manifest', () => {
+    const manifestFile = path.join(os.tmpdir(), 'pilot-emulators.json')
+
+    beforeEach(() => {
+      try { fs.unlinkSync(manifestFile) } catch { /* ok */ }
+    })
+
+    afterEach(() => {
+      try { fs.unlinkSync(manifestFile) } catch { /* ok */ }
+    })
+
+    it('records and unrecords launched emulators', () => {
+      const launched = [
+        makeLaunchedEmulator('TestAVD', 5554),
+        makeLaunchedEmulator('TestAVD', 5556),
+      ]
+      // Simulate PIDs
+      Object.defineProperty(launched[0].process, 'pid', { value: 12345 })
+      Object.defineProperty(launched[1].process, 'pid', { value: 12346 })
+
+      recordLaunchedEmulators(launched)
+
+      const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf-8'))
+      expect(manifest).toHaveLength(2)
+      expect(manifest[0].serial).toBe('emulator-5554')
+      expect(manifest[0].pid).toBe(12345)
+      expect(manifest[0].avd).toBe('TestAVD')
+      expect(manifest[1].serial).toBe('emulator-5556')
+
+      // Unrecord one
+      unrecordLaunchedEmulators([launched[0]])
+
+      const afterUnrecord = JSON.parse(fs.readFileSync(manifestFile, 'utf-8'))
+      expect(afterUnrecord).toHaveLength(1)
+      expect(afterUnrecord[0].serial).toBe('emulator-5556')
     })
   })
 
@@ -372,6 +478,21 @@ function makeExec(responses: Record<string, string | Error>) {
       throw new Error(`Unexpected command: ${key}`)
     }
     return response
+  }) as unknown as typeof import('node:child_process').execFileSync
+}
+
+/**
+ * Like makeExec but returns '' for unknown commands instead of throwing.
+ * Useful for tests that trigger side-effect commands (like ANR dismissal).
+ */
+function makePermissiveExec(responses: Record<string, string | Error>) {
+  return ((file: string, args: string[]) => {
+    const key = [file, ...args].join('|')
+    const response = responses[key]
+    if (response instanceof Error) {
+      throw response
+    }
+    return response ?? ''
   }) as unknown as typeof import('node:child_process').execFileSync
 }
 

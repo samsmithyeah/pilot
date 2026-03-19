@@ -2,6 +2,7 @@ import type { PilotConfig } from './config.js'
 import type { Device } from './device.js'
 import type { LaunchAppOptions, PilotGrpcClient } from './grpc-client.js'
 import { text } from './selectors.js'
+import { dismissSystemDialogsViaAdb } from './emulator.js'
 
 type SessionDevice = Pick<Device, 'startAgent' | 'terminateApp' | 'launchApp' | 'waitForIdle' | 'currentPackage' | 'tap' | 'pressBack'>
 type SessionClient = Pick<PilotGrpcClient, 'ping' | 'getUiHierarchy'>
@@ -13,6 +14,8 @@ export interface SessionPreflightContext {
   client: SessionClient
   agentApkPath?: string
   agentTestApkPath?: string
+  /** ADB serial for this device — enables ADB-level recovery when agent is unavailable */
+  deviceSerial?: string
 }
 
 const DEFAULT_READY_TIMEOUT_MS = 5_000
@@ -90,6 +93,12 @@ async function verifySession(ctx: SessionPreflightContext): Promise<void> {
 }
 
 async function recoverSession(ctx: SessionPreflightContext): Promise<void> {
+  // First try ADB-level dismissal — works even when the agent is dead
+  if (ctx.deviceSerial) {
+    dismissSystemDialogsViaAdb(ctx.deviceSerial)
+  }
+
+  // Then try agent-level dismissal if the agent is reachable
   await dismissBlockingSystemUi(ctx)
   await ctx.device.startAgent('', ctx.agentApkPath, ctx.agentTestApkPath)
   if (!ctx.config.package) return

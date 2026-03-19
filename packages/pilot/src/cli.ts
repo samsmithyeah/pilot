@@ -21,8 +21,10 @@ import { glob } from 'glob';
 import { spawn, execFileSync } from 'node:child_process';
 import {
   clearOfflineEmulatorTransports,
-  cleanupEmulators,
+  cleanupRunResources,
   filterHealthyDevices,
+  isPackageInstalled,
+  cleanupStaleEmulators,
   prefilterDevicesForStrategy,
   probeDeviceHealth,
   provisionEmulators,
@@ -306,6 +308,15 @@ async function ensureSequentialTargetDevice(
   for (const serial of clearedOfflineEmulators) {
     process.stderr.write(
       `${YELLOW}Cleared stale offline emulator transport ${serial} before device selection.${RESET}\n`,
+    );
+  }
+
+  // Reclaim healthy emulators from previous runs, kill unhealthy ones.
+  // cleanupStaleEmulators logs details about each action internally.
+  const staleResult = cleanupStaleEmulators(config.avd);
+  if (staleResult.killed.length > 0) {
+    process.stderr.write(
+      `${DIM}Cleaned up ${staleResult.killed.length} stale emulator(s).${RESET}\n`,
     );
   }
 
@@ -624,17 +635,25 @@ async function main(): Promise<void> {
       // Non-fatal — device might already be awake/unlocked
     }
 
-    // Install app under test if APK path is configured.
+    // Install app under test if APK path is configured and not already installed.
     if (config.apk) {
-      const resolvedApk = path.resolve(config.rootDir, config.apk);
-      try {
-        await device.installApk(resolvedApk);
-        await new Promise((r) => setTimeout(r, 2_000));
-        console.log(dim(`Installed app APK: ${path.basename(resolvedApk)}`));
-      } catch (err) {
-        console.error(red(`Failed to install app APK: ${err}`));
-        sequentialExitCode = 1;
-        return;
+      const alreadyInstalled = config.package
+        && config.device
+        && isPackageInstalled(config.device, config.package);
+
+      if (alreadyInstalled) {
+        console.log(dim(`App ${config.package} already installed, skipping APK install.`));
+      } else {
+        const resolvedApk = path.resolve(config.rootDir, config.apk);
+        try {
+          await device.installApk(resolvedApk);
+          await new Promise((r) => setTimeout(r, 2_000));
+          console.log(dim(`Installed app APK: ${path.basename(resolvedApk)}`));
+        } catch (err) {
+          console.error(red(`Failed to install app APK: ${err}`));
+          sequentialExitCode = 1;
+          return;
+        }
       }
     }
 
@@ -658,6 +677,7 @@ async function main(): Promise<void> {
         client,
         agentApkPath: resolvedAgentApk,
         agentTestApkPath: resolvedAgentTestApk,
+        deviceSerial: config.device,
       }, 'startup');
       console.log(dim('Agent connected.'));
     } catch (err) {
@@ -677,6 +697,7 @@ async function main(): Promise<void> {
           client,
           agentApkPath: resolvedAgentApk,
           agentTestApkPath: resolvedAgentTestApk,
+          deviceSerial: config.device,
         }, 'startup');
         console.log(dim(`Launched ${config.package}`));
       } catch (err) {
@@ -708,6 +729,7 @@ async function main(): Promise<void> {
             client,
             agentApkPath: resolvedAgentApk,
             agentTestApkPath: resolvedAgentTestApk,
+            deviceSerial: config.device,
           }, `reset before ${path.basename(file)}`);
 
           const pong = await client.ping();
@@ -752,9 +774,8 @@ async function main(): Promise<void> {
   } finally {
     device?.close();
     client?.close();
-    if (launchedEmulators.length > 0) {
-      cleanupEmulators(launchedEmulators);
-    }
+    // Leave emulators running for reuse by the next run.
+    cleanupRunResources(launchedEmulators);
   }
 
   process.exit(sequentialExitCode);

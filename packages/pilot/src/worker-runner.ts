@@ -13,6 +13,7 @@ import { PilotGrpcClient } from './grpc-client.js'
 import { Device } from './device.js'
 import { runTestFile, collectResults } from './runner.js'
 import type { PilotConfig } from './config.js'
+import { isPackageInstalled } from './emulator.js'
 import type {
   MainToWorkerMessage,
   WorkerToMainMessage,
@@ -26,6 +27,7 @@ let workerId = -1
 let device: Device | undefined
 let client: PilotGrpcClient | undefined
 let config: PilotConfig | undefined
+let assignedSerial: string | undefined
 
 function send(msg: WorkerToMainMessage): void {
   if (process.send) {
@@ -74,6 +76,7 @@ async function handleInit(msg: InitMessage): Promise<void> {
   device = new Device(client, config)
 
   // Set the assigned device
+  assignedSerial = msg.deviceSerial
   if (msg.deviceSerial) {
     sendProgress(`selecting device ${msg.deviceSerial}`)
     await device.setDevice(msg.deviceSerial)
@@ -88,13 +91,21 @@ async function handleInit(msg: InitMessage): Promise<void> {
     // Non-fatal
   }
 
-  // Install app under test if APK path is configured
+  // Install app under test if APK path is configured and not already installed
   if (config.apk) {
-    const resolvedApk = path.resolve(config.rootDir, config.apk)
-    sendProgress(`installing app APK ${path.basename(resolvedApk)}`)
-    await device.installApk(resolvedApk)
-    // Give package manager time to index the new app
-    await new Promise((r) => setTimeout(r, 2_000))
+    const alreadyInstalled = config.package
+      && msg.deviceSerial
+      && isPackageInstalled(msg.deviceSerial, config.package)
+
+    if (alreadyInstalled) {
+      sendProgress(`app ${config.package} already installed, skipping APK install`)
+    } else {
+      const resolvedApk = path.resolve(config.rootDir, config.apk)
+      sendProgress(`installing app APK ${path.basename(resolvedApk)}`)
+      await device.installApk(resolvedApk)
+      // Give package manager time to index the new app
+      await new Promise((r) => setTimeout(r, 2_000))
+    }
   }
 
   // Start agent
@@ -233,8 +244,9 @@ function sessionContext(
     throw new Error(`Worker ${workerId}: Not initialized`)
   }
 
-  const label = deviceSerial
-    ? `Worker ${workerId} (${deviceSerial})`
+  const serial = deviceSerial ?? assignedSerial
+  const label = serial
+    ? `Worker ${workerId} (${serial})`
     : `Worker ${workerId}`
 
   return {
@@ -244,6 +256,7 @@ function sessionContext(
     client,
     agentApkPath,
     agentTestApkPath,
+    deviceSerial: serial,
   }
 }
 

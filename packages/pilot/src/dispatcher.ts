@@ -24,9 +24,11 @@ import { deserializeTestResult, deserializeSuiteResult } from './worker-protocol
 import {
   clearOfflineEmulatorTransports,
   provisionEmulators,
-  cleanupEmulators,
+  cleanupRunResources,
+  forceCleanupEmulators,
   filterHealthyDevices,
   getRunningAvdName,
+  cleanupStaleEmulators,
   prefilterDevicesForStrategy,
   selectDevicesForStrategy,
   type DeviceHealthResult,
@@ -71,6 +73,15 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
   for (const serial of clearedOfflineEmulators) {
     process.stderr.write(
       `${YELLOW}Cleared stale offline emulator transport ${serial} before device discovery.${RESET}\n`,
+    )
+  }
+
+  // Reclaim healthy emulators from previous runs, kill unhealthy ones.
+  // cleanupStaleEmulators logs details about each action internally.
+  const staleResult = cleanupStaleEmulators(config.avd)
+  if (staleResult.killed.length > 0) {
+    process.stderr.write(
+      `${DIM}Cleaned up ${staleResult.killed.length} stale emulator(s).${RESET}\n`,
     )
   }
 
@@ -174,6 +185,23 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
   const totalStart = Date.now()
   const maxUsefulWorkers = Math.min(opts.workers, testFiles.length)
   let firstDaemonAssigned = false
+
+  // Register signal handlers to ensure cleanup on SIGINT/SIGTERM.
+  // Without this, Ctrl-C leaves orphaned daemons and emulators.
+  const emergencyCleanup = () => {
+    for (const worker of workers) {
+      try { worker.process?.kill() } catch { /* already dead */ }
+      try { worker.daemonProcess?.kill() } catch { /* already dead */ }
+    }
+    if (!firstDaemonAssigned) {
+      try { firstDaemon.kill() } catch { /* already dead */ }
+    }
+    if (launchedEmulators.length > 0) {
+      forceCleanupEmulators(launchedEmulators)
+    }
+  }
+  process.on('SIGINT', emergencyCleanup)
+  process.on('SIGTERM', emergencyCleanup)
 
   try {
     // Fork worker processes.
@@ -408,6 +436,9 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
       }
     })
   } finally {
+    process.removeListener('SIGINT', emergencyCleanup)
+    process.removeListener('SIGTERM', emergencyCleanup)
+
     // Cleanup order matters: workers first, then daemons, then ADB state, then emulators.
     // This ensures nothing is using the resources when we clean them up.
 
@@ -455,10 +486,9 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
       } catch { /* forward may already be gone */ }
     }
 
-    // 4. Shut down any emulators we launched
-    if (launchedEmulators.length > 0) {
-      cleanupEmulators(launchedEmulators)
-    }
+    // 4. Leave emulators running for reuse by the next run.
+    // The PID manifest keeps them tracked. Only emergency cleanup kills them.
+    cleanupRunResources(launchedEmulators)
   }
 
   const totalDuration = Date.now() - totalStart
