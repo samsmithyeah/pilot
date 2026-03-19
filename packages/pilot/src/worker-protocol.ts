@@ -78,6 +78,34 @@ export type WorkerToMainMessage =
   | FileDoneMessage
   | WorkerErrorMessage
 
+// ─── Infrastructure error detection ───
+
+/**
+ * Error message patterns that indicate recoverable infrastructure failures.
+ * When a test fails with one of these patterns, the worker will attempt to
+ * recover the session and retry the file rather than permanently failing.
+ */
+export const RECOVERABLE_INFRASTRUCTURE_PATTERNS = [
+  'Agent command timed out',
+  'Agent returned empty response',
+  'Not connected to agent',
+  'Timed out connecting to agent socket',
+  'Failed to connect to agent socket',
+  '14 UNAVAILABLE',
+  'No connection established',
+  'ECONNREFUSED',
+] as const
+
+/**
+ * Check whether an error represents a recoverable infrastructure failure
+ * (agent disconnection, gRPC unavailability, etc.) as opposed to a real
+ * test assertion failure.
+ */
+export function isRecoverableInfrastructureError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err)
+  return RECOVERABLE_INFRASTRUCTURE_PATTERNS.some((pattern) => message.includes(pattern))
+}
+
 // ─── Serialized types (safe for IPC / structured clone) ───
 
 /** Config fields needed by workers (subset of PilotConfig). */

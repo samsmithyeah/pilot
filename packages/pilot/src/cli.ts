@@ -24,6 +24,8 @@ import {
   cleanupRunResources,
   filterHealthyDevices,
   isPackageInstalled,
+  listAdbDevices,
+  waitForPackageIndexed,
   cleanupStaleEmulators,
   prefilterDevicesForStrategy,
   probeDeviceHealth,
@@ -278,23 +280,9 @@ async function discoverTestFiles(
 }
 
 function listConnectedDeviceSerials(): string[] {
-  try {
-    const output = execFileSync('adb', ['devices'], {
-      encoding: 'utf-8',
-      timeout: 10_000,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-
-    return output
-      .split('\n')
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0 && !line.startsWith('List of devices attached'))
-      .map((line) => line.split(/\s+/))
-      .filter((parts) => parts[1] === 'device')
-      .map((parts) => parts[0]);
-  } catch {
-    return [];
-  }
+  return listAdbDevices()
+    .filter((d) => d.state === 'device')
+    .map((d) => d.serial);
 }
 
 async function ensureSequentialTargetDevice(
@@ -647,7 +635,10 @@ async function main(): Promise<void> {
         const resolvedApk = path.resolve(config.rootDir, config.apk);
         try {
           await device.installApk(resolvedApk);
-          await new Promise((r) => setTimeout(r, 2_000));
+          // Wait for package manager to index the new app
+          if (config.package && config.device) {
+            await waitForPackageIndexed(config.device, config.package);
+          }
           console.log(dim(`Installed app APK: ${path.basename(resolvedApk)}`));
         } catch (err) {
           console.error(red(`Failed to install app APK: ${err}`));

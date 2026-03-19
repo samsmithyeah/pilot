@@ -495,7 +495,9 @@ export async function runTestFile(
   pushContext();
 
   // Import the test file — this registers tests/suites via side effects
-  // and may call test.extend() to register fixtures
+  // and may call test.extend() to register fixtures.
+  // Note: Node.js caches ESM imports, so the same file path cannot be
+  // re-imported in the same process. Each worker runs each file at most once.
   await import(filePath);
 
   const rootCtx = popContext();

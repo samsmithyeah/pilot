@@ -183,8 +183,10 @@ export async function resolveFixtures(
       for (const fn of teardowns) {
         try {
           await fn()
-        } catch {
-          // Teardown errors should not mask test errors
+        } catch (err) {
+          // Teardown errors should not mask test errors, but log for diagnosability
+          const msg = err instanceof Error ? err.message : String(err)
+          process.stderr.write(`[pilot] fixture teardown error: ${msg}\n`)
         }
       }
     },

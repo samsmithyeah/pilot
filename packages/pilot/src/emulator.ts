@@ -40,6 +40,9 @@ function manifestPath(): string {
   return path.join(os.tmpdir(), 'pilot-emulators.json')
 }
 
+// Note: read/write is not atomic. Concurrent Pilot runs may race on this file.
+// In practice this is rare and the worst case is a stale manifest entry that
+// gets cleaned up on the next run via reclaimOrphanedEmulators().
 function readManifest(): EmulatorManifestEntry[] {
   try {
     const raw = fs.readFileSync(manifestPath(), 'utf-8')
@@ -190,6 +193,24 @@ export interface AdbDeviceEntry {
 }
 
 // ─── ADB package queries ───
+
+/**
+ * Wait for a freshly installed package to appear in `pm path`.
+ *
+ * After `adb install`, the package manager may take a moment to index the
+ * new app. This polls `pm path` instead of using a fixed sleep.
+ */
+export async function waitForPackageIndexed(
+  serial: string,
+  packageName: string,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const start = Date.now()
+  while (Date.now() - start < timeoutMs) {
+    if (isPackageInstalled(serial, packageName)) return
+    await sleep(500)
+  }
+}
 
 /**
  * Check whether a package is installed on a device via ADB.

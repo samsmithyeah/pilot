@@ -13,14 +13,18 @@ import { PilotGrpcClient } from './grpc-client.js'
 import { Device } from './device.js'
 import { runTestFile, collectResults } from './runner.js'
 import type { PilotConfig } from './config.js'
-import { isPackageInstalled } from './emulator.js'
+import { isPackageInstalled, waitForPackageIndexed } from './emulator.js'
 import type {
   MainToWorkerMessage,
   WorkerToMainMessage,
   InitMessage,
   SerializedConfig,
 } from './worker-protocol.js'
-import { serializeTestResult, serializeSuiteResult } from './worker-protocol.js'
+import {
+  serializeTestResult,
+  serializeSuiteResult,
+  isRecoverableInfrastructureError,
+} from './worker-protocol.js'
 import { ensureSessionReady, launchConfiguredApp, type SessionPreflightContext } from './session-preflight.js'
 
 let workerId = -1
@@ -102,8 +106,10 @@ async function handleInit(msg: InitMessage): Promise<void> {
       const resolvedApk = path.resolve(config.rootDir, config.apk)
       sendProgress(`installing app APK ${path.basename(resolvedApk)}`)
       await device.installApk(resolvedApk)
-      // Give package manager time to index the new app
-      await new Promise((r) => setTimeout(r, 2_000))
+      // Wait for package manager to index the new app
+      if (config.package && msg.deviceSerial) {
+        await waitForPackageIndexed(msg.deviceSerial, config.package)
+      }
     }
   }
 
@@ -271,20 +277,6 @@ function sessionContext(
     agentTestApkPath,
     deviceSerial: serial,
   }
-}
-
-function isRecoverableInfrastructureError(err: unknown): boolean {
-  const message = err instanceof Error ? err.message : String(err)
-  return [
-    'Agent command timed out',
-    'Agent returned empty response',
-    'Not connected to agent',
-    'Timed out connecting to agent socket',
-    'Failed to connect to agent socket',
-    '14 UNAVAILABLE',
-    'No connection established',
-    'ECONNREFUSED',
-  ].some((pattern) => message.includes(pattern))
 }
 
 function findRecoverableInfrastructureFailure(
