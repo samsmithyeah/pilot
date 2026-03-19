@@ -20,7 +20,7 @@ export interface SessionPreflightContext {
 
 const DEFAULT_READY_TIMEOUT_MS = 5_000
 const DEFAULT_MAX_ATTEMPTS = 2
-const BLOCKING_DIALOG_PATTERN = /(isn(?:'|&apos;|’)t responding|keeps stopping|close app|wait|app info)/i
+const BLOCKING_DIALOG_PATTERN = /(isn(?:’|&apos;|’)t responding|keeps stopping|close app|app info)/i
 
 export async function ensureSessionReady(
   ctx: SessionPreflightContext,
