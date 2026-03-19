@@ -201,17 +201,56 @@ same AVD for all workers.
 ### CI Sharding
 
 If your CI environment cannot support multiple emulator instances on one host,
-split the suite across multiple jobs instead:
+split the suite across multiple jobs instead. Use `--shard=x/y` to
+deterministically assign test files to each job:
 
 ```yaml
 strategy:
   matrix:
-    test-shard: [1, 2, 3]
+    shard: [1, 2, 3]
 
 steps:
   # ... setup steps ...
-  - name: Run tests (shard ${{ matrix.test-shard }})
-    run: |
-      files=$(npx pilot test --list | awk "NR % 3 == ${{ matrix.test-shard }} - 1")
-      npx pilot test $files
+  - name: Run tests (shard ${{ matrix.shard }}/3)
+    run: npx pilot test --shard=${{ matrix.shard }}/3
+
+  - name: Upload blob report
+    if: always()
+    uses: actions/upload-artifact@v4
+    with:
+      name: blob-report-${{ matrix.shard }}
+      path: blob-report/
+```
+
+When `--shard` is used, Pilot automatically adds the `blob` reporter so results
+can be merged after all shards complete.
+
+### Merging Sharded Reports
+
+After all shard jobs finish, download the blob artifacts and merge them into a
+single HTML report:
+
+```yaml
+merge-reports:
+  needs: test
+  runs-on: ubuntu-latest
+  if: always()
+  steps:
+    - uses: actions/checkout@v4
+
+    - name: Download blob reports
+      uses: actions/download-artifact@v4
+      with:
+        pattern: blob-report-*
+        path: all-blob-reports
+        merge-multiple: true
+
+    - name: Merge reports
+      run: npx pilot merge-reports all-blob-reports
+
+    - name: Upload HTML report
+      uses: actions/upload-artifact@v4
+      with:
+        name: pilot-report
+        path: pilot-report/
 ```

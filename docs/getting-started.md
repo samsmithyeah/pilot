@@ -111,6 +111,14 @@ instances automatically. If `avd` is set, those instances will use that AVD.
 npx pilot test tests/smoke.test.ts
 ```
 
+### Run on multiple devices in parallel
+
+```bash
+npx pilot test --workers 4
+```
+
+Or configure `workers` in `pilot.config.ts`. Each worker gets its own device. See [CI Setup](ci-setup.md) for sharding across CI machines.
+
 ### Target a specific device
 
 If you need to debug against one known device, specify which one to use:
