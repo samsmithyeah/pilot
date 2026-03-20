@@ -335,6 +335,7 @@ async function runSuiteContext(
     try {
       const testBody = async () => {
         // Run beforeEach hooks
+        traceCollector?.startGroup('Before Hooks');
         if (opts.beforeEachTest) {
           await opts.beforeEachTest(fullName);
         }
@@ -342,6 +343,7 @@ async function runSuiteContext(
         for (const hook of allBeforeEach) {
           await invokeHook(hook, opts.device);
         }
+        traceCollector?.endGroup();
 
         // Build fixture context: base (device) + worker-scoped + test-scoped
         const registry = getFixtureRegistry();
@@ -359,6 +361,7 @@ async function runSuiteContext(
           testFixtureTeardown = resolved.teardown;
         }
 
+        traceCollector?.startGroup('Test');
         try {
           // Call with fixtures if the test function expects arguments
           if (entry.fn.length > 0) {
@@ -367,6 +370,7 @@ async function runSuiteContext(
             await (entry.fn as () => void | Promise<void>)();
           }
         } finally {
+          traceCollector?.endGroup();
           if (testFixtureTeardown) {
             await testFixtureTeardown();
           }
@@ -397,12 +401,16 @@ async function runSuiteContext(
       }
     } finally {
       // Run afterEach hooks (always)
-      for (const hook of allAfterEach) {
-        try {
-          await invokeHook(hook, opts.device);
-        } catch {
-          // afterEach errors should not mask test errors
+      if (allAfterEach.length > 0) {
+        traceCollector?.startGroup('After Hooks');
+        for (const hook of allAfterEach) {
+          try {
+            await invokeHook(hook, opts.device);
+          } catch {
+            // afterEach errors should not mask test errors
+          }
         }
+        traceCollector?.endGroup();
       }
     }
 

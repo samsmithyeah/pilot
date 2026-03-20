@@ -314,6 +314,7 @@ style.textContent = `
   .action-details { display: flex; align-items: center; overflow: hidden; flex: 1; min-width: 0; gap: 6px; }
 
   .group-item { padding: 4px 10px; color: #888; font-size: 11px; font-weight: 600; border-left: 2px solid #4fc1ff; background: #1e2a3a; }
+  .group-item.lifecycle { border-left: none; background: #1e1e1e; color: #666; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; padding: 6px 10px 3px; margin-top: 2px; }
 
   /* Metadata panel */
   .metadata-panel { padding: 12px; font-size: 12px; overflow-y: auto; flex: 1; }
