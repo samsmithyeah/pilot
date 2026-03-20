@@ -455,24 +455,31 @@ export class ElementHandle {
 
     const sourceLocation = extractSourceLocation(new Error().stack ?? '');
     const selectorStr = JSON.stringify(selectorToProto(this._selector));
+    const log: string[] = [];
 
     // Best-effort element bounds lookup for trace overlay
     let bounds: { left: number; top: number; right: number; bottom: number } | undefined;
     let point: { x: number; y: number } | undefined;
+    const lookupStart = Date.now();
     try {
       const res = await this._client.findElement(this._selector, 500);
       if (res.found && res.element?.bounds) {
         bounds = res.element.bounds;
+        log.push(`Element found at [${bounds.left},${bounds.top}][${bounds.right},${bounds.bottom}] (${Date.now() - lookupStart}ms)`);
         if (category === 'tap') {
           point = {
             x: (bounds.left + bounds.right) / 2,
             y: (bounds.top + bounds.bottom) / 2,
           };
         }
+      } else {
+        log.push(`Element lookup returned no match (${Date.now() - lookupStart}ms)`);
       }
     } catch {
-      // bounds are best-effort — continue without them
+      log.push(`Element lookup failed (${Date.now() - lookupStart}ms)`);
     }
+
+    log.push('Capturing before screenshot + hierarchy');
 
     const { actionIndex, captures: beforeCaptures } = await trace.collector.captureBeforeAction(
       trace.takeScreenshot, trace.captureHierarchy,
@@ -494,6 +501,7 @@ export class ElementHandle {
       success = false;
       if (err instanceof Error) { error = err.message; errorStack = err.stack; }
       else { error = String(err); }
+      log.push(`Action failed: ${error} (${Date.now() - start}ms)`);
 
       const afterCaptures = await trace.collector.captureAfterAction(
         actionIndex, trace.takeScreenshot, trace.captureHierarchy,
@@ -501,8 +509,7 @@ export class ElementHandle {
       trace.collector.addActionEvent({
         category, action, selector: selectorStr, inputValue: extra?.inputValue,
         duration: Date.now() - start, success, error, errorStack,
-        bounds,
-        point,
+        bounds, point, log,
         hasScreenshotBefore: !!beforeCaptures.screenshotBefore,
         hasScreenshotAfter: !!afterCaptures.screenshotAfter,
         hasHierarchyBefore: !!beforeCaptures.hierarchyBefore,
@@ -512,14 +519,15 @@ export class ElementHandle {
       throw err instanceof Error ? err : new Error(String(err));
     }
 
+    log.push(`Action completed successfully (${Date.now() - start}ms)`);
+
     const afterCaptures = await trace.collector.captureAfterAction(
       actionIndex, trace.takeScreenshot, trace.captureHierarchy,
     );
     trace.collector.addActionEvent({
       category, action, selector: selectorStr, inputValue: extra?.inputValue,
       duration: Date.now() - start, success,
-      bounds,
-      point,
+      bounds, point, log,
       hasScreenshotBefore: !!beforeCaptures.screenshotBefore,
       hasScreenshotAfter: !!afterCaptures.screenshotAfter,
       hasHierarchyBefore: !!beforeCaptures.hierarchyBefore,

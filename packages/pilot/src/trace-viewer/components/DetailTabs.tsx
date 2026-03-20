@@ -1,5 +1,7 @@
 import { useState, useRef, useEffect } from 'preact/hooks'
 import type { ActionTraceEvent, AssertionTraceEvent, AnyTraceEvent, ConsoleTraceEvent, TraceMetadata } from '../../trace/types.js'
+import { HierarchyTree } from './HierarchyTree.js'
+import type { Bounds } from './HierarchyTree.js'
 
 interface Props {
   event: ActionTraceEvent | AssertionTraceEvent | undefined
@@ -7,11 +9,12 @@ interface Props {
   hierarchies: Map<string, string>
   sources: Map<string, string>
   metadata: TraceMetadata
+  onHierarchyNodeSelect?: (bounds: Bounds | null) => void
 }
 
 type DetailTab = 'call' | 'log' | 'console' | 'source' | 'hierarchy' | 'errors'
 
-export function DetailTabs({ event, events, hierarchies, sources, metadata }: Props) {
+export function DetailTabs({ event, events, hierarchies, sources, metadata, onHierarchyNodeSelect }: Props) {
   const [tab, setTab] = useState<DetailTab>('call')
 
   const hasError = event && (
@@ -28,6 +31,7 @@ export function DetailTabs({ event, events, hierarchies, sources, metadata }: Pr
     <div class="detail-panel">
       <div class="detail-tabs-bar">
         <div class={`detail-tab${tab === 'call' ? ' active' : ''}`} onClick={() => setTab('call')}>Call</div>
+        <div class={`detail-tab${tab === 'log' ? ' active' : ''}`} onClick={() => setTab('log')}>Log</div>
         {hasConsole && (
           <div class={`detail-tab${tab === 'console' ? ' active' : ''}`} onClick={() => setTab('console')}>Console</div>
         )}
@@ -41,11 +45,12 @@ export function DetailTabs({ event, events, hierarchies, sources, metadata }: Pr
           <div class={`detail-tab${tab === 'errors' ? ' active' : ''}${hasError ? ' has-error' : ''}`} onClick={() => setTab('errors')}>Errors</div>
         )}
       </div>
-      <div class="detail-content">
+      <div class={`detail-content${tab === 'hierarchy' ? ' detail-content-flush' : ''}`}>
         {tab === 'call' && <CallTab event={event} />}
+        {tab === 'log' && <LogTab event={event} />}
         {tab === 'console' && <ConsoleTab event={event} events={consoleEvents} />}
         {tab === 'source' && <SourceTab event={event} sources={sources} />}
-        {tab === 'hierarchy' && <HierarchyTab event={event} hierarchies={hierarchies} />}
+        {tab === 'hierarchy' && <HierarchyTabWrapper event={event} hierarchies={hierarchies} onNodeSelect={onHierarchyNodeSelect} />}
         {tab === 'errors' && <ErrorsTab event={event} />}
       </div>
     </div>
@@ -118,6 +123,28 @@ function CallTab({ event }: { event: ActionTraceEvent | AssertionTraceEvent | un
         <span class="call-label">Error</span>
         <span class="call-value error">{event.error}</span>
       </>}
+    </div>
+  )
+}
+
+// ─── Log Tab (internal action log) ───
+
+function LogTab({ event }: { event: ActionTraceEvent | AssertionTraceEvent | undefined }) {
+  if (!event) return <div class="no-content">No action selected</div>
+
+  const log = event.type === 'action' ? event.log : undefined
+
+  if (!log || log.length === 0) {
+    return <div class="no-content">No internal log for this action</div>
+  }
+
+  return (
+    <div>
+      {log.map((entry, i) => (
+        <div key={i} class="log-entry">
+          <span class="log-message">{entry}</span>
+        </div>
+      ))}
     </div>
   )
 }
@@ -324,9 +351,11 @@ function SourceTab({ event, sources }: { event: ActionTraceEvent | AssertionTrac
 
 // ─── Hierarchy Tab ───
 
-function HierarchyTab({ event, hierarchies }: { event: ActionTraceEvent | AssertionTraceEvent | undefined; hierarchies: Map<string, string> }) {
-  const [search, setSearch] = useState('')
-
+function HierarchyTabWrapper({ event, hierarchies, onNodeSelect }: {
+  event: ActionTraceEvent | AssertionTraceEvent | undefined
+  hierarchies: Map<string, string>
+  onNodeSelect?: (bounds: Bounds | null) => void
+}) {
   if (!event || hierarchies.size === 0) return <div class="no-content">No view hierarchy available</div>
 
   const pad = String(event.actionIndex).padStart(3, '0')
@@ -336,59 +365,7 @@ function HierarchyTab({ event, hierarchies }: { event: ActionTraceEvent | Assert
 
   if (!xml) return <div class="no-content">No hierarchy snapshot for this action</div>
 
-  const lines = xml.split('\n').filter(Boolean)
-  const filtered = search
-    ? lines.filter(l => l.toLowerCase().includes(search.toLowerCase()))
-    : lines
-
-  return (
-    <div>
-      <div class="hierarchy-search">
-        <input
-          type="text"
-          placeholder="Search hierarchy (class, text, id)..."
-          value={search}
-          onInput={e => setSearch((e.target as HTMLInputElement).value)}
-        />
-      </div>
-      <div class="hierarchy-tree">
-        {filtered.map((line, i) => {
-          const indent = line.match(/^\s*/)?.[0].length ?? 0
-          const trimmed = line.trim()
-          return (
-            <div key={i} class="hierarchy-node" style={{ paddingLeft: `${Math.min(indent, 40) * 6}px` }}>
-              <HierarchyLine content={trimmed} />
-            </div>
-          )
-        })}
-      </div>
-    </div>
-  )
-}
-
-function HierarchyLine({ content }: { content: string }) {
-  const tagMatch = content.match(/^(<\/?)(\w[\w.]*)([\s\S]*?)(\/?>)$/)
-  if (!tagMatch) return <span>{content}</span>
-
-  const parts: preact.JSX.Element[] = []
-  parts.push(<span>{tagMatch[1]}</span>)
-  parts.push(<span class="hierarchy-class">{tagMatch[2]}</span>)
-
-  const attrs = tagMatch[3]
-  const attrRe = /(\w[\w-]*)="([^"]*)"/g
-  let lastIndex = 0
-  let attrMatch
-  while ((attrMatch = attrRe.exec(attrs)) !== null) {
-    if (attrMatch.index > lastIndex) parts.push(<span>{attrs.slice(lastIndex, attrMatch.index)}</span>)
-    parts.push(<span class="hierarchy-attr">{attrMatch[1]}</span>)
-    parts.push(<span>=</span>)
-    parts.push(<span class="hierarchy-attr-value">"{attrMatch[2]}"</span>)
-    lastIndex = attrRe.lastIndex
-  }
-  if (lastIndex < attrs.length) parts.push(<span>{attrs.slice(lastIndex)}</span>)
-  parts.push(<span>{tagMatch[4]}</span>)
-
-  return <>{parts}</>
+  return <HierarchyTree xml={xml} onNodeSelect={onNodeSelect} />
 }
 
 // ─── Errors Tab ───

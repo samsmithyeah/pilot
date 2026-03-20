@@ -5,10 +5,11 @@ import type { ActionTraceEvent, AssertionTraceEvent } from '../../trace/types.js
 
 const SCREENSHOT_STYLES = `
   .screenshot-zoom-label { margin-left: auto; padding: 6px 12px; color: #888; font-size: 11px; }
-  .screenshot-image-wrapper { position: relative; display: inline-block; }
-  .screenshot-image-wrapper img { display: block; border-radius: 12px; max-height: calc(100vh - 320px); width: auto; }
-  .bounds-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; border-radius: 12px; overflow: hidden; }
+  .screenshot-image-wrapper { position: relative; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }
+  .screenshot-image-wrapper img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 8px; }
+  .bounds-overlay { position: absolute; pointer-events: none; border-radius: 8px; overflow: hidden; }
   .bounds-rect { position: absolute; border: 2px solid #4fc1ff; background: rgba(79,193,255,0.15); border-radius: 2px; }
+  .bounds-rect-hierarchy { position: absolute; border: 2px solid #4ec9b0; background: rgba(78,201,176,0.15); border-radius: 2px; }
   .bounds-point { position: absolute; width: 16px; height: 16px; margin-left: -8px; margin-top: -8px; border-radius: 50%; background: rgba(255,80,80,0.5); border: 2px solid #ff5050; box-shadow: 0 0 8px rgba(255,80,80,0.4); }
 `
 
@@ -26,6 +27,8 @@ function injectStyles() {
 interface Props {
   event: ActionTraceEvent | AssertionTraceEvent | undefined
   screenshots: Map<string, string>
+  highlightBounds?: { left: number; top: number; right: number; bottom: number } | null
+  onScreenshotClick?: (point: { x: number; y: number }) => void
 }
 
 type ScreenshotTab = 'before' | 'after' | 'action'
@@ -35,7 +38,7 @@ interface NaturalSize {
   height: number
 }
 
-export function ScreenshotPanel({ event, screenshots }: Props) {
+export function ScreenshotPanel({ event, screenshots, highlightBounds, onScreenshotClick }: Props) {
   injectStyles()
 
   const [tab, setTab] = useState<ScreenshotTab>('after')
@@ -57,6 +60,17 @@ export function ScreenshotPanel({ event, screenshots }: Props) {
       setNaturalSize({ width: img.naturalWidth, height: img.naturalHeight })
     }
   }, [])
+
+  const handleImageClick = useCallback((e: MouseEvent) => {
+    if (!onScreenshotClick || !imgRef.current || !naturalSize) return
+    const img = imgRef.current
+    const rect = img.getBoundingClientRect()
+    const clickX = e.clientX - rect.left
+    const clickY = e.clientY - rect.top
+    const naturalX = Math.round(clickX * (naturalSize.width / rect.width))
+    const naturalY = Math.round(clickY * (naturalSize.height / rect.height))
+    onScreenshotClick({ x: naturalX, y: naturalY })
+  }, [onScreenshotClick, naturalSize])
 
   if (!event) {
     return (
@@ -108,24 +122,32 @@ export function ScreenshotPanel({ event, screenshots }: Props) {
       </div>
       <div class="screenshot-container" onWheel={handleWheel}>
         {currentUrl ? (
-          <div class="device-frame" style={{ transform: `scale(${scale})`, transformOrigin: 'center center', transition: 'transform 0.1s' }}>
-            <div class="screenshot-image-wrapper">
-              <img
-                ref={imgRef}
-                src={currentUrl}
-                alt={`Screenshot ${tab}`}
-                onLoad={handleImageLoad}
+          <div class="screenshot-image-wrapper" style={scale !== 1 ? { transform: `scale(${scale})`, transformOrigin: 'center center' } : undefined}>
+            <img
+              ref={imgRef}
+              src={currentUrl}
+              alt={`Screenshot ${tab}`}
+              onLoad={handleImageLoad}
+              onClick={handleImageClick}
+              style={onScreenshotClick ? { cursor: 'crosshair' } : undefined}
+            />
+            {showOverlay && naturalSize && imgRef.current && (
+              <BoundsOverlay
+                bounds={bounds}
+                point={point}
+                naturalSize={naturalSize}
+                renderedWidth={imgRef.current.clientWidth}
+                renderedHeight={imgRef.current.clientHeight}
               />
-              {showOverlay && naturalSize && imgRef.current && (
-                <BoundsOverlay
-                  bounds={bounds}
-                  point={point}
-                  naturalSize={naturalSize}
-                  renderedWidth={imgRef.current.clientWidth}
-                  renderedHeight={imgRef.current.clientHeight}
-                />
-              )}
-            </div>
+            )}
+            {highlightBounds && naturalSize && imgRef.current && (
+              <HierarchyHighlightOverlay
+                bounds={highlightBounds}
+                naturalSize={naturalSize}
+                renderedWidth={imgRef.current.clientWidth}
+                renderedHeight={imgRef.current.clientHeight}
+              />
+            )}
           </div>
         ) : (
           <div class="screenshot-empty">No screenshot available for this action</div>
@@ -152,7 +174,13 @@ function BoundsOverlay({ bounds, point, naturalSize, renderedWidth, renderedHeig
   const scaleY = renderedHeight / naturalSize.height
 
   return (
-    <div class="bounds-overlay">
+    <div
+      class="bounds-overlay"
+      style={{
+        width: `${renderedWidth}px`,
+        height: `${renderedHeight}px`,
+      }}
+    >
       {bounds && (
         <div
           class="bounds-rect"
@@ -173,6 +201,40 @@ function BoundsOverlay({ bounds, point, naturalSize, renderedWidth, renderedHeig
           }}
         />
       )}
+    </div>
+  )
+}
+
+// ─── Hierarchy Highlight Overlay ───
+
+interface HierarchyHighlightProps {
+  bounds: { left: number; top: number; right: number; bottom: number }
+  naturalSize: NaturalSize
+  renderedWidth: number
+  renderedHeight: number
+}
+
+function HierarchyHighlightOverlay({ bounds, naturalSize, renderedWidth, renderedHeight }: HierarchyHighlightProps) {
+  const scaleX = renderedWidth / naturalSize.width
+  const scaleY = renderedHeight / naturalSize.height
+
+  return (
+    <div
+      class="bounds-overlay"
+      style={{
+        width: `${renderedWidth}px`,
+        height: `${renderedHeight}px`,
+      }}
+    >
+      <div
+        class="bounds-rect-hierarchy"
+        style={{
+          left: `${bounds.left * scaleX}px`,
+          top: `${bounds.top * scaleY}px`,
+          width: `${(bounds.right - bounds.left) * scaleX}px`,
+          height: `${(bounds.bottom - bounds.top) * scaleY}px`,
+        }}
+      />
     </div>
   )
 }

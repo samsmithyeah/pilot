@@ -77,6 +77,7 @@ function App() {
   const [loading, setLoading] = useState(false)
   const [pinnedIndex, setPinnedIndex] = useState(0)
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null)
+  const [hierarchyHighlight, setHierarchyHighlight] = useState<{ left: number; top: number; right: number; bottom: number } | null>(null)
   const selectedIndex = hoveredIndex ?? pinnedIndex
 
   useEffect(() => {
@@ -100,6 +101,7 @@ function App() {
       const url = new URL(location.href)
       url.searchParams.set('action', String(selectedIndex))
       history.replaceState(null, '', url.toString())
+      setHierarchyHighlight(null)
     }
   }, [selectedIndex, trace])
 
@@ -217,6 +219,7 @@ function App() {
         <ScreenshotPanel
           event={selectedEvent}
           screenshots={trace.screenshots}
+          highlightBounds={hierarchyHighlight}
         />
       </div>
       {/* Bottom: Detail tabs */}
@@ -228,6 +231,7 @@ function App() {
           hierarchies={trace.hierarchies}
           sources={trace.sources}
           metadata={trace.metadata}
+          onHierarchyNodeSelect={setHierarchyHighlight}
         />
       </div>
     </div>
@@ -328,8 +332,7 @@ style.textContent = `
   .screenshot-tab { padding: 6px 16px; cursor: pointer; color: #888; border-bottom: 2px solid transparent; font-size: 12px; }
   .screenshot-tab:hover { color: #ccc; }
   .screenshot-tab.active { color: #e8e8e8; border-bottom-color: #4fc1ff; }
-  .screenshot-container { flex: 1; display: flex; align-items: center; justify-content: center; overflow: auto; padding: 16px; }
-  .device-frame { background: #111; border-radius: 24px; padding: 12px 8px; box-shadow: 0 8px 32px rgba(0,0,0,0.5); display: inline-block; transition: transform 0.1s; }
+  .screenshot-container { flex: 1; display: flex; align-items: center; justify-content: center; overflow: hidden; padding: 8px; }
   .screenshot-empty { color: #555; text-align: center; font-size: 13px; }
 
   /* ─── Detail tabs (bottom panel) ─── */
@@ -340,6 +343,7 @@ style.textContent = `
   .detail-tab.active { color: #e8e8e8; border-bottom-color: #4fc1ff; }
   .detail-tab.has-error { color: #f85149; }
   .detail-content { flex: 1; overflow-y: auto; padding: 10px 14px; font-size: 12px; }
+  .detail-content.detail-content-flush { padding: 0; overflow: hidden; }
 
   /* Call tab */
   .call-grid { display: grid; grid-template-columns: 90px 1fr; gap: 3px 12px; }

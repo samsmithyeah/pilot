@@ -110,26 +110,34 @@ export class Device {
 
     const sourceLocation = extractSourceLocation(new Error().stack ?? '');
     const selectorStr = selector ? JSON.stringify(selectorToProto(selector)) : undefined;
+    const log: string[] = [];
 
     // Best-effort element bounds lookup for trace overlay
     let bounds: { left: number; top: number; right: number; bottom: number } | undefined;
     let point: { x: number; y: number } | undefined;
     if (selector) {
+      const lookupStart = Date.now();
       try {
         const res = await this._client.findElement(selector, 500);
         if (res.found && res.element?.bounds) {
           bounds = res.element.bounds;
+          log.push(`Element found at [${bounds.left},${bounds.top}][${bounds.right},${bounds.bottom}] (${Date.now() - lookupStart}ms)`);
           if (category === 'tap') {
             point = {
               x: (bounds.left + bounds.right) / 2,
               y: (bounds.top + bounds.bottom) / 2,
             };
+            log.push(`Tap target: (${point.x}, ${point.y})`);
           }
+        } else {
+          log.push(`Element lookup returned no match (${Date.now() - lookupStart}ms)`);
         }
       } catch {
-        // bounds are best-effort — continue without them
+        log.push(`Element lookup failed (${Date.now() - lookupStart}ms)`);
       }
     }
+
+    log.push('Capturing before screenshot + hierarchy');
 
     // Before capture
     const { actionIndex, captures: beforeCaptures } = await collector.captureBeforeAction(
@@ -157,6 +165,7 @@ export class Device {
       } else {
         error = String(err);
       }
+      log.push(`Action failed: ${error} (${Date.now() - start}ms)`);
       // After capture even on failure
       const afterCaptures = await collector.captureAfterAction(
         actionIndex,
@@ -180,9 +189,12 @@ export class Device {
         hasHierarchyBefore: !!beforeCaptures.hierarchyBefore,
         hasHierarchyAfter: !!afterCaptures.hierarchyAfter,
         sourceLocation,
+        log,
       });
       throw err instanceof Error ? err : new Error(String(err));
     }
+
+    log.push(`Action completed successfully (${Date.now() - start}ms)`);
 
     // After capture on success
     const afterCaptures = await collector.captureAfterAction(
@@ -205,6 +217,7 @@ export class Device {
       hasHierarchyBefore: !!beforeCaptures.hierarchyBefore,
       hasHierarchyAfter: !!afterCaptures.hierarchyAfter,
       sourceLocation,
+      log,
     });
   }
 
