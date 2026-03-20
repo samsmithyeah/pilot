@@ -338,8 +338,24 @@ function createAssertions(
   const timeoutFor = (opts?: { timeout?: number }) =>
     opts?.timeout ?? handle._timeoutMs ?? DEFAULT_ASSERTION_TIMEOUT_MS;
 
-  const fail = (message: string): never => {
-    throw new Error(message);
+  const fail = (message: string, callsite?: Error): never => {
+    const err = new Error(message);
+    // Replace the stack so the top frame points to the test file (where the
+    // assertion was called) rather than to Pilot internals.
+    const source = callsite ?? err;
+    if (source.stack) {
+      const frames = source.stack.split('\n').slice(1);
+      // Move user frames (non-Pilot-internal) to the top so the test file
+      // location is the first thing developers see.
+      const isInternal = (line: string) =>
+        line.includes('/packages/pilot/') ||
+        line.includes('node:internal/');
+      const userFrames = frames.filter((l) => !isInternal(l));
+      const internalFrames = frames.filter((l) => isInternal(l));
+      const reordered = [...userFrames, ...internalFrames];
+      err.stack = `Error: ${message}\n${reordered.join('\n')}`;
+    }
+    throw err;
   };
 
   const assertions: PilotAssertions = {
