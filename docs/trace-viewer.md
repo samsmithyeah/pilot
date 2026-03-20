@@ -101,7 +101,61 @@ Shows before/after screenshots for the selected action:
 - **Console** — Test code `console.log/warn/error` and device logcat output, color-coded by level
 - **Source** — Test source code with the relevant line highlighted
 - **Hierarchy** — Android view hierarchy XML with searchable tree view
+- **Network** — HTTP requests captured during the test (see [Network Capture](#network-capture) below)
 - **Errors** — Error message, stack trace, and assertion expected/actual values
+
+## Network Capture
+
+Pilot can capture HTTP/HTTPS traffic from the device during test execution. Network requests are recorded alongside other trace data and displayed in the trace viewer's Network tab.
+
+### Enabling network capture
+
+Network capture is enabled by default when tracing is active. Control it with the `network` field in `TraceConfig`:
+
+```typescript
+import { defineConfig } from "pilot";
+
+export default defineConfig({
+  trace: {
+    mode: "retain-on-failure",
+    network: true, // default — capture HTTP traffic
+  },
+});
+```
+
+To disable network capture while keeping other trace features:
+
+```typescript
+trace: {
+  mode: "on",
+  network: false,
+}
+```
+
+### How it works
+
+When network capture is enabled, the Rust daemon starts an HTTP proxy and configures the device to route traffic through it via ADB. The proxy intercepts requests and responses, recording method, URL, headers, status code, timing, and body data.
+
+**HTTPS support:** The proxy auto-generates a CA certificate and installs it on the device so it can decrypt TLS traffic. This happens transparently -- no manual certificate setup is needed.
+
+### Network tab in the trace viewer
+
+The Network tab shows a sortable table of all captured requests:
+
+| Column | Description |
+|---|---|
+| **Method** | HTTP method (GET, POST, PUT, etc.) |
+| **URL** | Full request URL |
+| **Status** | HTTP status code, color-coded (green for 2xx, blue for 3xx, yellow for 4xx, red for 5xx) |
+| **Type** | Shortened content type (json, html, text, etc.) |
+| **Duration** | Time from request start to response end |
+| **Size** | Response body size |
+
+Click a row to expand it and see full details:
+- **Request headers** and **response headers**
+- **Request body** and **response body** (JSON bodies are pretty-printed)
+
+Use the filter bar to search by URL and the status buttons (All / 2XX / 3XX / 4XX / 5XX) to narrow results. Click column headers to sort.
 
 ## Trace Archive Format
 
@@ -114,6 +168,8 @@ trace.zip/
   screenshots/       # PNGs (action-003-before.png, action-003-after.png)
   hierarchy/         # View hierarchy XML snapshots
   sources/           # Test source files
+  network.json       # NDJSON network request log (when network capture is enabled)
+  network/           # Large request/response body files
 ```
 
 The format uses `version: 1` for forward compatibility.

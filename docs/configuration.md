@@ -107,8 +107,11 @@ interface TraceConfig {
   snapshots: boolean;    // Capture view hierarchy XML (default: true)
   sources: boolean;      // Include test source files (default: true)
   attachments: boolean;  // Include user attachments (default: true)
+  network: boolean;      // Capture HTTP/HTTPS traffic via proxy (default: true)
 }
 ```
+
+When `network` is enabled, the Rust daemon starts an HTTP proxy and configures the device to route traffic through it. HTTPS traffic is decrypted using an auto-generated CA certificate installed on the device.
 
 Example:
 
@@ -118,6 +121,7 @@ trace: {
   screenshots: true,
   snapshots: true,
   sources: false,
+  network: true,
 }
 ```
 

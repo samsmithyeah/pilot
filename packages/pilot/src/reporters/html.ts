@@ -46,7 +46,18 @@ export class HtmlReporter implements PilotReporter {
       }
     }
 
-    const html = generateHtml(result, this._startTime, screenshotMap)
+    // Copy trace zips to report folder
+    const traceMap = new Map<string, string>()
+    for (const test of result.tests) {
+      if (test.tracePath && fs.existsSync(test.tracePath)) {
+        const basename = path.basename(test.tracePath)
+        const dest = path.join(outputDir, basename)
+        fs.copyFileSync(test.tracePath, dest)
+        traceMap.set(test.tracePath, basename)
+      }
+    }
+
+    const html = generateHtml(result, this._startTime, screenshotMap, traceMap)
     const indexPath = path.join(outputDir, 'index.html')
     fs.writeFileSync(indexPath, html)
 
@@ -72,6 +83,7 @@ function generateHtml(
   result: FullResult,
   startTime: Date,
   screenshotMap: Map<string, string>,
+  traceMap: Map<string, string>,
 ): string {
   const passed = result.tests.filter((t) => t.status === 'passed').length
   const failed = result.tests.filter((t) => t.status === 'failed').length
@@ -80,6 +92,7 @@ function generateHtml(
 
   const testRows = result.tests.map((t) => {
     const screenshotFile = t.screenshotPath ? screenshotMap.get(t.screenshotPath) : null
+    const traceFile = t.tracePath ? traceMap.get(t.tracePath) : null
     return {
       name: escapeHtml(t.fullName),
       status: t.status,
@@ -87,6 +100,7 @@ function generateHtml(
       error: t.error ? escapeHtml(t.error.message) : null,
       stack: t.error?.stack ? escapeHtml(t.error.stack.split('\n').slice(1, 6).join('\n')) : null,
       screenshot: screenshotFile,
+      trace: traceFile,
     }
   })
 
@@ -131,6 +145,16 @@ function generateHtml(
   .screenshot { margin-top: 12px; }
   .screenshot img { max-width: 400px; border: 1px solid #ddd; border-radius: 4px; cursor: pointer; }
   .screenshot img:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
+  .trace-section { margin-top: 12px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .trace-btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px; background: #6c5ce7; color: white; border: none; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; text-decoration: none; transition: background 0.15s; }
+  .trace-btn:hover { background: #5a4bd1; }
+  .trace-btn svg { width: 16px; height: 16px; fill: currentColor; }
+  .trace-download { display: inline-flex; align-items: center; gap: 4px; padding: 8px 12px; background: #f0edff; color: #6c5ce7; border: 1px solid #d5d0f5; border-radius: 6px; font-size: 13px; text-decoration: none; transition: background 0.15s; }
+  .trace-download:hover { background: #e4dfff; }
+  .trace-cmd { display: inline-block; margin-top: 6px; padding: 6px 12px; background: #f8f8f8; border: 1px solid #e0e0e0; border-radius: 4px; font-family: monospace; font-size: 12px; color: #555; cursor: pointer; width: 100%; }
+  .trace-cmd:hover { background: #f0f0f0; }
+  .trace-cmd-copied { background: #e8f5e9; border-color: #a5d6a7; }
+  .trace-badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; background: #6c5ce7; color: white; border-radius: 10px; font-size: 11px; font-weight: 600; margin-left: 8px; }
   .status-passed { color: #4caf50; }
   .status-failed { color: #f44336; }
   .status-skipped { color: #ff9800; }
@@ -177,12 +201,28 @@ function render(filter, query) {
     li.className = 'test-item';
     var header = '<div class="test-header" onclick="toggle(' + i + ')">';
     header += '<span class="test-icon status-' + t.status + '">' + icon + '</span>';
-    header += '<span class="test-name">' + t.name + '</span>';
+    header += '<span class="test-name">' + t.name;
+    if (t.trace) header += '<span class="trace-badge">&#9654; Trace</span>';
+    header += '</span>';
     header += '<span class="test-duration">' + dur + '</span></div>';
     var details = '<div class="test-details" id="details-' + i + '">';
+    if (t.trace && t.status === 'failed') {
+      details += '<div class="trace-section">';
+      details += '<a class="trace-btn" href="' + t.trace + '" download><svg viewBox="0 0 24 24"><path d="M13 3v9.59l3.3-3.3 1.4 1.42L12 16.41l-5.7-5.7 1.4-1.42L11 12.59V3h2zM4 19v2h16v-2H4z"/></svg>Download Trace</a>';
+      details += '<a class="trace-download" href="' + t.trace + '" target="_blank">Open Trace File</a>';
+      details += '</div>';
+      details += '<div class="trace-cmd" onclick="copyCmd(this)" title="Click to copy">npx pilot show-trace ' + t.trace + '</div>';
+    }
     if (t.error) details += '<div class="error-msg">' + t.error + '</div>';
     if (t.stack) details += '<div class="stack-trace">' + t.stack + '</div>';
     if (t.screenshot) details += '<div class="screenshot"><img src="' + t.screenshot + '" onclick="window.open(this.src)"></div>';
+    if (t.trace && t.status !== 'failed') {
+      details += '<div class="trace-section">';
+      details += '<a class="trace-btn" href="' + t.trace + '" download><svg viewBox="0 0 24 24"><path d="M13 3v9.59l3.3-3.3 1.4 1.42L12 16.41l-5.7-5.7 1.4-1.42L11 12.59V3h2zM4 19v2h16v-2H4z"/></svg>Download Trace</a>';
+      details += '<a class="trace-download" href="' + t.trace + '" target="_blank">Open Trace File</a>';
+      details += '</div>';
+      details += '<div class="trace-cmd" onclick="copyCmd(this)" title="Click to copy">npx pilot show-trace ' + t.trace + '</div>';
+    }
     details += '</div>';
     li.innerHTML = header + details;
     list.appendChild(li);
@@ -192,6 +232,18 @@ function render(filter, query) {
 function toggle(i) {
   var el = document.getElementById('details-' + i);
   if (el) el.classList.toggle('open');
+}
+
+function copyCmd(el) {
+  var text = el.textContent;
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(text).then(function() {
+      el.classList.add('trace-cmd-copied');
+      var orig = el.textContent;
+      el.textContent = 'Copied!';
+      setTimeout(function() { el.textContent = orig; el.classList.remove('trace-cmd-copied'); }, 1500);
+    });
+  }
 }
 
 document.querySelectorAll('.filter-btn').forEach(function(btn) {

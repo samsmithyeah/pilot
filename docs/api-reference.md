@@ -1290,6 +1290,7 @@ await device.tracing.start({ screenshots: true, snapshots: true });
 | `screenshots` | `boolean` | `true` | Capture before/after screenshots |
 | `snapshots` | `boolean` | `true` | Capture view hierarchy XML |
 | `sources` | `boolean` | `true` | Include test source files |
+| `network` | `boolean` | `true` | Capture HTTP/HTTPS traffic via proxy |
 | `title` | `string` | — | Custom title for the trace |
 
 ### `device.tracing.stop(options?)`
@@ -1467,6 +1468,7 @@ interface TestResult {
   durationMs: number;
   error?: Error;
   screenshotPath?: string;
+  tracePath?: string; // path to the trace archive (.zip) when tracing is enabled
   workerIndex?: number; // set in parallel mode — index of the worker that ran this test
 }
 ```
@@ -1562,7 +1564,7 @@ The trace viewer shows:
 - **Actions panel** — chronological list of actions with icons, selectors, and durations
 - **Timeline filmstrip** — screenshot thumbnails for quick navigation
 - **Screenshot panel** — before/after screenshots with tap coordinate overlays
-- **Detail tabs** — Call info, Console output, Source code, View hierarchy, Errors
+- **Detail tabs** — Call info, Console output, Source code, View hierarchy, Network requests, Errors
 - **Keyboard navigation** — Arrow keys or j/k to move between actions
 
 ### `pilot test --trace <mode>`
@@ -1572,6 +1574,14 @@ Record traces during test execution. Overrides the `trace` config option.
 ```bash
 npx pilot test --trace on                    # Record all tests
 npx pilot test --trace retain-on-failure     # Only keep traces for failures
+```
+
+### `pilot test --network` / `pilot test --no-network`
+
+Enable or disable network capture when tracing. By default, network capture is enabled whenever tracing is active. Use `--no-network` to disable it.
+
+```bash
+npx pilot test --trace on --no-network      # Trace without network capture
 ```
 
 ### `pilot merge-reports [dir]`
