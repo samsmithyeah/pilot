@@ -1,6 +1,24 @@
 import { useRef, useEffect } from 'preact/hooks'
 import type { ActionTraceEvent, AssertionTraceEvent, TraceMetadata } from '../../trace/types.js'
 
+// ─── Injected Styles ───
+
+const TIMELINE_STYLES = `
+  .timeline-item { display: flex; flex-direction: column; align-items: center; gap: 2px; flex-shrink: 0; }
+  .timeline-item .timeline-time-label { position: static; transform: none; font-size: 9px; color: #555; white-space: nowrap; }
+`
+
+let stylesInjected = false
+function injectStyles() {
+  if (stylesInjected) return
+  stylesInjected = true
+  const el = document.createElement('style')
+  el.textContent = TIMELINE_STYLES
+  document.head.appendChild(el)
+}
+
+// ─── Types ───
+
 interface Props {
   events: (ActionTraceEvent | AssertionTraceEvent)[]
   screenshots: Map<string, string>
@@ -17,6 +35,8 @@ function formatRelativeTime(ms: number): string {
 }
 
 export function TimelineFilmstrip({ events, screenshots, metadata, selectedIndex, onSelect }: Props) {
+  injectStyles()
+
   const selectedRef = useRef<HTMLElement>(null)
 
   useEffect(() => {

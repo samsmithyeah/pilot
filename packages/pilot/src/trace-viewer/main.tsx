@@ -1,11 +1,12 @@
 import { render } from 'preact'
-import { useState, useEffect, useCallback } from 'preact/hooks'
+import { useState, useEffect, useCallback, useRef } from 'preact/hooks'
 import { unzipSync, strFromU8 } from 'fflate'
 import type { AnyTraceEvent, ActionTraceEvent, AssertionTraceEvent, TraceMetadata } from '../trace/types.js'
 import { ActionsPanel } from './components/ActionsPanel.js'
 import { ScreenshotPanel } from './components/ScreenshotPanel.js'
 import { DetailTabs } from './components/DetailTabs.js'
 import { TimelineFilmstrip } from './components/TimelineFilmstrip.js'
+import { ResizeHandle } from './components/ResizeHandle.js'
 
 // ─── Types ───
 
@@ -74,7 +75,9 @@ function App() {
   const [trace, setTrace] = useState<TraceData | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
-  const [selectedIndex, setSelectedIndex] = useState(0)
+  const [pinnedIndex, setPinnedIndex] = useState(0)
+  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null)
+  const selectedIndex = hoveredIndex ?? pinnedIndex
 
   useEffect(() => {
     const params = new URLSearchParams(location.search)
@@ -86,7 +89,7 @@ function App() {
           setTrace(data)
           setLoading(false)
           const actionParam = params.get('action')
-          if (actionParam) setSelectedIndex(parseInt(actionParam, 10))
+          if (actionParam) setPinnedIndex(parseInt(actionParam, 10))
         })
         .catch(err => { setError(err.message); setLoading(false) })
     }
@@ -108,10 +111,12 @@ function App() {
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
     if (e.key === 'ArrowDown' || e.key === 'j') {
       e.preventDefault()
-      setSelectedIndex(i => Math.min(i + 1, actionEvents.length - 1))
+      setPinnedIndex(i => Math.min(i + 1, actionEvents.length - 1))
+      setHoveredIndex(null)
     } else if (e.key === 'ArrowUp' || e.key === 'k') {
       e.preventDefault()
-      setSelectedIndex(i => Math.max(i - 1, 0))
+      setPinnedIndex(i => Math.max(i - 1, 0))
+      setHoveredIndex(null)
     }
   }, [actionEvents.length])
 
@@ -173,6 +178,18 @@ function App() {
 
   const selectedEvent = actionEvents[selectedIndex]
 
+  // Resizable panel sizes
+  const [leftWidth, setLeftWidth] = useState(300)
+  const [bottomHeight, setBottomHeight] = useState(220)
+
+  const handleLeftResize = useCallback((delta: number) => {
+    setLeftWidth(w => Math.max(180, Math.min(600, w + delta)))
+  }, [])
+
+  const handleBottomResize = useCallback((delta: number) => {
+    setBottomHeight(h => Math.max(80, Math.min(500, h - delta)))
+  }, [])
+
   return (
     <div class="viewer">
       {/* Top: Timeline */}
@@ -181,30 +198,38 @@ function App() {
         screenshots={trace.screenshots}
         metadata={trace.metadata}
         selectedIndex={selectedIndex}
-        onSelect={setSelectedIndex}
+        onSelect={setPinnedIndex}
       />
       {/* Middle: Actions + Screenshot */}
       <div class="middle-row">
-        <ActionsPanel
-          events={trace.events}
-          actionEvents={actionEvents}
-          selectedIndex={selectedIndex}
-          onSelect={setSelectedIndex}
-          metadata={trace.metadata}
-        />
+        <div style={{ width: `${leftWidth}px`, flexShrink: 0 }}>
+          <ActionsPanel
+            events={trace.events}
+            actionEvents={actionEvents}
+            selectedIndex={selectedIndex}
+            pinnedIndex={pinnedIndex}
+            onHover={setHoveredIndex}
+            onPin={setPinnedIndex}
+            metadata={trace.metadata}
+          />
+        </div>
+        <ResizeHandle direction="horizontal" onResize={handleLeftResize} />
         <ScreenshotPanel
           event={selectedEvent}
           screenshots={trace.screenshots}
         />
       </div>
       {/* Bottom: Detail tabs */}
-      <DetailTabs
-        event={selectedEvent}
-        events={trace.events}
-        hierarchies={trace.hierarchies}
-        sources={trace.sources}
-        metadata={trace.metadata}
-      />
+      <ResizeHandle direction="vertical" onResize={handleBottomResize} />
+      <div style={{ height: `${bottomHeight}px`, flexShrink: 0 }}>
+        <DetailTabs
+          event={selectedEvent}
+          events={trace.events}
+          hierarchies={trace.hierarchies}
+          sources={trace.sources}
+          metadata={trace.metadata}
+        />
+      </div>
     </div>
   )
 }
@@ -252,8 +277,14 @@ style.textContent = `
   .timeline-meta .passed { color: #4ec9b0; }
   .timeline-meta .failed { color: #f85149; }
 
+  /* ─── Resize handles ─── */
+  .resize-handle { flex-shrink: 0; background: transparent; z-index: 10; }
+  .resize-handle:hover, .resize-handle:active { background: #4fc1ff; }
+  .resize-handle-horizontal { width: 4px; cursor: col-resize; transition: background 0.15s; }
+  .resize-handle-vertical { height: 4px; cursor: row-resize; transition: background 0.15s; }
+
   /* ─── Actions panel ─── */
-  .actions-panel { width: 300px; min-width: 240px; max-width: 400px; border-right: 1px solid #3c3c3c; display: flex; flex-direction: column; background: #252526; overflow: hidden; flex-shrink: 0; }
+  .actions-panel { width: 100%; height: 100%; display: flex; flex-direction: column; background: #252526; overflow: hidden; border-right: 1px solid #3c3c3c; }
   .actions-header { display: flex; align-items: center; border-bottom: 1px solid #3c3c3c; flex-shrink: 0; }
   .actions-header-tab { padding: 6px 14px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: #888; cursor: pointer; border-bottom: 2px solid transparent; }
   .actions-header-tab.active { color: #e8e8e8; border-bottom-color: #4fc1ff; }
@@ -265,6 +296,8 @@ style.textContent = `
   .action-item { padding: 5px 10px; cursor: pointer; border-left: 2px solid transparent; display: flex; align-items: center; gap: 8px; min-height: 30px; }
   .action-item:hover { background: #2a2d2e; }
   .action-item.selected { background: #04395e; border-left-color: #4fc1ff; }
+  .action-item.pinned { border-left-color: #4fc1ff; }
+  .action-item.pinned:not(.selected) { border-left-color: #264f78; }
   .action-item.failed { }
   .action-item.failed .action-name { color: #f85149; }
   .action-icon { font-size: 12px; flex-shrink: 0; width: 18px; text-align: center; color: #888; }
@@ -299,7 +332,7 @@ style.textContent = `
   .screenshot-empty { color: #555; text-align: center; font-size: 13px; }
 
   /* ─── Detail tabs (bottom panel) ─── */
-  .detail-panel { height: 220px; min-height: 120px; max-height: 400px; border-top: 1px solid #3c3c3c; display: flex; flex-direction: column; background: #1e1e1e; flex-shrink: 0; }
+  .detail-panel { height: 100%; display: flex; flex-direction: column; background: #1e1e1e; border-top: 1px solid #3c3c3c; }
   .detail-tabs-bar { display: flex; gap: 0; background: #252526; border-bottom: 1px solid #3c3c3c; flex-shrink: 0; }
   .detail-tab { padding: 6px 14px; cursor: pointer; color: #888; border-bottom: 2px solid transparent; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
   .detail-tab:hover { color: #ccc; }

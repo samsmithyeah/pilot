@@ -5,7 +5,9 @@ interface Props {
   events: AnyTraceEvent[]
   actionEvents: (ActionTraceEvent | AssertionTraceEvent)[]
   selectedIndex: number
-  onSelect: (index: number) => void
+  pinnedIndex: number
+  onHover: (index: number | null) => void
+  onPin: (index: number) => void
   metadata: TraceMetadata
 }
 
@@ -59,7 +61,7 @@ function getSelectorDisplay(event: ActionTraceEvent | AssertionTraceEvent): stri
   }
 }
 
-export function ActionsPanel({ events, actionEvents, selectedIndex, onSelect, metadata }: Props) {
+export function ActionsPanel({ events, actionEvents, selectedIndex, pinnedIndex, onHover, onPin, metadata }: Props) {
   const [tab, setTab] = useState<'actions' | 'metadata'>('actions')
   const [filter, setFilter] = useState('')
   const selectedRef = useRef<HTMLDivElement>(null)
@@ -123,6 +125,7 @@ export function ActionsPanel({ events, actionEvents, selectedIndex, onSelect, me
               if (!matchesFilter) return null
 
               const isSelected = item.actionIndex === selectedIndex
+              const isPinned = item.actionIndex === pinnedIndex
               const isFailed = event.type === 'action' ? !event.success : !event.passed
               const [icon, iconClass] = getIcon(event)
 
@@ -130,8 +133,10 @@ export function ActionsPanel({ events, actionEvents, selectedIndex, onSelect, me
                 <div
                   key={`a-${item.actionIndex}`}
                   ref={isSelected ? selectedRef : undefined}
-                  class={`action-item${isSelected ? ' selected' : ''}${isFailed ? ' failed' : ''}`}
-                  onClick={() => onSelect(item.actionIndex)}
+                  class={`action-item${isSelected ? ' selected' : ''}${isPinned ? ' pinned' : ''}${isFailed ? ' failed' : ''}`}
+                  onMouseEnter={() => onHover(item.actionIndex)}
+                  onMouseLeave={() => onHover(null)}
+                  onClick={() => onPin(item.actionIndex)}
                 >
                   <span class={`action-icon ${iconClass}`}>{icon}</span>
                   <div class="action-details">

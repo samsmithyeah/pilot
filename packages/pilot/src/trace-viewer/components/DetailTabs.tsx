@@ -1,4 +1,4 @@
-import { useState } from 'preact/hooks'
+import { useState, useRef, useEffect } from 'preact/hooks'
 import type { ActionTraceEvent, AssertionTraceEvent, AnyTraceEvent, ConsoleTraceEvent, TraceMetadata } from '../../trace/types.js'
 
 interface Props {
@@ -270,6 +270,8 @@ const TOKEN_COLORS: Record<SourceToken['type'], string | undefined> = {
 }
 
 function SourceTab({ event, sources }: { event: ActionTraceEvent | AssertionTraceEvent | undefined; sources: Map<string, string> }) {
+  const highlightRef = useRef<HTMLDivElement>(null)
+
   if (sources.size === 0) return <div class="no-content">No source files in trace</div>
 
   const [filename, content] = [...sources.entries()][0]
@@ -287,12 +289,20 @@ function SourceTab({ event, sources }: { event: ActionTraceEvent | AssertionTrac
     inBlockComment = result.inBlockComment
   }
 
+  useEffect(() => {
+    highlightRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }, [highlightLine])
+
   return (
     <div>
       <div style={{ color: '#888', fontSize: '11px', marginBottom: '6px', fontFamily: 'monospace' }}>{filename}</div>
       <div class="source-code">
         {tokenizedLines.map((tokens, i) => (
-          <div key={i} class={`source-line${highlightLine === i + 1 ? ' highlight' : ''}`}>
+          <div
+            key={i}
+            ref={highlightLine === i + 1 ? highlightRef : undefined}
+            class={`source-line${highlightLine === i + 1 ? ' highlight' : ''}`}
+          >
             <span class="source-line-number">{i + 1}</span>
             <span class="source-line-content">
               {tokens.length === 0
