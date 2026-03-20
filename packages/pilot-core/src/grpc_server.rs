@@ -11,12 +11,17 @@ use uuid::Uuid;
 use crate::adb;
 use crate::agent_comms::{AgentCommand, AgentConnection, AgentResponse};
 use crate::device::DeviceManager;
+use crate::mitm_ca::MitmAuthority;
+use crate::network_proxy::NetworkProxy;
 use crate::proto;
 use crate::screenshot;
 
 pub struct PilotServiceImpl {
     device_manager: Arc<RwLock<DeviceManager>>,
     agent: Arc<RwLock<AgentConnection>>,
+    network_proxy: Arc<RwLock<Option<NetworkProxy>>>,
+    /// Serial of the device whose proxy settings were modified (for cleanup).
+    proxy_device_serial: Arc<RwLock<Option<String>>>,
 }
 
 impl PilotServiceImpl {
@@ -27,6 +32,8 @@ impl PilotServiceImpl {
         Self {
             device_manager,
             agent,
+            network_proxy: Arc::new(RwLock::new(None)),
+            proxy_device_serial: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -83,6 +90,24 @@ impl PilotServiceImpl {
             .active_serial()
             .map(String::from);
         screenshot::capture_for_error(serial.as_deref()).await
+    }
+
+    /// Clean up network proxy state: revert device proxy settings, remove CA
+    /// cert, and stop the proxy. Called during graceful shutdown to ensure the
+    /// device isn't left with a dangling proxy configuration.
+    pub async fn cleanup_network_proxy(&self) {
+        let proxy = self.network_proxy.write().await.take();
+        let serial = self.proxy_device_serial.write().await.take();
+
+        if let Some(serial) = serial {
+            info!(%serial, "Cleaning up device proxy settings on shutdown");
+            let _ = adb::shell(&serial, "settings put global http_proxy :0").await;
+            let _ = adb::shell(&serial, &format!("rm -f {}", adb::DEVICE_CA_CERT_PATH)).await;
+        }
+
+        if let Some(proxy) = proxy {
+            let _ = proxy.stop().await;
+        }
     }
 
     async fn make_action_response(
@@ -1793,6 +1818,207 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
             error_type: String::new(),
             error_message: String::new(),
             screenshot: Vec::new(),
+        }))
+    }
+
+    // ─── Network Capture (PILOT-164) ───
+
+    async fn start_network_capture(
+        &self,
+        request: Request<proto::StartNetworkCaptureRequest>,
+    ) -> Result<Response<proto::StartNetworkCaptureResponse>, Status> {
+        let req = request.into_inner();
+        let request_id = Self::request_id(&req.request_id);
+
+        let mut proxy_guard = self.network_proxy.write().await;
+        if proxy_guard.is_some() {
+            return Ok(Response::new(proto::StartNetworkCaptureResponse {
+                request_id,
+                success: false,
+                proxy_port: 0,
+                error_message: "Network capture is already running".to_string(),
+            }));
+        }
+
+        // Load or create the MITM CA for HTTPS interception
+        let mitm_ca = Arc::new(
+            MitmAuthority::load_or_create()
+                .map_err(|e| Status::internal(format!("Failed to create MITM CA: {e}")))?,
+        );
+
+        // Get device serial early so we can install the CA cert
+        let serial = self.active_serial().await?;
+
+        // Install the CA cert on the device (best-effort — may fail on non-rooted devices)
+        let ca_pem_path = mitm_ca.ca_pem_path().to_string_lossy().to_string();
+        if let Err(e) = adb::install_ca_cert(&serial, &ca_pem_path).await {
+            error!("Failed to install CA cert on device: {e}");
+        }
+
+        let proxy = NetworkProxy::start(mitm_ca)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to start proxy: {e}")))?;
+        let port = proxy.port();
+        let proxy_host = crate::network_proxy::proxy_host_for_device(&serial);
+        let proxy_setting = format!("{proxy_host}:{port}");
+        info!(%serial, %proxy_setting, "Configuring device HTTP proxy");
+
+        if let Err(e) = adb::shell(
+            &serial,
+            &format!("settings put global http_proxy {proxy_setting}"),
+        )
+        .await
+        {
+            error!("Failed to set device proxy: {e}");
+            // Still return success — the proxy is running, the device just won't route through it
+        }
+
+        *proxy_guard = Some(proxy);
+        *self.proxy_device_serial.write().await = Some(serial);
+
+        Ok(Response::new(proto::StartNetworkCaptureResponse {
+            request_id,
+            success: true,
+            proxy_port: port as u32,
+            error_message: String::new(),
+        }))
+    }
+
+    async fn stop_network_capture(
+        &self,
+        request: Request<proto::StopNetworkCaptureRequest>,
+    ) -> Result<Response<proto::StopNetworkCaptureResponse>, Status> {
+        let req = request.into_inner();
+        let request_id = Self::request_id(&req.request_id);
+
+        let proxy = self.network_proxy.write().await.take();
+        let Some(proxy) = proxy else {
+            return Ok(Response::new(proto::StopNetworkCaptureResponse {
+                request_id,
+                success: false,
+                entries: Vec::new(),
+                error_message: "Network capture is not running".to_string(),
+            }));
+        };
+
+        // Revert device proxy settings and clean up CA cert
+        let serial = self.proxy_device_serial.write().await.take();
+        if let Some(serial) = serial {
+            info!(%serial, "Reverting device HTTP proxy");
+            let _ = adb::shell(&serial, "settings put global http_proxy :0").await;
+            let _ = adb::shell(&serial, &format!("rm -f {}", adb::DEVICE_CA_CERT_PATH)).await;
+        }
+
+        let captured = proxy.stop().await;
+        let entries: Vec<proto::CapturedNetworkEntry> = captured
+            .into_iter()
+            .map(|e| proto::CapturedNetworkEntry {
+                method: e.method,
+                url: e.url,
+                status_code: e.status_code,
+                content_type: e.content_type,
+                request_size: e.request_size,
+                response_size: e.response_size,
+                start_time_ms: e.start_time_ms,
+                duration_ms: e.duration_ms,
+                request_headers_json: crate::network_proxy::headers_to_json_object(
+                    &e.request_headers,
+                )
+                .to_string(),
+                response_headers_json: crate::network_proxy::headers_to_json_object(
+                    &e.response_headers,
+                )
+                .to_string(),
+                request_body: e.request_body,
+                response_body: e.response_body,
+                is_https: e.is_https,
+            })
+            .collect();
+
+        Ok(Response::new(proto::StopNetworkCaptureResponse {
+            request_id,
+            success: true,
+            entries,
+            error_message: String::new(),
+        }))
+    }
+
+    async fn get_logcat(
+        &self,
+        request: Request<proto::GetLogcatRequest>,
+    ) -> Result<Response<proto::GetLogcatResponse>, Status> {
+        let req = request.into_inner();
+        let request_id = Self::request_id(&req.request_id);
+        let serial = self.active_serial().await?;
+
+        // Fetch logcat with epoch timestamps for reliable filtering
+        let output = adb::shell_lenient(&serial, "logcat -d -v epoch")
+            .await
+            .unwrap_or_default();
+
+        // Filter by timestamp and package in Rust for cross-device consistency.
+        // Logcat `-v epoch` format: "<epoch_secs>.<fractional>  <pid> ..."
+        let since_ms = req.since_ms;
+        let until_ms = if req.until_ms > 0 {
+            req.until_ms
+        } else {
+            u64::MAX
+        };
+        let package_name = req.package_name;
+
+        // If package_name is set, resolve its PID(s) for filtering
+        let pids: Vec<String> = if !package_name.is_empty() {
+            let pid_output = adb::shell_lenient(&serial, &format!("pidof {package_name}"))
+                .await
+                .unwrap_or_default();
+            pid_output.split_whitespace().map(String::from).collect()
+        } else {
+            Vec::new()
+        };
+
+        let need_filter = since_ms > 0 || until_ms < u64::MAX || !pids.is_empty();
+
+        let logcat = if need_filter {
+            let since_secs = since_ms as f64 / 1000.0;
+            let until_secs = until_ms as f64 / 1000.0;
+
+            output
+                .lines()
+                .filter(|line| {
+                    // Parse epoch timestamp from the beginning of the line
+                    let ts_ok = if since_ms > 0 || until_ms < u64::MAX {
+                        // Epoch format: "1234567890.123  <pid> ..."
+                        line.split_whitespace()
+                            .next()
+                            .and_then(|ts| ts.parse::<f64>().ok())
+                            .map(|ts| ts >= since_secs && ts <= until_secs)
+                            .unwrap_or(true) // keep non-parseable lines (e.g. headers)
+                    } else {
+                        true
+                    };
+
+                    let pid_ok = if !pids.is_empty() {
+                        // PID is the second whitespace-delimited field in epoch format
+                        line.split_whitespace()
+                            .nth(1)
+                            .map(|pid_field| pids.iter().any(|p| p == pid_field))
+                            .unwrap_or(false)
+                    } else {
+                        true
+                    };
+
+                    ts_ok && pid_ok
+                })
+                .collect::<Vec<&str>>()
+                .join("\n")
+        } else {
+            output
+        };
+
+        Ok(Response::new(proto::GetLogcatResponse {
+            request_id,
+            logcat,
+            error_message: String::new(),
         }))
     }
 }
