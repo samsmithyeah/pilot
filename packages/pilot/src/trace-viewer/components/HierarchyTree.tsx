@@ -258,31 +258,31 @@ function PropertySheet({ node }: { node: HierarchyNode }) {
 
 const HIERARCHY_TREE_STYLES = `
   .ht-container { display: flex; flex-direction: column; height: 100%; font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace; font-size: 11px; }
-  .ht-search { padding: 6px 8px; border-bottom: 1px solid #3c3c3c; flex-shrink: 0; }
-  .ht-search input { width: 100%; padding: 4px 8px; background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 3px; color: #ccc; font-size: 12px; outline: none; font-family: inherit; }
-  .ht-search input:focus { border-color: #4fc1ff; }
+  .ht-search { padding: 6px 8px; border-bottom: 1px solid var(--color-border); flex-shrink: 0; }
+  .ht-search input { width: 100%; padding: 4px 8px; background: var(--color-bg); border: 1px solid var(--color-border); border-radius: 3px; color: var(--color-text-secondary); font-size: 12px; outline: none; font-family: inherit; }
+  .ht-search input:focus { border-color: var(--color-accent); }
   .ht-tree { flex: 1; overflow-y: auto; overflow-x: auto; min-height: 0; }
   .ht-row { display: flex; align-items: center; gap: 4px; padding: 1px 4px; cursor: pointer; white-space: nowrap; line-height: 1.6; }
-  .ht-row:hover { background: #2a2d2e; }
-  .ht-row.ht-selected { background: #04395e; }
-  .ht-row.ht-search-match { background: rgba(79,193,255,0.08); }
-  .ht-row.ht-selected.ht-search-match { background: #04395e; }
-  .ht-toggle { width: 12px; flex-shrink: 0; cursor: pointer; color: #888; text-align: center; user-select: none; }
+  .ht-row:hover { background: var(--color-bg-hover); }
+  .ht-row.ht-selected { background: var(--color-bg-selected); }
+  .ht-row.ht-search-match { background: var(--color-highlight); }
+  .ht-row.ht-selected.ht-search-match { background: var(--color-bg-selected); }
+  .ht-toggle { width: 12px; flex-shrink: 0; cursor: pointer; color: var(--color-text-muted); text-align: center; user-select: none; }
   .ht-toggle-leaf { cursor: default; }
-  .ht-tag { color: #4ec9b0; font-weight: 500; flex-shrink: 0; }
-  .ht-inline-attrs { color: #888; margin-left: 6px; overflow: hidden; text-overflow: ellipsis; }
-  .ht-attr-name { color: #9cdcfe; }
-  .ht-attr-val { color: #ce9178; }
+  .ht-tag { color: var(--color-success); font-weight: 500; flex-shrink: 0; }
+  .ht-inline-attrs { color: var(--color-text-muted); margin-left: 6px; overflow: hidden; text-overflow: ellipsis; }
+  .ht-attr-name { color: var(--color-attr); }
+  .ht-attr-val { color: var(--color-string); }
 
-  .ht-props { border-top: 1px solid #3c3c3c; flex-shrink: 0; max-height: 40%; overflow-y: auto; }
-  .ht-props-header { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-bottom: 1px solid #3c3c3c; background: #252526; }
-  .ht-props-title { color: #4ec9b0; font-weight: 600; font-size: 11px; }
-  .ht-copy-btn { margin-left: auto; padding: 2px 8px; background: #2d2d2d; border: 1px solid #3c3c3c; border-radius: 3px; color: #4fc1ff; cursor: pointer; font-size: 10px; font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace; white-space: nowrap; max-width: 300px; overflow: hidden; text-overflow: ellipsis; }
-  .ht-copy-btn:hover { background: #3c3c3c; }
+  .ht-props { border-top: 1px solid var(--color-border); flex-shrink: 0; max-height: 40%; overflow-y: auto; }
+  .ht-props-header { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--color-border); background: var(--color-bg-secondary); }
+  .ht-props-title { color: var(--color-success); font-weight: 600; font-size: 11px; }
+  .ht-copy-btn { margin-left: auto; padding: 2px 8px; background: var(--color-bg-tertiary); border: 1px solid var(--color-border); border-radius: 3px; color: var(--color-accent); cursor: pointer; font-size: 10px; font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace; white-space: nowrap; max-width: 300px; overflow: hidden; text-overflow: ellipsis; }
+  .ht-copy-btn:hover { background: var(--color-border); }
   .ht-props-grid { padding: 4px 8px; }
   .ht-props-row { display: grid; grid-template-columns: 140px 1fr; gap: 8px; padding: 1px 0; line-height: 1.5; }
-  .ht-props-name { color: #9cdcfe; overflow: hidden; text-overflow: ellipsis; }
-  .ht-props-value { color: #ccc; word-break: break-all; }
+  .ht-props-name { color: var(--color-attr); overflow: hidden; text-overflow: ellipsis; }
+  .ht-props-value { color: var(--color-text-secondary); word-break: break-all; }
 `
 
 let htStylesInjected = false

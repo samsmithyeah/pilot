@@ -164,7 +164,7 @@ export function ActionsPanel({ events, actionEvents, selectedIndex, pinnedIndex,
             <span class="metadata-label">File</span>
             <span class="metadata-value">{metadata.testFile}</span>
             <span class="metadata-label">Status</span>
-            <span class="metadata-value" style={{ color: metadata.testStatus === 'passed' ? '#4ec9b0' : '#f85149' }}>{metadata.testStatus}</span>
+            <span class="metadata-value" style={{ color: metadata.testStatus === 'passed' ? 'var(--color-success)' : 'var(--color-error)' }}>{metadata.testStatus}</span>
             <span class="metadata-label">Duration</span>
             <span class="metadata-value">{metadata.testDuration}ms</span>
             <span class="metadata-label">Device</span>
@@ -183,7 +183,7 @@ export function ActionsPanel({ events, actionEvents, selectedIndex, pinnedIndex,
             <span class="metadata-value">v{metadata.pilotVersion}</span>
             {metadata.error && <>
               <span class="metadata-label">Error</span>
-              <span class="metadata-value" style={{ color: '#f85149' }}>{metadata.error}</span>
+              <span class="metadata-value" style={{ color: 'var(--color-error)' }}>{metadata.error}</span>
             </>}
           </div>
         </div>

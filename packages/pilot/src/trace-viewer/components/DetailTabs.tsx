@@ -297,10 +297,10 @@ function tokenizeLine(line: string, inBlockComment: boolean): { tokens: SourceTo
 }
 
 const TOKEN_COLORS: Record<SourceToken['type'], string | undefined> = {
-  keyword: '#569cd6',
-  string: '#ce9178',
-  comment: '#6a9955',
-  number: '#b5cea8',
+  keyword: 'var(--color-keyword)',
+  string: 'var(--color-string)',
+  comment: 'var(--color-text-faint)',
+  number: 'var(--color-number)',
   plain: undefined,
 }
 
@@ -330,7 +330,7 @@ function SourceTab({ event, sources }: { event: ActionTraceEvent | AssertionTrac
 
   return (
     <div>
-      <div style={{ color: '#888', fontSize: '11px', marginBottom: '6px', fontFamily: 'monospace' }}>{filename}</div>
+      <div style={{ color: 'var(--color-text-muted)', fontSize: '11px', marginBottom: '6px', fontFamily: 'monospace' }}>{filename}</div>
       <div class="source-code">
         {tokenizedLines.map((tokens, i) => (
           <div
@@ -393,10 +393,10 @@ function ErrorsTab({ event }: { event: ActionTraceEvent | AssertionTraceEvent | 
       {event.type === 'assertion' && !event.passed && (
         <div style={{ marginTop: '8px', fontSize: '12px' }}>
           {event.expected !== undefined && (
-            <div><span style={{ color: '#888' }}>Expected: </span><span style={{ color: '#4ec9b0' }}>{event.expected}</span></div>
+            <div><span style={{ color: 'var(--color-text-muted)' }}>Expected: </span><span style={{ color: 'var(--color-success)' }}>{event.expected}</span></div>
           )}
           {event.actual !== undefined && (
-            <div><span style={{ color: '#888' }}>Actual: </span><span style={{ color: '#f85149' }}>{event.actual}</span></div>
+            <div><span style={{ color: 'var(--color-text-muted)' }}>Actual: </span><span style={{ color: 'var(--color-error)' }}>{event.actual}</span></div>
           )}
         </div>
       )}

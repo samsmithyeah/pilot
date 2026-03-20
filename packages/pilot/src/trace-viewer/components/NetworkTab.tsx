@@ -6,45 +6,45 @@ import type { NetworkEntry } from '../../trace/types.js'
 const NETWORK_STYLES = `
   .net-container { display: flex; flex-direction: column; height: 100%; }
   .net-filter-bar { display: flex; align-items: center; gap: 8px; padding: 6px 0; flex-shrink: 0; }
-  .net-filter-input { flex: 1; padding: 4px 8px; background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 3px; color: #ccc; font-size: 12px; outline: none; font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace; }
-  .net-filter-input:focus { border-color: #4fc1ff; }
+  .net-filter-input { flex: 1; padding: 4px 8px; background: var(--color-bg); border: 1px solid var(--color-border); border-radius: 3px; color: var(--color-text-secondary); font-size: 12px; outline: none; font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace; }
+  .net-filter-input:focus { border-color: var(--color-accent); }
   .net-status-filters { display: flex; gap: 2px; }
-  .net-status-btn { padding: 2px 8px; background: transparent; border: 1px solid #3c3c3c; border-radius: 3px; color: #888; font-size: 11px; cursor: pointer; }
-  .net-status-btn:hover { color: #ccc; border-color: #555; }
-  .net-status-btn.active { color: #e8e8e8; border-color: #4fc1ff; background: rgba(79,193,255,0.1); }
+  .net-status-btn { padding: 2px 8px; background: transparent; border: 1px solid var(--color-border); border-radius: 3px; color: var(--color-text-muted); font-size: 11px; cursor: pointer; }
+  .net-status-btn:hover { color: var(--color-text-secondary); border-color: var(--color-text-faintest); }
+  .net-status-btn.active { color: var(--color-text-primary); border-color: var(--color-accent); background: var(--color-highlight); }
 
   .net-table { width: 100%; border-collapse: collapse; font-size: 11px; }
-  .net-table th { text-align: left; padding: 4px 8px; color: #888; border-bottom: 1px solid #3c3c3c; cursor: pointer; user-select: none; white-space: nowrap; font-weight: 600; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
-  .net-table th:hover { color: #ccc; }
+  .net-table th { text-align: left; padding: 4px 8px; color: var(--color-text-muted); border-bottom: 1px solid var(--color-border); cursor: pointer; user-select: none; white-space: nowrap; font-weight: 600; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .net-table th:hover { color: var(--color-text-secondary); }
   .net-sort-indicator { margin-left: 4px; font-size: 9px; }
-  .net-table td { padding: 4px 8px; border-bottom: 1px solid #2d2d2d; white-space: nowrap; }
+  .net-table td { padding: 4px 8px; border-bottom: 1px solid var(--color-bg-tertiary); white-space: nowrap; }
   .net-table tr.net-row { cursor: pointer; }
-  .net-table tr.net-row:hover { background: #2a2d2e; }
-  .net-table tr.net-row.expanded { background: #04395e; }
+  .net-table tr.net-row:hover { background: var(--color-bg-hover); }
+  .net-table tr.net-row.expanded { background: var(--color-bg-selected); }
 
   .net-method { font-weight: 600; font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace; }
-  .net-url { font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace; color: #ccc; overflow: hidden; text-overflow: ellipsis; max-width: 400px; }
-  .net-status-2xx { color: #4ec9b0; }
-  .net-status-3xx { color: #4fc1ff; }
-  .net-status-4xx { color: #cca700; }
-  .net-status-5xx { color: #f85149; }
-  .net-type { color: #888; }
-  .net-duration { color: #888; text-align: right; }
-  .net-size { color: #888; text-align: right; }
+  .net-url { font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace; color: var(--color-text-secondary); overflow: hidden; text-overflow: ellipsis; max-width: 400px; }
+  .net-status-2xx { color: var(--color-success); }
+  .net-status-3xx { color: var(--color-accent); }
+  .net-status-4xx { color: var(--color-warning); }
+  .net-status-5xx { color: var(--color-error); }
+  .net-type { color: var(--color-text-muted); }
+  .net-duration { color: var(--color-text-muted); text-align: right; }
+  .net-size { color: var(--color-text-muted); text-align: right; }
 
-  .net-detail { background: #252526; }
+  .net-detail { background: var(--color-bg-secondary); }
   .net-detail td { padding: 0; }
   .net-detail-inner { padding: 10px 14px; font-size: 12px; }
   .net-detail-section { margin-bottom: 10px; }
-  .net-detail-section-title { color: #4fc1ff; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
-  .net-detail-url { font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace; font-size: 11px; color: #ccc; word-break: break-all; white-space: pre-wrap; margin-bottom: 10px; }
+  .net-detail-section-title { color: var(--color-accent); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+  .net-detail-url { font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace; font-size: 11px; color: var(--color-text-secondary); word-break: break-all; white-space: pre-wrap; margin-bottom: 10px; }
   .net-headers-grid { display: grid; grid-template-columns: minmax(120px, auto) 1fr; gap: 2px 12px; font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace; font-size: 11px; }
-  .net-header-key { color: #9cdcfe; }
-  .net-header-value { color: #ce9178; word-break: break-all; }
-  .net-body-block { background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 3px; padding: 8px; font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace; font-size: 11px; color: #ccc; white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; }
+  .net-header-key { color: var(--color-attr); }
+  .net-header-value { color: var(--color-string); word-break: break-all; }
+  .net-body-block { background: var(--color-bg); border: 1px solid var(--color-border); border-radius: 3px; padding: 8px; font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace; font-size: 11px; color: var(--color-text-secondary); white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; }
 
-  .net-empty { color: #555; font-size: 12px; padding: 24px; text-align: center; }
-  .net-empty-note { color: #444; font-size: 11px; margin-top: 6px; }
+  .net-empty { color: var(--color-text-faintest); font-size: 12px; padding: 24px; text-align: center; }
+  .net-empty-note { color: var(--color-text-faintest); font-size: 11px; margin-top: 6px; }
   .net-table-wrapper { flex: 1; overflow-y: auto; }
 `
 
@@ -227,8 +227,8 @@ export function NetworkTab({ entries, bodies }: Props) {
               <th onClick={() => handleSort('url')}>URL{sortIndicator('url')}</th>
               <th onClick={() => handleSort('status')}>Status{sortIndicator('status')}</th>
               <th onClick={() => handleSort('type')}>Type{sortIndicator('type')}</th>
-              <th onClick={() => handleSort('duration')}>Duration{sortIndicator('duration')}</th>
-              <th onClick={() => handleSort('size')}>Size{sortIndicator('size')}</th>
+              <th style={{ textAlign: 'right' }} onClick={() => handleSort('duration')}>Duration{sortIndicator('duration')}</th>
+              <th style={{ textAlign: 'right' }} onClick={() => handleSort('size')}>Size{sortIndicator('size')}</th>
             </tr>
           </thead>
           <tbody>
@@ -272,7 +272,7 @@ export function NetworkTab({ entries, bodies }: Props) {
                                 ))}
                               </div>
                             ) : (
-                              <span style={{ color: '#555', fontSize: '11px' }}>None</span>
+                              <span style={{ color: 'var(--color-text-faintest)', fontSize: '11px' }}>None</span>
                             )}
                           </div>
 
@@ -295,7 +295,7 @@ export function NetworkTab({ entries, bodies }: Props) {
                                 ))}
                               </div>
                             ) : (
-                              <span style={{ color: '#555', fontSize: '11px' }}>None</span>
+                              <span style={{ color: 'var(--color-text-faintest)', fontSize: '11px' }}>None</span>
                             )}
                           </div>
 

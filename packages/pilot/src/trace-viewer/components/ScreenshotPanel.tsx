@@ -4,12 +4,12 @@ import type { ActionTraceEvent, AssertionTraceEvent } from '../../trace/types.js
 // ─── Injected Styles ───
 
 const SCREENSHOT_STYLES = `
-  .screenshot-zoom-label { margin-left: auto; padding: 6px 12px; color: #888; font-size: 11px; }
+  .screenshot-zoom-label { margin-left: auto; padding: 6px 12px; color: var(--color-text-muted); font-size: 11px; }
   .screenshot-image-wrapper { position: relative; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }
   .screenshot-image-wrapper img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 8px; }
   .bounds-overlay { position: absolute; pointer-events: none; border-radius: 8px; overflow: hidden; }
-  .bounds-rect { position: absolute; border: 2px solid #4fc1ff; background: rgba(79,193,255,0.15); border-radius: 2px; }
-  .bounds-rect-hierarchy { position: absolute; border: 2px solid #4ec9b0; background: rgba(78,201,176,0.15); border-radius: 2px; }
+  .bounds-rect { position: absolute; border: 2px solid var(--color-accent); background: rgba(79,193,255,0.15); border-radius: 2px; }
+  .bounds-rect-hierarchy { position: absolute; border: 2px solid var(--color-success); background: rgba(78,201,176,0.15); border-radius: 2px; }
   .bounds-point { position: absolute; width: 16px; height: 16px; margin-left: -8px; margin-top: -8px; border-radius: 50%; background: rgba(255,80,80,0.5); border: 2px solid #ff5050; box-shadow: 0 0 8px rgba(255,80,80,0.4); }
 `
 
