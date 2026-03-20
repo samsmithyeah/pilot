@@ -2,6 +2,8 @@ mod adb;
 mod agent_comms;
 mod device;
 mod grpc_server;
+mod mitm_ca;
+mod network_proxy;
 mod screenshot;
 
 use std::net::SocketAddr;

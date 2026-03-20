@@ -367,6 +367,7 @@ interface CliArgs {
   workers?: number;
   shard?: { current: number; total: number };
   trace?: string;
+  forceInstall: boolean;
   version: boolean;
   help: boolean;
   tsxReexec: boolean;
@@ -378,6 +379,7 @@ function parseArgs(argv: string[]): CliArgs {
     files: [],
     version: false,
     help: false,
+    forceInstall: false,
     tsxReexec: false,
   };
 
@@ -418,6 +420,8 @@ function parseArgs(argv: string[]): CliArgs {
       args.trace = rest[++i] ?? 'on';
     } else if (arg?.startsWith('--trace=')) {
       args.trace = arg.slice('--trace='.length);
+    } else if (arg === '--force-install') {
+      args.forceInstall = true;
     } else if (arg === '--__tsx-reexec') {
       args.tsxReexec = true;
     } else if (!arg.startsWith('-') && !args.command) {
@@ -454,6 +458,7 @@ ${bold('Options:')}
   --shard=x/y              Split tests across CI machines (e.g. --shard=1/4)
   --trace <mode>           Trace mode: off, on, on-first-retry, on-all-retries,
                            retain-on-failure, retain-on-first-failure
+  --force-install          Reinstall the APK even if already installed
   -v, --version            Print version
   -h, --help               Show this help
 `);
@@ -664,12 +669,13 @@ async function main(): Promise<void> {
 
     // Install app under test if APK path is configured and not already installed.
     if (config.apk) {
-      const alreadyInstalled = config.package
+      const alreadyInstalled = !args.forceInstall
+        && config.package
         && config.device
         && isPackageInstalled(config.device, config.package);
 
       if (alreadyInstalled) {
-        console.log(dim(`App ${config.package} already installed, skipping APK install.`));
+        console.log(dim(`App ${config.package} already installed, skipping APK install. Use --force-install to reinstall.`));
       } else {
         const resolvedApk = path.resolve(config.rootDir, config.apk);
         try {

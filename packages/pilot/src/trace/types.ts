@@ -247,6 +247,8 @@ export interface TraceConfig {
   sources: boolean
   /** Whether to include user-added attachments. */
   attachments: boolean
+  /** Whether to capture network traffic via HTTP proxy. */
+  network: boolean
 }
 
 /** Parse a string shorthand or object into a full TraceConfig. */
@@ -259,6 +261,7 @@ export function resolveTraceConfig(
     snapshots: true,
     sources: true,
     attachments: true,
+    network: true,
   }
 
   if (input === undefined) return defaults

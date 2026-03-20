@@ -11,12 +11,15 @@ use uuid::Uuid;
 use crate::adb;
 use crate::agent_comms::{AgentCommand, AgentConnection, AgentResponse};
 use crate::device::DeviceManager;
+use crate::mitm_ca::MitmAuthority;
+use crate::network_proxy::NetworkProxy;
 use crate::proto;
 use crate::screenshot;
 
 pub struct PilotServiceImpl {
     device_manager: Arc<RwLock<DeviceManager>>,
     agent: Arc<RwLock<AgentConnection>>,
+    network_proxy: Arc<RwLock<Option<NetworkProxy>>>,
 }
 
 impl PilotServiceImpl {
@@ -27,6 +30,7 @@ impl PilotServiceImpl {
         Self {
             device_manager,
             agent,
+            network_proxy: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -1793,6 +1797,146 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
             error_type: String::new(),
             error_message: String::new(),
             screenshot: Vec::new(),
+        }))
+    }
+
+    // ─── Network Capture (PILOT-164) ───
+
+    async fn start_network_capture(
+        &self,
+        request: Request<proto::StartNetworkCaptureRequest>,
+    ) -> Result<Response<proto::StartNetworkCaptureResponse>, Status> {
+        let req = request.into_inner();
+        let request_id = Self::request_id(&req.request_id);
+
+        let mut proxy_guard = self.network_proxy.write().await;
+        if proxy_guard.is_some() {
+            return Ok(Response::new(proto::StartNetworkCaptureResponse {
+                request_id,
+                success: false,
+                proxy_port: 0,
+                error_message: "Network capture is already running".to_string(),
+            }));
+        }
+
+        // Load or create the MITM CA for HTTPS interception
+        let mitm_ca = Arc::new(
+            MitmAuthority::load_or_create()
+                .map_err(|e| Status::internal(format!("Failed to create MITM CA: {e}")))?,
+        );
+
+        // Get device serial early so we can install the CA cert
+        let serial = self.active_serial().await?;
+
+        // Install the CA cert on the device (best-effort — may fail on non-rooted devices)
+        let ca_pem_path = mitm_ca.ca_pem_path().to_string_lossy().to_string();
+        if let Err(e) = adb::install_ca_cert(&serial, &ca_pem_path).await {
+            error!("Failed to install CA cert on device: {e}");
+        }
+
+        let proxy = NetworkProxy::start(mitm_ca)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to start proxy: {e}")))?;
+        let port = proxy.port();
+        // For emulators, 10.0.2.2 is the host loopback. For real devices,
+        // we use the host's local IP, but 10.0.2.2 covers the common case.
+        let proxy_host = if serial.starts_with("emulator-") {
+            "10.0.2.2"
+        } else {
+            "127.0.0.1"
+        };
+        let proxy_setting = format!("{proxy_host}:{port}");
+        info!(%serial, %proxy_setting, "Configuring device HTTP proxy");
+
+        if let Err(e) = adb::shell(
+            &serial,
+            &format!("settings put global http_proxy {proxy_setting}"),
+        )
+        .await
+        {
+            error!("Failed to set device proxy: {e}");
+            // Still return success — the proxy is running, the device just won't route through it
+        }
+
+        *proxy_guard = Some(proxy);
+
+        Ok(Response::new(proto::StartNetworkCaptureResponse {
+            request_id,
+            success: true,
+            proxy_port: port as u32,
+            error_message: String::new(),
+        }))
+    }
+
+    async fn stop_network_capture(
+        &self,
+        request: Request<proto::StopNetworkCaptureRequest>,
+    ) -> Result<Response<proto::StopNetworkCaptureResponse>, Status> {
+        let req = request.into_inner();
+        let request_id = Self::request_id(&req.request_id);
+
+        let proxy = self.network_proxy.write().await.take();
+        let Some(proxy) = proxy else {
+            return Ok(Response::new(proto::StopNetworkCaptureResponse {
+                request_id,
+                success: false,
+                entries: Vec::new(),
+                error_message: "Network capture is not running".to_string(),
+            }));
+        };
+
+        // Revert device proxy settings and clean up CA cert
+        if let Ok(serial) = self.active_serial().await {
+            info!(%serial, "Reverting device HTTP proxy");
+            let _ = adb::shell(&serial, "settings put global http_proxy :0").await;
+            let _ = adb::shell(&serial, "rm -f /data/misc/user/0/cacerts-added/pilot-ca.0").await;
+        }
+
+        let captured = proxy.stop().await;
+        let entries: Vec<proto::CapturedNetworkEntry> = captured
+            .into_iter()
+            .map(|e| proto::CapturedNetworkEntry {
+                method: e.method,
+                url: e.url,
+                status_code: e.status_code,
+                content_type: e.content_type,
+                request_size: e.request_size,
+                response_size: e.response_size,
+                start_time_ms: e.start_time_ms,
+                duration_ms: e.duration_ms,
+                request_headers_json: serde_json::to_string(&e.request_headers).unwrap_or_default(),
+                response_headers_json: serde_json::to_string(&e.response_headers)
+                    .unwrap_or_default(),
+                request_body: e.request_body,
+                response_body: e.response_body,
+                is_https: e.is_https,
+            })
+            .collect();
+
+        Ok(Response::new(proto::StopNetworkCaptureResponse {
+            request_id,
+            success: true,
+            entries,
+            error_message: String::new(),
+        }))
+    }
+
+    async fn get_logcat(
+        &self,
+        request: Request<proto::GetLogcatRequest>,
+    ) -> Result<Response<proto::GetLogcatResponse>, Status> {
+        let req = request.into_inner();
+        let request_id = Self::request_id(&req.request_id);
+        let serial = self.active_serial().await?;
+
+        let output = adb::shell_lenient(&serial, "logcat -d -v time")
+            .await
+            .unwrap_or_default();
+
+        Ok(Response::new(proto::GetLogcatResponse {
+            request_id,
+            logcat: output,
+            error_message: String::new(),
         }))
     }
 }

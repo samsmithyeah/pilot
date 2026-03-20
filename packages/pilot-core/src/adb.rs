@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use tokio::process::Command;
-use tracing::{debug, instrument};
+use tracing::{debug, info, instrument};
 
 /// Locate the `adb` binary on PATH.
 pub async fn find_adb() -> Result<PathBuf> {
@@ -175,6 +175,88 @@ pub async fn screencap(serial: &str) -> Result<Vec<u8>> {
 pub async fn is_package_installed(serial: &str, package: &str) -> Result<bool> {
     let stdout = shell_lenient(serial, &format!("pm list packages {package}")).await?;
     Ok(stdout.contains(&format!("package:{package}")))
+}
+
+/// Push a local file to the device via `adb push`.
+#[instrument(skip(local_path, remote_path))]
+pub async fn push_file(serial: &str, local_path: &str, remote_path: &str) -> Result<()> {
+    run_adb(
+        Some(serial),
+        &["push", local_path, remote_path],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    debug!(local_path, remote_path, "File pushed to device");
+    Ok(())
+}
+
+/// Install a CA certificate on the device for MITM HTTPS interception.
+///
+/// Attempts `adb root` to gain root access (works on emulator userdebug
+/// images), then copies the PEM certificate into the user CA store.
+/// On physical devices where root is unavailable, logs a warning and
+/// continues — the user will need to install the CA manually.
+pub async fn install_ca_cert(serial: &str, ca_pem_path: &str) -> Result<()> {
+    // Attempt to restart adb as root — required for writing to system dirs
+    let root_result = run_adb_lenient(serial, &["root"]).await;
+    match root_result {
+        Ok(output) => {
+            let msg = String::from_utf8_lossy(&output);
+            if msg.contains("cannot run as root") || msg.contains("adbd cannot run as root") {
+                tracing::warn!(
+                    %serial,
+                    "Device does not support adb root — CA must be installed manually"
+                );
+                return Ok(());
+            }
+            debug!(%serial, "adb root succeeded, waiting for device");
+        }
+        Err(e) => {
+            tracing::warn!(%serial, "adb root failed: {e} — CA must be installed manually");
+            return Ok(());
+        }
+    }
+
+    // Wait for device to come back after root restart
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let _ = run_adb(Some(serial), &["wait-for-device"], DEFAULT_TIMEOUT).await;
+
+    // Push cert to a temp location
+    push_file(serial, ca_pem_path, "/data/local/tmp/pilot-ca.pem").await?;
+
+    // Install into user CA store
+    let _ = shell(serial, "mkdir -p /data/misc/user/0/cacerts-added").await;
+    let _ = shell(
+        serial,
+        "cp /data/local/tmp/pilot-ca.pem /data/misc/user/0/cacerts-added/pilot-ca.0",
+    )
+    .await;
+    let _ = shell(
+        serial,
+        "chmod 644 /data/misc/user/0/cacerts-added/pilot-ca.0",
+    )
+    .await;
+
+    info!(%serial, "CA certificate installed on device");
+    Ok(())
+}
+
+/// Run an adb command (with serial targeting) that may fail, returning stdout
+/// regardless. Used for commands like `adb root` that can fail on non-rooted
+/// devices.
+async fn run_adb_lenient(serial: &str, args: &[&str]) -> Result<Vec<u8>> {
+    let mut cmd = Command::new("adb");
+    cmd.arg("-s").arg(serial);
+    cmd.args(args);
+
+    debug!(serial = serial, args = ?args, "Running adb command (lenient)");
+
+    let output = tokio::time::timeout(DEFAULT_TIMEOUT, cmd.output())
+        .await
+        .map_err(|_| anyhow!("adb command timed out after {DEFAULT_TIMEOUT:?}"))?
+        .context("Failed to execute adb")?;
+
+    Ok(output.stdout)
 }
 
 /// Execute a shell command on the device, returning stdout as a String.

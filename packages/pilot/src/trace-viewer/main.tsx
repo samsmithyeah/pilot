@@ -1,7 +1,7 @@
 import { render } from 'preact'
 import { useState, useEffect, useCallback, useRef } from 'preact/hooks'
 import { unzipSync, strFromU8 } from 'fflate'
-import type { AnyTraceEvent, ActionTraceEvent, AssertionTraceEvent, TraceMetadata } from '../trace/types.js'
+import type { AnyTraceEvent, ActionTraceEvent, AssertionTraceEvent, TraceMetadata, NetworkEntry } from '../trace/types.js'
 import { ActionsPanel } from './components/ActionsPanel.js'
 import { ScreenshotPanel } from './components/ScreenshotPanel.js'
 import { DetailTabs } from './components/DetailTabs.js'
@@ -16,6 +16,8 @@ export interface TraceData {
   screenshots: Map<string, string>
   hierarchies: Map<string, string>
   sources: Map<string, string>
+  network: NetworkEntry[]
+  networkBodies: Map<string, string>
 }
 
 // ─── Zip Loader ───
@@ -66,7 +68,19 @@ function parseTraceZip(buf: Uint8Array): TraceData {
     }
   }
 
-  return { metadata, events, screenshots, hierarchies, sources }
+  const networkRaw = files['network.json']
+  const network: NetworkEntry[] = networkRaw
+    ? decoder.decode(networkRaw).trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
+    : []
+
+  const networkBodies = new Map<string, string>()
+  for (const [name, data] of Object.entries(files)) {
+    if (name.startsWith('network/')) {
+      networkBodies.set(name, decoder.decode(data))
+    }
+  }
+
+  return { metadata, events, screenshots, hierarchies, sources, network, networkBodies }
 }
 
 // ─── App ───
@@ -231,6 +245,8 @@ function App() {
           hierarchies={trace.hierarchies}
           sources={trace.sources}
           metadata={trace.metadata}
+          networkEntries={trace.network}
+          networkBodies={trace.networkBodies}
           onHierarchyNodeSelect={setHierarchyHighlight}
         />
       </div>

@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect } from 'preact/hooks'
-import type { ActionTraceEvent, AssertionTraceEvent, AnyTraceEvent, ConsoleTraceEvent, TraceMetadata } from '../../trace/types.js'
+import type { ActionTraceEvent, AssertionTraceEvent, AnyTraceEvent, ConsoleTraceEvent, TraceMetadata, NetworkEntry } from '../../trace/types.js'
 import { HierarchyTree } from './HierarchyTree.js'
 import type { Bounds } from './HierarchyTree.js'
+import { NetworkTab } from './NetworkTab.js'
 
 interface Props {
   event: ActionTraceEvent | AssertionTraceEvent | undefined
@@ -9,12 +10,14 @@ interface Props {
   hierarchies: Map<string, string>
   sources: Map<string, string>
   metadata: TraceMetadata
+  networkEntries: NetworkEntry[]
+  networkBodies: Map<string, string>
   onHierarchyNodeSelect?: (bounds: Bounds | null) => void
 }
 
-type DetailTab = 'call' | 'log' | 'console' | 'source' | 'hierarchy' | 'errors'
+type DetailTab = 'call' | 'log' | 'console' | 'source' | 'hierarchy' | 'errors' | 'network'
 
-export function DetailTabs({ event, events, hierarchies, sources, metadata, onHierarchyNodeSelect }: Props) {
+export function DetailTabs({ event, events, hierarchies, sources, metadata, networkEntries, networkBodies, onHierarchyNodeSelect }: Props) {
   const [tab, setTab] = useState<DetailTab>('call')
 
   const hasError = event && (
@@ -26,6 +29,7 @@ export function DetailTabs({ event, events, hierarchies, sources, metadata, onHi
 
   const consoleEvents = events.filter((e): e is ConsoleTraceEvent => e.type === 'console')
   const hasConsole = consoleEvents.length > 0
+  const hasNetwork = networkEntries.length > 0
 
   return (
     <div class="detail-panel">
@@ -41,6 +45,9 @@ export function DetailTabs({ event, events, hierarchies, sources, metadata, onHi
         {hasHierarchy && (
           <div class={`detail-tab${tab === 'hierarchy' ? ' active' : ''}`} onClick={() => setTab('hierarchy')}>Hierarchy</div>
         )}
+        {hasNetwork && (
+          <div class={`detail-tab${tab === 'network' ? ' active' : ''}`} onClick={() => setTab('network')}>Network</div>
+        )}
         {hasError && (
           <div class={`detail-tab${tab === 'errors' ? ' active' : ''}${hasError ? ' has-error' : ''}`} onClick={() => setTab('errors')}>Errors</div>
         )}
@@ -51,6 +58,7 @@ export function DetailTabs({ event, events, hierarchies, sources, metadata, onHi
         {tab === 'console' && <ConsoleTab event={event} events={consoleEvents} />}
         {tab === 'source' && <SourceTab event={event} sources={sources} />}
         {tab === 'hierarchy' && <HierarchyTabWrapper event={event} hierarchies={hierarchies} onNodeSelect={onHierarchyNodeSelect} />}
+        {tab === 'network' && <NetworkTab entries={networkEntries} bodies={networkBodies} />}
         {tab === 'errors' && <ErrorsTab event={event} />}
       </div>
     </div>

@@ -9,7 +9,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { zipSync, type Zippable } from 'fflate'
 import type { TraceCollector, HierarchyCapture } from './trace-collector.js'
-import type { TraceMetadata, TraceDeviceInfo } from './types.js'
+import type { TraceMetadata, TraceDeviceInfo, NetworkEntry } from './types.js'
 
 export interface PackageOptions {
   /** Test file path. */
@@ -34,6 +34,8 @@ export interface PackageOptions {
   outputDir: string
   /** Test source files to include. */
   sourceFiles?: string[]
+  /** Captured network entries to include. */
+  networkEntries?: NetworkEntry[]
 }
 
 /**
@@ -111,6 +113,14 @@ export function packageTrace(
         // Skip unreadable source files
       }
     }
+  }
+
+  // 6. Network entries (optional)
+  if (options.networkEntries && options.networkEntries.length > 0) {
+    const ndjson = options.networkEntries
+      .map((e) => JSON.stringify(e))
+      .join('\n') + '\n'
+    zipData['network.json'] = new TextEncoder().encode(ndjson)
   }
 
   // Build zip

@@ -330,6 +330,15 @@ async function runSuiteContext(
     if (recording && opts.device) {
       const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pilot-trace-'));
       traceCollector = opts.device.tracing._startManaged(traceConfig, tempDir);
+
+      // Start network capture if configured
+      if (traceConfig.network) {
+        try {
+          await opts.device._client.startNetworkCapture();
+        } catch {
+          // Network capture is best-effort
+        }
+      }
     }
 
     try {
@@ -447,6 +456,33 @@ async function runSuiteContext(
 
     // Finalize trace recording
     if (traceCollector && opts.device) {
+      // Stop network capture and collect entries
+      let networkEntries: import('./trace/types.js').NetworkEntry[] | undefined;
+      if (traceConfig.network) {
+        try {
+          const res = await opts.device._client.stopNetworkCapture();
+          if (res.success && res.entries.length > 0) {
+            networkEntries = res.entries.map((e, i) => ({
+              index: i,
+              actionIndex: 0, // TODO: associate with actions by timestamp
+              startTime: e.startTimeMs,
+              endTime: e.startTimeMs + e.durationMs,
+              method: e.method,
+              url: e.url,
+              status: e.statusCode,
+              contentType: e.contentType,
+              requestSize: e.requestSize,
+              responseSize: e.responseSize,
+              duration: e.durationMs,
+              requestHeaders: e.requestHeadersJson ? JSON.parse(e.requestHeadersJson) : {},
+              responseHeaders: e.responseHeadersJson ? JSON.parse(e.responseHeadersJson) : {},
+            }));
+          }
+        } catch {
+          // Network capture is best-effort
+        }
+      }
+
       const collector = opts.device.tracing._stopManaged();
       if (collector) {
         const retain = shouldRetain(traceConfig.mode, status === 'passed', attempt);
@@ -476,6 +512,7 @@ async function runSuiteContext(
               error: error?.message,
               outputDir,
               sourceFiles,
+              networkEntries,
             });
           } catch {
             // Trace packaging is best-effort
