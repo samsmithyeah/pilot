@@ -24,6 +24,8 @@ pub struct PilotServiceImpl {
     proxy_device_serial: Arc<RwLock<Option<String>>>,
     /// Device-side port used for `adb reverse` (for cleanup).
     proxy_reverse_port: Arc<RwLock<Option<u16>>>,
+    /// On-device path of the installed CA cert (for cleanup).
+    proxy_ca_cert_path: Arc<RwLock<Option<String>>>,
 }
 
 impl PilotServiceImpl {
@@ -37,6 +39,7 @@ impl PilotServiceImpl {
             network_proxy: Arc::new(RwLock::new(None)),
             proxy_device_serial: Arc::new(RwLock::new(None)),
             proxy_reverse_port: Arc::new(RwLock::new(None)),
+            proxy_ca_cert_path: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -102,6 +105,7 @@ impl PilotServiceImpl {
         let proxy = self.network_proxy.write().await.take();
         let serial = self.proxy_device_serial.write().await.take();
         let reverse_port = self.proxy_reverse_port.write().await.take();
+        let ca_cert_path = self.proxy_ca_cert_path.write().await.take();
 
         if let Some(serial) = &serial {
             info!(%serial, "Cleaning up device proxy settings on shutdown");
@@ -113,9 +117,10 @@ impl PilotServiceImpl {
                     warn!(%serial, port, "Failed to remove reverse port forward on shutdown: {e}");
                 }
             }
-            if let Err(e) = adb::shell(serial, &format!("rm -f {}", adb::DEVICE_CA_CERT_PATH)).await
-            {
-                warn!(%serial, "Failed to remove CA cert on shutdown: {e}");
+            if let Some(cert_path) = &ca_cert_path {
+                if let Err(e) = adb::shell(serial, &format!("rm -f {cert_path}")).await {
+                    warn!(%serial, "Failed to remove CA cert on shutdown: {e}");
+                }
             }
         }
 
@@ -1865,7 +1870,11 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
 
         // Install the CA cert on the device (best-effort — may fail on non-rooted devices)
         let ca_pem_path = mitm_ca.ca_pem_path().to_string_lossy().to_string();
-        if let Err(e) = adb::install_ca_cert(&serial, &ca_pem_path).await {
+        let cert_filename = mitm_ca
+            .device_cert_filename()
+            .map_err(|e| Status::internal(format!("Failed to compute CA cert hash: {e}")))?;
+        let device_cert_path = adb::device_ca_cert_path(&cert_filename);
+        if let Err(e) = adb::install_ca_cert(&serial, &ca_pem_path, &cert_filename).await {
             error!("Failed to install CA cert on device: {e}");
         }
 
@@ -1898,6 +1907,7 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         *proxy_guard = Some(proxy);
         *self.proxy_device_serial.write().await = Some(serial);
         *self.proxy_reverse_port.write().await = Some(device_port);
+        *self.proxy_ca_cert_path.write().await = Some(device_cert_path);
 
         Ok(Response::new(proto::StartNetworkCaptureResponse {
             request_id,
@@ -1927,6 +1937,7 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         // Revert device proxy settings, remove reverse port forward, and clean up CA cert
         let serial = self.proxy_device_serial.write().await.take();
         let reverse_port = self.proxy_reverse_port.write().await.take();
+        let ca_cert_path = self.proxy_ca_cert_path.write().await.take();
         if let Some(serial) = &serial {
             info!(%serial, "Reverting device HTTP proxy");
             if let Err(e) = adb::shell(serial, "settings put global http_proxy :0").await {
@@ -1937,9 +1948,10 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
                     warn!(%serial, port, "Failed to remove reverse port forward: {e}");
                 }
             }
-            if let Err(e) = adb::shell(serial, &format!("rm -f {}", adb::DEVICE_CA_CERT_PATH)).await
-            {
-                warn!(%serial, "Failed to remove CA cert: {e}");
+            if let Some(cert_path) = &ca_cert_path {
+                if let Err(e) = adb::shell(serial, &format!("rm -f {cert_path}")).await {
+                    warn!(%serial, "Failed to remove CA cert: {e}");
+                }
             }
         }
 

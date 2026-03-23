@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use md5::{Digest, Md5};
 use rcgen::{
     BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair,
     KeyUsagePurpose,
@@ -17,6 +18,7 @@ use rustls::ServerConfig;
 use time::{Duration, OffsetDateTime};
 use tokio::sync::Mutex;
 use tracing::{debug, info};
+use x509_parser::prelude::FromDer;
 
 /// Directory under the user's home where CA files are stored.
 const PILOT_DIR: &str = ".pilot";
@@ -53,6 +55,23 @@ impl MitmAuthority {
     /// Path to the CA PEM certificate file (for pushing to device).
     pub fn ca_pem_path(&self) -> &Path {
         &self.ca_pem_path
+    }
+
+    /// Compute the Android `subject_hash_old` filename for this CA certificate.
+    ///
+    /// Android's user CA store (`/data/misc/user/0/cacerts-added/`) requires
+    /// certificates to be named `<hash>.0` where `<hash>` is the OpenSSL
+    /// "old-style" subject hash: MD5 of the DER-encoded subject name,
+    /// first 4 bytes read as little-endian u32, formatted as 8-char lowercase hex.
+    pub fn device_cert_filename(&self) -> Result<String> {
+        let der = self.ca_cert.der();
+        let (_, cert) = x509_parser::certificate::X509Certificate::from_der(der)
+            .map_err(|e| anyhow::anyhow!("Failed to parse CA cert DER: {e}"))?;
+
+        let subject_der = cert.subject().as_raw();
+        let digest = Md5::digest(subject_der);
+        let hash = u32::from_le_bytes([digest[0], digest[1], digest[2], digest[3]]);
+        Ok(format!("{hash:08x}.0"))
     }
 
     /// Get or create a `rustls::ServerConfig` for the given hostname.
@@ -207,6 +226,55 @@ mod tests {
 
         // Load from disk should succeed
         let _loaded = MitmAuthority::load_from_disk(&cert_path, &key_path).unwrap();
+
+        // device_cert_filename should return a valid hash-based name
+        let filename = ca.device_cert_filename().unwrap();
+        assert!(
+            filename.ends_with(".0"),
+            "filename should end with .0, got: {filename}"
+        );
+        let hash_part = filename.strip_suffix(".0").unwrap();
+        assert_eq!(hash_part.len(), 8, "hash should be 8 hex chars");
+        assert!(
+            hash_part.chars().all(|c| c.is_ascii_hexdigit()),
+            "hash should be hex, got: {hash_part}"
+        );
+
+        // Loaded CA should produce the same filename
+        let loaded = MitmAuthority::load_from_disk(&cert_path, &key_path).unwrap();
+        assert_eq!(loaded.device_cert_filename().unwrap(), filename);
+    }
+
+    #[test]
+    fn device_cert_filename_matches_openssl() {
+        // Verify our subject_hash_old matches `openssl x509 -subject_hash_old`
+        // against the real CA cert if it exists.
+        let home = std::env::var("HOME").unwrap();
+        let cert_path = PathBuf::from(&home).join(".pilot/ca.pem");
+        let key_path = PathBuf::from(&home).join(".pilot/ca-key.pem");
+        if !cert_path.exists() || !key_path.exists() {
+            eprintln!("Skipping: ~/.pilot/ca.pem not found");
+            return;
+        }
+
+        let ca = MitmAuthority::load_from_disk(&cert_path, &key_path).unwrap();
+        let filename = ca.device_cert_filename().unwrap();
+
+        let openssl_output = std::process::Command::new("openssl")
+            .args(["x509", "-subject_hash_old", "-noout", "-in"])
+            .arg(&cert_path)
+            .output()
+            .expect("openssl must be installed");
+        let expected_hash = String::from_utf8(openssl_output.stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+
+        assert_eq!(
+            filename,
+            format!("{expected_hash}.0"),
+            "Our hash must match openssl x509 -subject_hash_old"
+        );
     }
 
     #[tokio::test]

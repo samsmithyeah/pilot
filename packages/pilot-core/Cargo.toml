@@ -25,6 +25,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
 base64 = "0.22"
 rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
+x509-parser = "0.16"
+md-5 = "0.10"
 time = "0.3"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

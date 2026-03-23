@@ -148,7 +148,7 @@ export function packageTrace(
   // Write to output directory
   fs.mkdirSync(options.outputDir, { recursive: true })
   const safeName = safeFileName(options.testName)
-  const zipPath = path.join(options.outputDir, `trace-${safeName}.zip`)
+  const zipPath = path.join(options.outputDir, `trace-${safeName}-${options.startTime}.zip`)
   fs.writeFileSync(zipPath, zipped)
 
   // Clean up temporary screenshot files

@@ -65,8 +65,13 @@ async fn run_adb(serial: Option<&str>, args: &[&str], timeout: Duration) -> Resu
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// On-device path where Pilot installs its MITM CA certificate.
-pub const DEVICE_CA_CERT_PATH: &str = "/data/misc/user/0/cacerts-added/pilot-ca.0";
+/// Base directory for user-installed CA certificates on Android.
+const DEVICE_CA_CERT_DIR: &str = "/data/misc/user/0/cacerts-added";
+
+/// Build the full on-device path for a CA cert given its filename (e.g. `a1b2c3d4.0`).
+pub fn device_ca_cert_path(filename: &str) -> String {
+    format!("{DEVICE_CA_CERT_DIR}/{filename}")
+}
 
 /// List connected ADB devices.
 #[instrument]
@@ -230,11 +235,14 @@ pub async fn push_file(serial: &str, local_path: &str, remote_path: &str) -> Res
 
 /// Install a CA certificate on the device for MITM HTTPS interception.
 ///
+/// `cert_filename` is the hash-based filename (e.g. `a1b2c3d4.0`) required by
+/// Android's certificate store. See [`crate::mitm_ca::MitmAuthority::device_cert_filename`].
+///
 /// Attempts `adb root` to gain root access (works on emulator userdebug
 /// images), then copies the PEM certificate into the user CA store.
 /// On physical devices where root is unavailable, logs a warning and
 /// continues — the user will need to install the CA manually.
-pub async fn install_ca_cert(serial: &str, ca_pem_path: &str) -> Result<()> {
+pub async fn install_ca_cert(serial: &str, ca_pem_path: &str, cert_filename: &str) -> Result<()> {
     // Attempt to restart adb as root — required for writing to system dirs
     let root_result = run_adb_lenient(serial, &["root"]).await;
     match root_result {
@@ -267,14 +275,15 @@ pub async fn install_ca_cert(serial: &str, ca_pem_path: &str) -> Result<()> {
     // Push cert to a temp location
     push_file(serial, ca_pem_path, "/data/local/tmp/pilot-ca.pem").await?;
 
-    // Install into user CA store
-    shell(serial, "mkdir -p /data/misc/user/0/cacerts-added").await?;
+    // Install into user CA store with hash-based filename
+    let device_path = device_ca_cert_path(cert_filename);
+    shell(serial, &format!("mkdir -p {DEVICE_CA_CERT_DIR}")).await?;
     shell(
         serial,
-        &format!("cp /data/local/tmp/pilot-ca.pem {DEVICE_CA_CERT_PATH}"),
+        &format!("cp /data/local/tmp/pilot-ca.pem {device_path}"),
     )
     .await?;
-    shell(serial, &format!("chmod 644 {DEVICE_CA_CERT_PATH}")).await?;
+    shell(serial, &format!("chmod 644 {device_path}")).await?;
 
     info!(%serial, "CA certificate installed on device");
     Ok(())
