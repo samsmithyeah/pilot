@@ -193,7 +193,14 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
   const allSuites: SuiteResult[] = []
   const totalStart = Date.now()
   let setupDuration = 0
-  const maxUsefulWorkers = Math.min(opts.workers, testFiles.length)
+  // Cap workers at the max files in any single wave — workers in other waves
+  // would sit idle since waves execute sequentially.
+  const maxFilesInWave = opts.projectWaves
+    ? Math.max(...opts.projectWaves.map((wave) =>
+        wave.reduce((sum, p) => sum + p.testFiles.length, 0),
+      ))
+    : testFiles.length
+  const maxUsefulWorkers = Math.min(opts.workers, maxFilesInWave)
   let firstDaemonAssigned = false
 
   // Register signal handlers to ensure cleanup on SIGINT/SIGTERM.
@@ -501,6 +508,14 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
           }
         }
         if (filteredWaveFiles.length > 0) {
+          const projectNames = projectWave
+            .filter((p) => !failedProjects.has(p.name))
+            .map((p) => p.name)
+          if (projectNames.length > 0) {
+            process.stderr.write(
+              `${DIM}Running project${projectNames.length > 1 ? 's' : ''}: ${projectNames.join(', ')}${RESET}\n`,
+            )
+          }
           const resultsBefore = allResults.length
           await dispatchWave(filteredWaveFiles)
 

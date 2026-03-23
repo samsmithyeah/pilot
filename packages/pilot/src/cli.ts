@@ -842,6 +842,7 @@ async function main(): Promise<void> {
 
     let fileIndex = 0;
     const failedProjects = new Set<string>();
+    const showProjectHeaders = projects.length > 1 || projects[0]?.name !== 'default';
 
     for (const wave of projectWaves) {
       for (const project of wave) {
@@ -866,6 +867,10 @@ async function main(): Promise<void> {
         }
 
         let projectFailed = false;
+
+        if (showProjectHeaders && project.testFiles.length > 0) {
+          console.log(dim(`\n  ── Project: ${project.name} ──`));
+        }
 
         for (const file of project.testFiles) {
           if (fileIndex > 0 && config.package) {
