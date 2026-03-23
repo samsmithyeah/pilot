@@ -284,6 +284,12 @@ describe('test.use()', () => {
     popContext();
   });
 
+  it('rejects negative retries', () => {
+    pushContext();
+    expect(() => pilotTest.use({ retries: -1 })).toThrow('retries must be a non-negative number');
+    popContext();
+  });
+
   it('stores useOptions on the current context', () => {
     pushContext();
     pilotTest.use({ timeout: 5000 });

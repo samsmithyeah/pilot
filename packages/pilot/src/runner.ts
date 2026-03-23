@@ -177,6 +177,9 @@ function createTestFn(registry: FixtureRegistry): TestFn {
         if (options.timeout !== undefined && options.timeout <= 0) {
           throw new Error('test.use() timeout must be a positive number');
         }
+        if (options.retries !== undefined && options.retries < 0) {
+          throw new Error('test.use() retries must be a non-negative number');
+        }
         const ctx = currentContext();
         ctx.useOptions = { ...ctx.useOptions, ...options };
       },
