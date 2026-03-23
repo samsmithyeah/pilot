@@ -25,6 +25,7 @@ export class ListReporter implements PilotReporter {
   private _testIndex = 0
   private _totalTests = 0
   private _parallel = false
+  private _multipleWorkers = false
 
   onRunStart(config: PilotConfig, fileCount: number): void {
     this._testIndex = 0
@@ -44,11 +45,14 @@ export class ListReporter implements PilotReporter {
   onTestEnd(test: TestResult): void {
     this._testIndex++
     this._totalTests++
+    if (test.workerIndex != null && test.workerIndex > 0) {
+      this._multipleWorkers = true
+    }
 
     const icon = statusIcon(test.status)
     const duration = dim(`(${formatDuration(test.durationMs)})`)
     const counter = dim(`[${this._testIndex}]`)
-    const worker = workerTag(test.workerIndex)
+    const worker = this._multipleWorkers ? workerTag(test.workerIndex) : ''
     process.stdout.write(`  ${icon} ${counter} ${worker}${test.fullName} ${duration}\n`)
 
     if (test.error) {
@@ -84,7 +88,8 @@ export class ListReporter implements PilotReporter {
       process.stdout.write(bold(red('Failures:\n\n')))
       for (const test of result.tests) {
         if (test.status === 'failed' && test.error) {
-          process.stdout.write(`  ${red('✗')} ${workerTag(test.workerIndex)}${test.fullName}\n`)
+          const worker = this._multipleWorkers ? workerTag(test.workerIndex) : ''
+          process.stdout.write(`  ${red('✗')} ${worker}${test.fullName}\n`)
           process.stdout.write(formatError(test.error) + '\n')
           if (test.tracePath) {
             process.stdout.write(`        ${dim(`Trace: npx pilot show-trace ${test.tracePath}`)}\n`)

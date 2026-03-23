@@ -486,6 +486,8 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
 
     // Execute waves sequentially, with dependency-failure skipping
     if (opts.projectWaves && opts.projects) {
+      const showProjectHeaders = opts.projects.filter((p) => p.testFiles.length > 0).length > 1
+
       for (const projectWave of opts.projectWaves) {
         const filteredWaveFiles: TaggedFile[] = []
         for (const project of projectWave) {
@@ -505,13 +507,13 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
           }
         }
         if (filteredWaveFiles.length > 0) {
-          const projectNames = projectWave
-            .filter((p) => !failedProjects.has(p.name))
-            .map((p) => p.name)
-          if (projectNames.length > 0) {
-            process.stderr.write(
-              `${DIM}Running project${projectNames.length > 1 ? 's' : ''}: ${projectNames.join(', ')}${RESET}\n`,
-            )
+          if (showProjectHeaders) {
+            const projectNames = projectWave
+              .filter((p) => !failedProjects.has(p.name) && p.testFiles.length > 0)
+              .map((p) => p.name)
+            for (const name of projectNames) {
+              process.stderr.write(`${DIM}  ── Project: ${name} ──${RESET}\n`)
+            }
           }
           const resultsBefore = allResults.length
           await dispatchWave(filteredWaveFiles)

@@ -842,7 +842,8 @@ async function main(): Promise<void> {
 
     let fileIndex = 0;
     const failedProjects = new Set<string>();
-    const showProjectHeaders = projects.length > 1 || projects[0]?.name !== 'default';
+    const projectsWithFiles = projects.filter((p) => p.testFiles.length > 0);
+    const showProjectHeaders = projectsWithFiles.length > 1;
 
     for (const wave of projectWaves) {
       for (const project of wave) {
