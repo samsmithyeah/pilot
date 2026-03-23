@@ -331,12 +331,16 @@ async function runSuiteContext(
   // abortFileOnError throws. Body intentionally not re-indented.
   try {
 
-  // Restore app state if test.use({ appState }) was specified for this scope.
+  // Restore or clear app state if test.use({ appState }) was specified for this scope.
   // Mirrors Playwright's storageState: tests start already authenticated.
-  if (scopeAppState && opts.device && opts.config.package) {
-    await opts.device.restoreAppState(opts.config.package, scopeAppState);
-    // restoreAppState force-stops the app internally. Use restartApp (terminate + launch)
-    // to ensure the app fully re-reads restored data from disk on startup.
+  // - appState: './path.tar.gz' → restore saved state
+  // - appState: '' → clear app data (fresh unauthenticated state)
+  if (scopeAppState !== undefined && opts.device && opts.config.package) {
+    if (scopeAppState) {
+      await opts.device.restoreAppState(opts.config.package, scopeAppState);
+    } else {
+      await opts.device.clearAppData(opts.config.package);
+    }
     await opts.device.restartApp(opts.config.package);
   }
 

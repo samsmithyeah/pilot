@@ -1,4 +1,4 @@
-import { test, expect, text } from "pilot"
+import { describe, test, expect, text } from "pilot"
 
 // ─── Authenticated tests ───
 // This file runs as part of the "authenticated" project, which has
@@ -23,4 +23,18 @@ test("login screen shows authenticated state", async ({ device }) => {
   // Should show the logged-in view, not the sign-in form
   await expect(device.element(text("Login successful!"))).toBeVisible()
   await expect(device.element(text("Welcome, test@example.com"))).toBeVisible()
+})
+
+// ─── Override: opt out of restored auth for a single scope ───
+// Mirrors Playwright's test.use({ storageState: { cookies: [], origins: [] } })
+
+describe("without auth", () => {
+  test.use({ appState: "" })
+
+  test("profile redirects to login when app state is cleared", async ({ device }) => {
+    await device.openDeepLink("pilottest:///profile")
+
+    // appState: '' clears app data, so the profile gate should redirect to login
+    await expect(device.element(text("Sign In"))).toBeVisible()
+  })
 })
