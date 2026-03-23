@@ -675,9 +675,13 @@ async function main(): Promise<void> {
   reporter.onRunStart(config, testFiles.length);
 
   // ─── Parallel mode ───
-  // Fall back to sequential when there's only one test file — no point
-  // spinning up the full dispatcher/worker infrastructure for a single file.
-  if (config.workers > 1 && testFiles.length > 1) {
+  // Fall back to sequential when parallelism wouldn't help — either there's
+  // only one test file, or all files are in sequential waves (e.g. setup → dependent).
+  const maxFilesInAnyWave = Math.max(...projectWaves.map((wave) =>
+    wave.reduce((sum, p) => sum + p.testFiles.length, 0),
+  ));
+  const effectiveWorkers = Math.min(config.workers, maxFilesInAnyWave);
+  if (effectiveWorkers > 1) {
     // The dispatcher manages its own daemons — one per worker — each with
     // exclusive ADB access to its assigned device. No discovery daemon needed.
     const { runParallel } = await import('./dispatcher.js');
