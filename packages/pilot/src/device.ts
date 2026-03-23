@@ -39,7 +39,7 @@ export interface PinchOptions {
 export class Device {
   /** @internal */
   readonly _client: PilotGrpcClient;
-  private readonly defaultTimeoutMs: number;
+  private _defaultTimeoutMs: number;
   private readonly defaultPackageName?: string;
 
   /** Programmatic tracing API. */
@@ -47,12 +47,25 @@ export class Device {
 
   constructor(client: PilotGrpcClient, config?: Partial<Pick<PilotConfig, 'timeout' | 'package'>>) {
     this._client = client;
-    this.defaultTimeoutMs = config?.timeout ?? 30_000;
+    this._defaultTimeoutMs = config?.timeout ?? 30_000;
     this.defaultPackageName = config?.package;
     this.tracing = new Tracing(
       () => this._takeScreenshotBuffer(),
       () => this._captureHierarchy(),
     );
+  }
+
+  /**
+   * @internal — Get the current default timeout. Used by the runner for test.use().
+   * Not safe for concurrent use — relies on the runner's one-device-per-worker model.
+   */
+  _getDefaultTimeout(): number {
+    return this._defaultTimeoutMs;
+  }
+
+  /** @internal — Override the default timeout. Used by the runner for test.use(). */
+  _setDefaultTimeout(timeoutMs: number): void {
+    this._defaultTimeoutMs = timeoutMs;
   }
 
   /** @internal — Get the active trace collector, if any. */
@@ -125,42 +138,42 @@ export class Device {
       takeScreenshot: () => this._takeScreenshotBuffer(),
       captureHierarchy: () => this._captureHierarchy(),
     } : undefined;
-    return new ElementHandle(this._client, selector, this.defaultTimeoutMs, { traceCapture });
+    return new ElementHandle(this._client, selector, this._defaultTimeoutMs, { traceCapture });
   }
 
   // ── Actions ──
 
   async tap(selector: Selector): Promise<void> {
     return this._tracedAction('tap', 'tap', selector,
-      () => this._client.tap(selector, this.defaultTimeoutMs), 'Tap failed');
+      () => this._client.tap(selector, this._defaultTimeoutMs), 'Tap failed');
   }
 
   async longPress(selector: Selector, durationMs?: number): Promise<void> {
     return this._tracedAction('longPress', 'tap', selector,
-      () => this._client.longPress(selector, durationMs, this.defaultTimeoutMs), 'Long press failed');
+      () => this._client.longPress(selector, durationMs, this._defaultTimeoutMs), 'Long press failed');
   }
 
   async type(selector: Selector, text: string): Promise<void> {
     return this._tracedAction('type', 'type', selector,
-      () => this._client.typeText(selector, text, this.defaultTimeoutMs), 'Type text failed',
+      () => this._client.typeText(selector, text, this._defaultTimeoutMs), 'Type text failed',
       { inputValue: text });
   }
 
   async clearAndType(selector: Selector, text: string): Promise<void> {
     return this._tracedAction('clearAndType', 'type', selector,
-      () => this._client.clearAndType(selector, text, this.defaultTimeoutMs), 'Clear and type failed',
+      () => this._client.clearAndType(selector, text, this._defaultTimeoutMs), 'Clear and type failed',
       { inputValue: text });
   }
 
   async swipe(direction: string, options?: SwipeOptions): Promise<void> {
     return this._tracedAction('swipe', 'swipe', options?.selector,
-      () => this._client.swipe(direction, { ...options, timeoutMs: options?.timeoutMs ?? this.defaultTimeoutMs }),
+      () => this._client.swipe(direction, { ...options, timeoutMs: options?.timeoutMs ?? this._defaultTimeoutMs }),
       'Swipe failed');
   }
 
   async scroll(selector: Selector, direction: string, options?: ScrollOptions): Promise<void> {
     return this._tracedAction('scroll', 'scroll', selector,
-      () => this._client.scroll(selector, direction, { ...options, timeoutMs: options?.timeoutMs ?? this.defaultTimeoutMs }),
+      () => this._client.scroll(selector, direction, { ...options, timeoutMs: options?.timeoutMs ?? this._defaultTimeoutMs }),
       'Scroll failed');
   }
 
@@ -175,44 +188,44 @@ export class Device {
 
   async doubleTap(selector: Selector): Promise<void> {
     return this._tracedAction('doubleTap', 'tap', selector,
-      () => this._client.doubleTap(selector, this.defaultTimeoutMs), 'Double tap failed');
+      () => this._client.doubleTap(selector, this._defaultTimeoutMs), 'Double tap failed');
   }
 
   async drag(options: DragOptions): Promise<void> {
     return this._tracedAction('drag', 'tap', options.from,
-      () => this._client.dragAndDrop(options.from, options.to, this.defaultTimeoutMs), 'Drag and drop failed');
+      () => this._client.dragAndDrop(options.from, options.to, this._defaultTimeoutMs), 'Drag and drop failed');
   }
 
   async pinchIn(selector: Selector, options?: PinchOptions): Promise<void> {
     const scale = options?.scale ?? 0.5;
     return this._tracedAction('pinchIn', 'tap', selector,
-      () => this._client.pinchZoom(selector, scale, this.defaultTimeoutMs), 'Pinch in failed');
+      () => this._client.pinchZoom(selector, scale, this._defaultTimeoutMs), 'Pinch in failed');
   }
 
   async pinchOut(selector: Selector, options?: PinchOptions): Promise<void> {
     const scale = options?.scale ?? 2.0;
     return this._tracedAction('pinchOut', 'tap', selector,
-      () => this._client.pinchZoom(selector, scale, this.defaultTimeoutMs), 'Pinch out failed');
+      () => this._client.pinchZoom(selector, scale, this._defaultTimeoutMs), 'Pinch out failed');
   }
 
   async focus(selector: Selector): Promise<void> {
     return this._tracedAction('focus', 'tap', selector,
-      () => this._client.focus(selector, this.defaultTimeoutMs), 'Focus failed');
+      () => this._client.focus(selector, this._defaultTimeoutMs), 'Focus failed');
   }
 
   async blur(selector: Selector): Promise<void> {
     return this._tracedAction('blur', 'tap', selector,
-      () => this._client.blur(selector, this.defaultTimeoutMs), 'Blur failed');
+      () => this._client.blur(selector, this._defaultTimeoutMs), 'Blur failed');
   }
 
   async selectOption(selector: Selector, option: string | { index: number }): Promise<void> {
     return this._tracedAction('selectOption', 'tap', selector,
-      () => this._client.selectOption(selector, option, this.defaultTimeoutMs), 'Select option failed');
+      () => this._client.selectOption(selector, option, this._defaultTimeoutMs), 'Select option failed');
   }
 
   async highlight(selector: Selector, options?: { durationMs?: number }): Promise<void> {
     return this._tracedAction('highlight', 'other', selector,
-      () => this._client.highlight(selector, options?.durationMs, this.defaultTimeoutMs), 'Highlight failed');
+      () => this._client.highlight(selector, options?.durationMs, this._defaultTimeoutMs), 'Highlight failed');
   }
 
   // ── Utilities ──
@@ -222,7 +235,7 @@ export class Device {
   }
 
   async waitForIdle(timeoutMs?: number): Promise<void> {
-    const res = await this._client.waitForIdle(timeoutMs ?? this.defaultTimeoutMs);
+    const res = await this._client.waitForIdle(timeoutMs ?? this._defaultTimeoutMs);
     if (!res.success) {
       throw new Error(res.errorMessage || 'Wait for idle timed out');
     }

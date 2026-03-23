@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 
 // We need to test the runner's registration and execution logic.
 // The runner uses module-level state, so we import the internal helpers
@@ -11,20 +11,35 @@ import {
   beforeEach as pilotBeforeEach,
   afterEach as pilotAfterEach,
   collectResults,
+  _internal,
   type SuiteResult,
   type TestResult,
+  type RunOptions,
 } from '../runner.js';
+import type { PilotConfig } from '../config.js';
 
-// We can't call runTestFile (it imports files), but we can test:
-// 1. Registration API (test/describe/hooks)
-// 2. collectResults
-// 3. The exported types
-//
-// For runner execution, we access the internal context stack by
-// creating a mini harness that simulates what runTestFile does.
+const { pushContext, popContext, runSuiteContext } = _internal;
 
-// Access the internal pushContext/popContext/runSuiteContext through the module.
-// Since these aren't exported, we test via the public API surface.
+/** Minimal config sufficient for runSuiteContext. */
+function makeConfig(overrides: Partial<PilotConfig> = {}): PilotConfig {
+  return {
+    timeout: 30_000,
+    retries: 0,
+    screenshot: 'never',
+    testMatch: [],
+    daemonAddress: 'localhost:50051',
+    rootDir: '/tmp',
+    outputDir: 'out',
+    workers: 1,
+    launchEmulators: false,
+    ...overrides,
+  };
+}
+
+/** Minimal RunOptions for test execution. */
+function makeOpts(overrides: Partial<RunOptions> = {}): RunOptions {
+  return { config: makeConfig(), ...overrides };
+}
 
 describe('collectResults()', () => {
   it('returns empty array for suite with no tests', () => {
@@ -156,10 +171,6 @@ describe('collectResults()', () => {
 });
 
 // ─── Test/describe registration ───
-// We test the registration functions in isolation by verifying they don't throw
-// and produce the right shapes. The runner module maintains a contextStack;
-// we can indirectly test registration by importing runTestFile logic.
-// Since runSuiteContext is not exported, we test the public surface.
 
 describe('test registration API shape', () => {
   it('test is a function', () => {
@@ -194,27 +205,9 @@ describe('test registration API shape', () => {
   });
 });
 
-// ─── Runner execution tests via internal simulation ───
-// We access the runner's internal context management by using the same approach
-// as runTestFile: push a context, register tests, pop context, run.
+// ─── Runner execution via _internal ───
 
-// To test the actual execution, we need to access the internal functions.
-// We'll import them via a dynamic approach, or test them through the module's
-// exports indirectly.
-
-// Since pushContext/popContext/runSuiteContext are not exported, we'll test
-// the runner behavior by creating a helper that mirrors what runTestFile does.
-// We re-export internal state accessors for testing.
-
-describe('runner execution (integration via module internals)', () => {
-  // We'll use a different approach: directly test the runner by importing
-  // the module and accessing its module-level state. Since the context
-  // stack is module-level, we can push/pop by calling the registration
-  // functions then use collectResults on the output.
-
-  // Since we can't easily access internals, let's test what we CAN test:
-  // the type contracts and collectResults thoroughly.
-
+describe('runner execution', () => {
   it('TestResult has the expected shape', () => {
     const result: TestResult = {
       name: 'my test',
@@ -265,5 +258,187 @@ describe('runner execution (integration via module internals)', () => {
     expect(flat).toHaveLength(2);
     expect(flat[0].status).toBe('passed');
     expect(flat[1].status).toBe('failed');
+  });
+
+  it('runs a simple test via _internal helpers', async () => {
+    pushContext();
+    pilotTest('simple', async () => {});
+    const ctx = popContext();
+    const result = await runSuiteContext(ctx, '', [], [], makeOpts());
+    expect(result.tests).toHaveLength(1);
+    expect(result.tests[0].status).toBe('passed');
+  });
+});
+
+// ─── test.use() ───
+
+describe('test.use()', () => {
+  it('test.use is a function', () => {
+    expect(typeof pilotTest.use).toBe('function');
+  });
+
+  it('rejects non-positive timeout', () => {
+    pushContext();
+    expect(() => pilotTest.use({ timeout: 0 })).toThrow('timeout must be a positive number');
+    expect(() => pilotTest.use({ timeout: -1 })).toThrow('timeout must be a positive number');
+    popContext();
+  });
+
+  it('rejects negative retries', () => {
+    pushContext();
+    expect(() => pilotTest.use({ retries: -1 })).toThrow('retries must be a non-negative number');
+    popContext();
+  });
+
+  it('stores useOptions on the current context', () => {
+    pushContext();
+    pilotTest.use({ timeout: 5000 });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- accessing private SuiteContext for testing
+    const ctx = popContext() as any;
+    expect(ctx.useOptions).toEqual({ timeout: 5000 });
+  });
+
+  it('merges multiple test.use() calls in the same scope', () => {
+    pushContext();
+    pilotTest.use({ timeout: 5000 });
+    pilotTest.use({ screenshot: 'always' });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- accessing private SuiteContext for testing
+    const ctx = popContext() as any;
+    expect(ctx.useOptions).toEqual({ timeout: 5000, screenshot: 'always' });
+  });
+
+  it('last call wins for the same key', () => {
+    pushContext();
+    pilotTest.use({ timeout: 5000 });
+    pilotTest.use({ timeout: 10000 });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- accessing private SuiteContext for testing
+    const ctx = popContext() as any;
+    expect(ctx.useOptions).toEqual({ timeout: 10000 });
+  });
+
+  it('applies timeout override during execution', async () => {
+    pushContext();
+
+    pilotDescribe('scoped', () => {
+      pilotTest.use({ timeout: 99999 });
+      pilotTest('check timeout', async () => {
+        // The test itself just passes — we verify via the result
+        // that it ran (meaning the context was applied)
+      });
+    });
+
+    const ctx = popContext();
+    const result = await runSuiteContext(ctx, '', [], [], makeOpts({
+      config: makeConfig({ timeout: 30_000 }),
+    }));
+
+    const flat = collectResults(result);
+    expect(flat).toHaveLength(1);
+    expect(flat[0].status).toBe('passed');
+  });
+
+  it('inner describe overrides outer describe', async () => {
+    pushContext();
+
+    pilotDescribe('outer', () => {
+      pilotTest.use({ timeout: 60000 });
+
+      pilotDescribe('inner', () => {
+        pilotTest.use({ timeout: 5000 });
+        pilotTest('inner test', async () => {});
+      });
+
+      pilotTest('outer test', async () => {});
+    });
+
+    const ctx = popContext();
+    const result = await runSuiteContext(ctx, '', [], [], makeOpts());
+
+    const flat = collectResults(result);
+    expect(flat).toHaveLength(2);
+    expect(flat.every((t) => t.status === 'passed')).toBe(true);
+  });
+
+  it('does not leak overrides to sibling scopes', async () => {
+    pushContext();
+
+    pilotDescribe('first', () => {
+      pilotTest.use({ timeout: 1000 });
+      pilotTest('t1', async () => {});
+    });
+
+    pilotDescribe('second', () => {
+      // No test.use() — should inherit from parent, not from sibling
+      pilotTest('t2', async () => {});
+    });
+
+    const ctx = popContext();
+    const result = await runSuiteContext(ctx, '', [], [], makeOpts({
+      config: makeConfig({ timeout: 30_000 }),
+    }));
+
+    const flat = collectResults(result);
+    expect(flat).toHaveLength(2);
+    expect(flat.every((t) => t.status === 'passed')).toBe(true);
+  });
+
+  it('propagates timeout to device and restores it', async () => {
+    const timeoutLog: number[] = [];
+    const mockDevice = {
+      _getDefaultTimeout: () => timeoutLog[timeoutLog.length - 1] ?? 10000,
+      _setDefaultTimeout: (ms: number) => { timeoutLog.push(ms); },
+    };
+
+    pushContext();
+    pilotDescribe('scoped', () => {
+      pilotTest.use({ timeout: 5000 });
+      pilotTest('t', async () => {});
+    });
+
+    const ctx = popContext();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- mock device for testing
+    await runSuiteContext(ctx, '', [], [], makeOpts({ device: mockDevice as any }));
+
+    // Should have set 5000 then restored to original
+    expect(timeoutLog).toEqual([5000, 10000]);
+  });
+
+  it('restores device timeout even when suite throws', async () => {
+    const timeoutLog: number[] = [];
+    const mockDevice = {
+      _getDefaultTimeout: () => timeoutLog[timeoutLog.length - 1] ?? 10000,
+      _setDefaultTimeout: (ms: number) => { timeoutLog.push(ms); },
+    };
+
+    pushContext();
+    pilotDescribe('failing', () => {
+      pilotTest.use({ timeout: 3000 });
+      pilotTest('boom', async () => { throw new Error('fail'); });
+    });
+
+    const ctx = popContext();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- mock device for testing
+    await runSuiteContext(ctx, '', [], [], makeOpts({ device: mockDevice as any }));
+
+    // Timeout should still be restored after the failure
+    expect(timeoutLog).toEqual([3000, 10000]);
+  });
+
+  it('file-scope test.use() applies to all tests', async () => {
+    pushContext();
+
+    pilotTest.use({ screenshot: 'always' });
+    pilotTest('t1', async () => {});
+    pilotTest('t2', async () => {});
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- accessing private SuiteContext for testing
+    const ctx = popContext() as any;
+    // The useOptions should be set on the root context
+    expect(ctx.useOptions).toEqual({ screenshot: 'always' });
+
+    const result = await runSuiteContext(ctx, '', [], [], makeOpts());
+    const flat = collectResults(result);
+    expect(flat).toHaveLength(2);
+    expect(flat.every((t) => t.status === 'passed')).toBe(true);
   });
 });

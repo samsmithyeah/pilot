@@ -53,6 +53,11 @@ export interface TestFixtures {
   device: Device;
 }
 
+// ─── Per-scope option overrides ───
+
+/** Options that can be overridden per-describe via `test.use()`. */
+export type UseOptions = Partial<Pick<PilotConfig, 'timeout' | 'screenshot' | 'retries' | 'trace'>>
+
 // ─── Internal registration types ───
 
 type HookFn = ((fixtures: TestFixtures) => void | Promise<void>) | (() => void | Promise<void>);
@@ -83,6 +88,7 @@ interface SuiteContext {
   afterAll: HookFn[];
   beforeEach: HookFn[];
   afterEach: HookFn[];
+  useOptions?: UseOptions;
 }
 
 let contextStack: SuiteContext[] = [];
@@ -121,6 +127,18 @@ export interface TestFn {
   only: (name: string, fn: TestCallback) => void;
   skip: (name: string, fn: TestCallback) => void;
   /**
+   * Override configuration options for all tests in the current describe scope.
+   * Overrides cascade — inner describe blocks inherit and can further override.
+   *
+   * ```ts
+   * describe("slow screen", () => {
+   *   test.use({ timeout: 60000 })
+   *   test("animation completes", async ({ device }) => { ... })
+   * })
+   * ```
+   */
+  use: (options: UseOptions) => void;
+  /**
    * Create a new test function with additional fixtures.
    *
    * ```ts
@@ -154,6 +172,16 @@ function createTestFn(registry: FixtureRegistry): TestFn {
       },
       skip: (name: string, testFn: TestCallback) => {
         currentContext().tests.push({ name, fn: testFn, only: false, skip: true });
+      },
+      use: (options: UseOptions) => {
+        if (options.timeout !== undefined && options.timeout <= 0) {
+          throw new Error('test.use() timeout must be a positive number');
+        }
+        if (options.retries !== undefined && options.retries < 0) {
+          throw new Error('test.use() retries must be a non-negative number');
+        }
+        const ctx = currentContext();
+        ctx.useOptions = { ...ctx.useOptions, ...options };
       },
       extend: <T extends Record<string, unknown>>(
         definitions: FixtureDefinitions<T, BuiltinFixtures & T>,
@@ -274,10 +302,30 @@ async function runSuiteContext(
   parentPrefix: string,
   parentBeforeEach: HookFn[],
   parentAfterEach: HookFn[],
-  opts: RunOptions,
+  parentOpts: RunOptions,
 ): Promise<SuiteResult> {
+  // Apply test.use() overrides for this scope (cascading from parent).
+  // `timeout` is handled separately via the device — it should only affect
+  // assertion/action auto-wait, not the test-level safety timeout.
+  const { timeout: scopeTimeout, ...configOverrides } = ctx.useOptions ?? {};
+  const opts: RunOptions = Object.keys(configOverrides).length > 0
+    ? { ...parentOpts, config: { ...parentOpts.config, ...configOverrides } }
+    : parentOpts;
+
+  // Propagate timeout override to the device so assertion auto-wait uses it
+  const prevDeviceTimeout = scopeTimeout && opts.device
+    ? opts.device._getDefaultTimeout()
+    : undefined;
+  if (scopeTimeout && opts.device) {
+    opts.device._setDefaultTimeout(scopeTimeout);
+  }
+
   const result: SuiteResult = { name: parentPrefix, tests: [], suites: [], durationMs: 0 };
   const suiteStart = Date.now();
+
+  // try/finally ensures device timeout is restored even if a hook or
+  // abortFileOnError throws. Body intentionally not re-indented.
+  try {
 
   // Determine if any test/suite in this context uses `.only`
   const hasOnlyTests = ctx.tests.some((t) => t.only);
@@ -598,6 +646,13 @@ async function runSuiteContext(
     }
   }
 
+  } finally {
+    // Restore previous device timeout when leaving this scope
+    if (prevDeviceTimeout !== undefined && opts.device) {
+      opts.device._setDefaultTimeout(prevDeviceTimeout);
+    }
+  }
+
   result.durationMs = Date.now() - suiteStart;
   return result;
 }
@@ -675,3 +730,6 @@ export async function runTestFile(
     }
   }
 }
+
+/** @internal — exposed for unit testing only. */
+export const _internal = { pushContext, popContext, runSuiteContext };
