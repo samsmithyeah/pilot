@@ -5,6 +5,7 @@
  * dependency constraints and shared `use` options.
  */
 
+import { minimatch } from 'minimatch'
 import type { PilotConfig, ProjectConfig, UseOptions } from './config.js'
 
 // ─── Types ───
@@ -134,6 +135,60 @@ export function topologicalSort(projects: ResolvedProject[]): ResolvedProject[][
   }
 
   return waves
+}
+
+// ─── Dependency collection ───
+
+/**
+ * Given a set of project names, collect all their transitive dependencies.
+ * Returns the full set of project names that need to run (including the input names).
+ */
+export function collectTransitiveDeps(
+  projectNames: Set<string>,
+  allProjects: ResolvedProject[],
+): Set<string> {
+  const byName = new Map(allProjects.map((p) => [p.name, p]))
+  const result = new Set<string>()
+
+  function collect(name: string): void {
+    if (result.has(name)) return
+    result.add(name)
+    const project = byName.get(name)
+    if (project) {
+      for (const dep of project.dependencies) {
+        collect(dep)
+      }
+    }
+  }
+
+  for (const name of projectNames) {
+    collect(name)
+  }
+
+  return result
+}
+
+/**
+ * Find which project a file belongs to by matching against testMatch/testIgnore
+ * patterns. Returns the first matching project name, or undefined.
+ */
+export function findProjectForFile(
+  filePath: string,
+  projects: ResolvedProject[],
+  rootDir: string,
+): string | undefined {
+  const relative = filePath.startsWith(rootDir)
+    ? filePath.slice(rootDir.length).replace(/^\//, '')
+    : filePath
+
+  for (const project of projects) {
+    const matchesInclude = project.testMatch.some((pattern) => minimatch(relative, pattern))
+    const matchesIgnore = project.testIgnore.some((pattern) => minimatch(relative, pattern))
+    if (matchesInclude && !matchesIgnore) {
+      return project.name
+    }
+  }
+  return undefined
 }
 
 // ─── Cycle detection ───

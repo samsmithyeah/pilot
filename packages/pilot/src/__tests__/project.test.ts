@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { resolveProjects, topologicalSort } from '../project.js'
+import { resolveProjects, topologicalSort, collectTransitiveDeps, findProjectForFile } from '../project.js'
 import type { PilotConfig } from '../config.js'
 
 function makeConfig(overrides: Partial<PilotConfig> = {}): PilotConfig {
@@ -170,5 +170,87 @@ describe('topologicalSort()', () => {
     const waves = topologicalSort(projects)
     expect(waves).toHaveLength(1)
     expect(waves[0][0].name).toBe('default')
+  })
+})
+
+// ─── collectTransitiveDeps ───
+
+describe('collectTransitiveDeps()', () => {
+  it('returns just the project when it has no dependencies', () => {
+    const projects = resolveProjects(makeConfig({
+      projects: [{ name: 'a' }, { name: 'b' }],
+    }))
+    const result = collectTransitiveDeps(new Set(['a']), projects)
+    expect([...result]).toEqual(['a'])
+  })
+
+  it('includes direct dependencies', () => {
+    const projects = resolveProjects(makeConfig({
+      projects: [
+        { name: 'setup' },
+        { name: 'auth', dependencies: ['setup'] },
+      ],
+    }))
+    const result = collectTransitiveDeps(new Set(['auth']), projects)
+    expect([...result].sort()).toEqual(['auth', 'setup'])
+  })
+
+  it('includes transitive dependencies', () => {
+    const projects = resolveProjects(makeConfig({
+      projects: [
+        { name: 'a' },
+        { name: 'b', dependencies: ['a'] },
+        { name: 'c', dependencies: ['b'] },
+      ],
+    }))
+    const result = collectTransitiveDeps(new Set(['c']), projects)
+    expect([...result].sort()).toEqual(['a', 'b', 'c'])
+  })
+
+  it('deduplicates diamond dependencies', () => {
+    const projects = resolveProjects(makeConfig({
+      projects: [
+        { name: 'setup' },
+        { name: 'a', dependencies: ['setup'] },
+        { name: 'b', dependencies: ['setup'] },
+        { name: 'final', dependencies: ['a', 'b'] },
+      ],
+    }))
+    const result = collectTransitiveDeps(new Set(['final']), projects)
+    expect([...result].sort()).toEqual(['a', 'b', 'final', 'setup'])
+  })
+})
+
+// ─── findProjectForFile ───
+
+describe('findProjectForFile()', () => {
+  it('matches file to project by testMatch', () => {
+    const projects = resolveProjects(makeConfig({
+      projects: [
+        { name: 'setup', testMatch: ['**/auth.setup.ts'] },
+        { name: 'default', testMatch: ['**/*.test.ts'] },
+      ],
+    }))
+    expect(findProjectForFile('/tmp/tests/auth.setup.ts', projects, '/tmp')).toBe('setup')
+    expect(findProjectForFile('/tmp/tests/foo.test.ts', projects, '/tmp')).toBe('default')
+  })
+
+  it('respects testIgnore', () => {
+    const projects = resolveProjects(makeConfig({
+      projects: [
+        { name: 'default', testMatch: ['**/*.test.ts'], testIgnore: ['**/app-state.test.ts'] },
+        { name: 'auth', testMatch: ['**/app-state.test.ts'] },
+      ],
+    }))
+    expect(findProjectForFile('/tmp/tests/app-state.test.ts', projects, '/tmp')).toBe('auth')
+  })
+
+  it('returns undefined for unmatched file', () => {
+    const projects = resolveProjects(makeConfig({
+      projects: [
+        { name: 'setup', testMatch: ['**/auth.setup.ts'] },
+      ],
+    }))
+    expect(findProjectForFile('/tmp/tests/foo.test.ts', projects, '/tmp')).toBeUndefined()
   })
 })

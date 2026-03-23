@@ -559,20 +559,55 @@ async function main(): Promise<void> {
   }
 
   // ─── Project resolution & test file discovery ───
-  const { resolveProjects, topologicalSort } = await import('./project.js');
-  const useProjects = config.projects && config.projects.length > 0 && !(args.files && args.files.length > 0);
+  const { resolveProjects, topologicalSort, collectTransitiveDeps, findProjectForFile } = await import('./project.js');
+  const hasProjects = config.projects && config.projects.length > 0;
+  const hasExplicitFiles = args.files && args.files.length > 0;
 
   let projects: import('./project.js').ResolvedProject[];
   let projectWaves: import('./project.js').ResolvedProject[][];
 
-  if (useProjects) {
+  if (hasProjects && !hasExplicitFiles) {
+    // Full project mode — discover all files per project
     projects = resolveProjects(config);
     projectWaves = topologicalSort(projects);
     for (const project of projects) {
       project.testFiles = await discoverTestFiles(project.testMatch, config.rootDir, undefined, project.testIgnore);
     }
+  } else if (hasProjects && hasExplicitFiles) {
+    // Explicit files with projects — auto-run dependencies
+    const allProjects = resolveProjects(config);
+    const explicitPaths = args.files.map((f: string) => path.resolve(config.rootDir, f));
+
+    // Find which projects the explicit files belong to
+    const targetProjectNames = new Set<string>();
+    for (const filePath of explicitPaths) {
+      const projectName = findProjectForFile(filePath, allProjects, config.rootDir);
+      if (projectName) {
+        targetProjectNames.add(projectName);
+      }
+    }
+
+    // Collect transitive dependencies
+    const requiredNames = collectTransitiveDeps(targetProjectNames, allProjects);
+
+    // Filter to only required projects
+    projects = allProjects.filter((p) => requiredNames.has(p.name));
+    projectWaves = topologicalSort(projects);
+
+    // Discover files: dependency projects get their full testMatch, target projects get only explicit files
+    for (const project of projects) {
+      if (targetProjectNames.has(project.name)) {
+        // Only run the explicit files that belong to this project
+        project.testFiles = explicitPaths.filter(
+          (f: string) => findProjectForFile(f, [project], config.rootDir) === project.name,
+        );
+      } else {
+        // Dependency project — run all its files
+        project.testFiles = await discoverTestFiles(project.testMatch, config.rootDir, undefined, project.testIgnore);
+      }
+    }
   } else {
-    // Explicit files or no projects configured — single default project
+    // No projects configured — single default project
     const defaultProject: import('./project.js').ResolvedProject = {
       name: 'default', testMatch: config.testMatch, testIgnore: [], dependencies: [], testFiles: [],
     };
@@ -595,7 +630,7 @@ async function main(): Promise<void> {
   // projects always run in full on every shard.
   if (config.shard) {
     const { current, total } = config.shard;
-    if (useProjects) {
+    if (hasProjects) {
       for (const project of projects) {
         project.testFiles = project.testFiles.filter((_, i) => i % total === current - 1);
       }
@@ -651,8 +686,8 @@ async function main(): Promise<void> {
       reporter,
       testFiles,
       workers: config.workers,
-      projects: useProjects ? projects : undefined,
-      projectWaves: useProjects ? projectWaves : undefined,
+      projects: hasProjects ? projects : undefined,
+      projectWaves: hasProjects ? projectWaves : undefined,
     });
 
     await reporter.onRunEnd(fullResult);
