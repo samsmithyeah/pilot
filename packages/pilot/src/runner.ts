@@ -610,6 +610,8 @@ async function runSuiteContext(
               outputDir,
               sourceFiles,
               networkEntries,
+              project: opts.projectName,
+              appState: scopeAppState || undefined,
             });
           } catch {
             // Trace packaging is best-effort
