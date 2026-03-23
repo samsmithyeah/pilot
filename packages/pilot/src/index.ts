@@ -46,6 +46,7 @@ export {
   type TestResult,
   type SuiteResult,
   type TestStatus,
+  type UseOptions,
 } from './runner.js';
 
 // Fixtures

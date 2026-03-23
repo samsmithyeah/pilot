@@ -1203,6 +1203,39 @@ test.skip("broken test", async ({ device }) => {
 });
 ```
 
+### `test.use(options: UseOptions): void`
+
+Override configuration options for all tests in the current describe scope. Overrides cascade — inner describe blocks inherit and can further override outer ones.
+
+```typescript
+describe("slow animations screen", () => {
+  test.use({ timeout: 60000 })
+
+  test("animation completes", async ({ device }) => {
+    // runs with 60s timeout instead of the default
+  })
+})
+```
+
+Multiple calls in the same scope merge together:
+
+```typescript
+describe("custom config", () => {
+  test.use({ timeout: 60000 })
+  test.use({ screenshot: "always" })
+  // equivalent to: test.use({ timeout: 60000, screenshot: "always" })
+})
+```
+
+**`UseOptions`**
+
+| Option       | Type                                        | Description                   |
+| ------------ | ------------------------------------------- | ----------------------------- |
+| `timeout`    | `number`                                    | Action/assertion timeout (ms) |
+| `screenshot` | `'always' \| 'only-on-failure' \| 'never'` | Screenshot capture mode       |
+| `retries`    | `number`                                    | Retry count for failed tests  |
+| `trace`      | `TraceMode \| Partial<TraceConfig>`         | Trace recording configuration |
+
 ### `describe(name: string, fn: () => void): void`
 
 Group tests into a suite.
