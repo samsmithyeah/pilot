@@ -18,6 +18,7 @@ import { runTestFile, collectResults, type TestResult, type SuiteResult } from '
 import { createReporters, ReporterDispatcher, type FullResult } from './reporter.js';
 import { ensureSessionReady, launchConfiguredApp } from './session-preflight.js';
 import { glob } from 'glob';
+import { resolveTraceConfig } from './trace/types.js';
 import { spawn, execFileSync } from 'node:child_process';
 import {
   clearOfflineEmulatorTransports,
@@ -34,6 +35,7 @@ import {
   type LaunchedEmulator,
   selectDevicesForStrategy,
   waitForDeviceStability,
+  ensureAdbRoot,
 } from './emulator.js';
 
 // ─── ANSI helpers ───
@@ -692,6 +694,16 @@ async function main(): Promise<void> {
           sequentialExitCode = 1;
           return;
         }
+      }
+    }
+
+    // If tracing with network capture, ensure adb root BEFORE starting agent
+    // so that the adbd restart doesn't disrupt UIAutomator2's accessibility service.
+    const traceConfig = resolveTraceConfig(config.trace)
+    if (traceConfig.mode !== 'off' && traceConfig.network && config.device) {
+      const restarted = ensureAdbRoot(config.device)
+      if (restarted) {
+        console.log(dim('Enabled adb root for network capture.'))
       }
     }
 

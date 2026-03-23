@@ -243,34 +243,44 @@ pub async fn push_file(serial: &str, local_path: &str, remote_path: &str) -> Res
 /// On physical devices where root is unavailable, logs a warning and
 /// continues — the user will need to install the CA manually.
 pub async fn install_ca_cert(serial: &str, ca_pem_path: &str, cert_filename: &str) -> Result<()> {
-    // Attempt to restart adb as root — required for writing to system dirs
-    let root_result = run_adb_lenient(serial, &["root"]).await;
-    match root_result {
-        Ok(output) => {
-            let msg = String::from_utf8_lossy(&output);
-            if msg.contains("cannot run as root") || msg.contains("adbd cannot run as root") {
-                tracing::warn!(
-                    %serial,
-                    "Device does not support adb root — CA must be installed manually"
-                );
+    // Check if already running as root (e.g. CLI called `adb root` during setup)
+    let already_root = shell_lenient(serial, "id")
+        .await
+        .map(|out| out.contains("uid=0"))
+        .unwrap_or(false);
+
+    if already_root {
+        debug!(%serial, "adb already running as root, skipping adb root");
+    } else {
+        // Attempt to restart adb as root — required for writing to system dirs
+        let root_result = run_adb_lenient(serial, &["root"]).await;
+        match root_result {
+            Ok(output) => {
+                let msg = String::from_utf8_lossy(&output);
+                if msg.contains("cannot run as root") || msg.contains("adbd cannot run as root") {
+                    tracing::warn!(
+                        %serial,
+                        "Device does not support adb root — CA must be installed manually"
+                    );
+                    return Err(anyhow::anyhow!(
+                        "Device does not support adb root — HTTPS traffic will not be captured. \
+                         Install the CA cert manually from ~/.pilot/ca.pem"
+                    ));
+                }
+                debug!(%serial, "adb root succeeded, waiting for device");
+            }
+            Err(e) => {
+                tracing::warn!(%serial, "adb root failed: {e} — CA must be installed manually");
                 return Err(anyhow::anyhow!(
-                    "Device does not support adb root — HTTPS traffic will not be captured. \
-                     Install the CA cert manually from ~/.pilot/ca.pem"
+                    "adb root failed: {e} — HTTPS traffic will not be captured"
                 ));
             }
-            debug!(%serial, "adb root succeeded, waiting for device");
         }
-        Err(e) => {
-            tracing::warn!(%serial, "adb root failed: {e} — CA must be installed manually");
-            return Err(anyhow::anyhow!(
-                "adb root failed: {e} — HTTPS traffic will not be captured"
-            ));
-        }
-    }
 
-    // Wait for device to come back after root restart
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    let _ = run_adb(Some(serial), &["wait-for-device"], DEFAULT_TIMEOUT).await;
+        // Wait for device to come back after root restart
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let _ = run_adb(Some(serial), &["wait-for-device"], DEFAULT_TIMEOUT).await;
+    }
 
     // Push cert to a temp location
     push_file(serial, ca_pem_path, "/data/local/tmp/pilot-ca.pem").await?;
