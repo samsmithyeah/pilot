@@ -2098,7 +2098,7 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
 
         let pkg = &req.package_name;
         let local_path = &req.path;
-        let device_tmp = "/data/local/tmp/pilot-app-state.tar.gz";
+        let device_tmp = format!("/data/local/tmp/pilot-app-state-{}.tar.gz", Uuid::new_v4());
         let data_dir = format!("/data/data/{pkg}");
         let tar_timeout = Duration::from_secs(300);
 
@@ -2145,7 +2145,7 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         }
 
         // 4. Pull archive to host
-        if let Err(e) = adb::pull_file(&serial, device_tmp, local_path).await {
+        if let Err(e) = adb::pull_file(&serial, &device_tmp, local_path).await {
             let screenshot = self.error_screenshot().await;
             let _ = adb::shell_lenient(&serial, &format!("rm -f {device_tmp}")).await;
             return Ok(Response::new(proto::ActionResponse {
@@ -2186,7 +2186,7 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
 
         let pkg = &req.package_name;
         let local_path = &req.path;
-        let device_tmp = "/data/local/tmp/pilot-app-state.tar.gz";
+        let device_tmp = format!("/data/local/tmp/pilot-app-state-{}.tar.gz", Uuid::new_v4());
         let data_dir = format!("/data/data/{pkg}");
         let tar_timeout = Duration::from_secs(300);
 
@@ -2228,7 +2228,7 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         }
 
         // 3. Push archive to device
-        if let Err(e) = adb::push_file(&serial, local_path, device_tmp).await {
+        if let Err(e) = adb::push_file(&serial, local_path, &device_tmp).await {
             let screenshot = self.error_screenshot().await;
             return Ok(Response::new(proto::ActionResponse {
                 request_id,

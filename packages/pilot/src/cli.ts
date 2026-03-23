@@ -626,12 +626,15 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // Apply sharding — deterministic split within each project so setup
-  // projects always run in full on every shard.
+  // Apply sharding — deterministic split within each project. Projects that
+  // are dependencies of other projects run in full on every shard (like setup).
   if (config.shard) {
     const { current, total } = config.shard;
     if (hasProjects) {
+      // Find projects that are depended on by others — these must not be sharded
+      const depTargets = new Set(projects.flatMap((p) => p.dependencies));
       for (const project of projects) {
+        if (depTargets.has(project.name)) continue; // run in full on every shard
         project.testFiles = project.testFiles.filter((_, i) => i % total === current - 1);
       }
       testFiles = projects.flatMap((p) => p.testFiles);

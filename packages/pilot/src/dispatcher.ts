@@ -522,15 +522,16 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
           const resultsBefore = allResults.length
           await dispatchWave(filteredWaveFiles)
 
-          // Check if any project in this wave had failures
+          // Track failures per-project (not per-wave) so only actual failed
+          // projects block their dependents, not unrelated sibling projects.
           const waveResults = allResults.slice(resultsBefore)
-          const waveFailed = waveResults.some((r) => r.status === 'failed')
-          if (waveFailed) {
-            // Mark all projects in this wave as failed (conservative)
-            for (const project of projectWave) {
-              if (!failedProjects.has(project.name)) {
-                failedProjects.add(project.name)
-              }
+          for (const project of projectWave) {
+            if (failedProjects.has(project.name)) continue
+            const projectFailed = waveResults.some(
+              (r) => r.status === 'failed' && r.project === project.name,
+            )
+            if (projectFailed) {
+              failedProjects.add(project.name)
             }
           }
         }
