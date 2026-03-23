@@ -306,12 +306,9 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
       )
     }
 
-    if (workerCount < opts.workers) {
-      const reason = testFiles.length < opts.workers && workerCount === testFiles.length
-        ? `only ${testFiles.length} test file(s) to run`
-        : `only ${workerCount} healthy worker-ready device(s) available`
+    if (workerCount < maxUsefulWorkers) {
       process.stderr.write(
-        `${YELLOW}Warning: Requested ${opts.workers} workers but ${reason}. Using ${workerCount} worker(s).${RESET}\n`,
+        `${YELLOW}Warning: Requested ${maxUsefulWorkers} workers but only ${workerCount} healthy worker-ready device(s) available. Using ${workerCount} worker(s).${RESET}\n`,
       )
     }
 
