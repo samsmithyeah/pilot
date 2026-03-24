@@ -112,7 +112,7 @@ export function ActionsPanel({ events, actionEvents, selectedIndex, pinnedIndex,
             {items.map((item, i) => {
               if (item.kind === 'group-start') {
                 if (filterLower && !item.event.name.toLowerCase().includes(filterLower)) return null
-                const isLifecycle = item.event.name === 'Before Hooks' || item.event.name === 'After Hooks' || item.event.name === 'Test'
+                const isLifecycle = item.event.name === 'beforeAll Hooks' || item.event.name === 'beforeEach Hooks' || item.event.name === 'afterEach Hooks' || item.event.name === 'Test'
                 return (
                   <div key={`g-${i}`} class={`group-item${isLifecycle ? ' lifecycle' : ''}`}>
                     {isLifecycle ? '' : '\u25b8 '}{item.event.name}

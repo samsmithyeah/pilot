@@ -37,10 +37,12 @@ interface TestTraceData {
   screenshots: Map<string, string>
   hierarchies: Map<string, string>
   network: NetworkEntry[]
+  /** File this test belongs to — used to scope clearing on re-runs. */
+  filePath?: string
 }
 
-function emptyTraceData(): TestTraceData {
-  return { events: [], actionEvents: [], screenshots: new Map(), hierarchies: new Map(), network: [] }
+function emptyTraceData(filePath?: string): TestTraceData {
+  return { events: [], actionEvents: [], screenshots: new Map(), hierarchies: new Map(), network: [], filePath }
 }
 
 // ─── App ───
@@ -79,12 +81,11 @@ function App() {
       // selectedTestId is in the format "filePath::fullName" for tests
       const sep = tree.selectedTestId.indexOf('::')
       if (sep !== -1) {
-        const fullName = tree.selectedTestId.slice(sep + 2)
-        if (testTraces.has(fullName)) return fullName
+        return tree.selectedTestId.slice(sep + 2)
       }
     }
     return activeTestName
-  }, [tree.selectedTestId, activeTestName, testTraces])
+  }, [tree.selectedTestId, activeTestName])
 
   const currentTrace = viewedTestName ? testTraces.get(viewedTestName) : undefined
   const traceEvents = currentTrace?.events ?? EMPTY_EVENTS
@@ -128,7 +129,30 @@ function App() {
         break
       case 'run-start':
         setIsRunning(true)
-        setTestTraces(new Map())
+        // Scope trace clearing: single test > single file > all.
+        // This preserves traces from other tests/files so clicking back
+        // on them still shows their actions and status.
+        if (msg.testFilter) {
+          // Running a single test — only clear that test's trace
+          setTestTraces((prev) => {
+            if (!prev.has(msg.testFilter!)) return prev
+            const next = new Map(prev)
+            next.delete(msg.testFilter!)
+            return next
+          })
+        } else if (msg.filePath) {
+          // Running a whole file — clear all traces for that file
+          setTestTraces((prev) => {
+            const next = new Map<string, TestTraceData>()
+            for (const [name, data] of prev) {
+              if (data.filePath !== msg.filePath) next.set(name, data)
+            }
+            return next
+          })
+        } else {
+          // Running all files
+          setTestTraces(new Map())
+        }
         activeTestRef.current = null
         setActiveTestName(null)
         setSources(new Map())
@@ -153,7 +177,7 @@ function App() {
         setTestTraces((prev) => {
           if (prev.has(msg.fullName)) return prev
           const next = new Map(prev)
-          next.set(msg.fullName, emptyTraceData())
+          next.set(msg.fullName, emptyTraceData(msg.filePath))
           return next
         })
         break
@@ -221,7 +245,7 @@ function App() {
           }
 
           const next = new Map(map)
-          next.set(testName, { events, actionEvents, screenshots, hierarchies, network: data.network })
+          next.set(testName, { events, actionEvents, screenshots, hierarchies, network: data.network, filePath: data.filePath })
           return next
         })
 

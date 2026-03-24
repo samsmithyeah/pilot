@@ -226,7 +226,7 @@ export async function startUIServer(
     const projectName = project && project.name !== 'default' ? project.name : undefined
 
     broadcast({ type: 'file-status', filePath, status: 'running' })
-    broadcast({ type: 'run-start', fileCount: 1 })
+    broadcast({ type: 'run-start', fileCount: 1, filePath, testFilter })
 
     // Speed up screen polling during execution
     screenPollActive = true
@@ -357,6 +357,12 @@ export async function startUIServer(
           }
           case 'test-end': {
             const result = deserializeTestResult(response.result)
+            // When running a single test, don't broadcast status for tests
+            // that were merely filtered out — their previous status (e.g.
+            // passed/failed from an earlier run) should persist.
+            if (testFilter && result.status === 'skipped' && result.fullName !== testFilter) {
+              break
+            }
             updateTestStatus(
               result.fullName,
               filePath,

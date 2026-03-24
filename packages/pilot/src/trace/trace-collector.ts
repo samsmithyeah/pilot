@@ -184,6 +184,16 @@ export class TraceCollector {
     return this._onEvent
   }
 
+  /** @internal — Set the starting action index (used to offset for beforeAll events). */
+  setActionIndexOffset(offset: number): void {
+    this._actionIndex = offset
+  }
+
+  /** @internal — Get the temp directory path (for reading saved screenshots). */
+  get tempDir(): string {
+    return this._tempDir
+  }
+
   // ── Console interception ──
 
   startConsoleCapture(): void {

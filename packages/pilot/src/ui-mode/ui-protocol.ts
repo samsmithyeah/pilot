@@ -44,6 +44,10 @@ export interface TestTreeMessage {
 export interface RunStartMessage {
   type: 'run-start'
   fileCount: number
+  /** When running a single file, the file path. Used to scope trace clearing. */
+  filePath?: string
+  /** When running a single test, the test fullName. Used to scope trace clearing. */
+  testFilter?: string
 }
 
 export interface RunEndMessage {

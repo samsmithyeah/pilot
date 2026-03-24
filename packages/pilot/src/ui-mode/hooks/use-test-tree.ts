@@ -58,10 +58,13 @@ export function useTestTree() {
   const updateFileStatus = useCallback((filePath: string, status: 'running' | 'done') => {
     setFiles((prev) => prev.map((file) => {
       if (file.filePath !== filePath) return file
-      return {
-        ...file,
-        status: status === 'running' ? 'running' as const : file.status,
+      if (status === 'running') {
+        return { ...file, status: 'running' as const }
       }
+      // 'done' — walk the entire file tree and re-derive all parent
+      // statuses so neither the file nor any describe block stays stuck
+      // at 'running' after the run finishes.
+      return rederiveTree(file)
     }))
   }, [])
 
@@ -138,10 +141,14 @@ function updateNodeInTree(
         // Derive parent status from children
         const childStatuses = flattenStatuses(updatedChildren)
         const hasRunning = childStatuses.includes('running')
+        const hasIdle = childStatuses.includes('idle')
         const hasFailed = childStatuses.includes('failed')
         const hasPassed = childStatuses.includes('passed')
         const allIdle = childStatuses.every((s) => s === 'skipped' || s === 'idle')
         const parentStatus = hasRunning ? 'running'
+          // Still running with idle children means more tests are expected —
+          // keep 'running' so the parent doesn't flash to passed/failed mid-run.
+          : (node.status === 'running' && hasIdle) ? 'running'
           : hasFailed ? 'failed'
           : hasPassed ? 'passed'
           : allIdle ? node.status
@@ -165,6 +172,23 @@ function flattenStatuses(nodes: TestTreeNode[]): TestNodeStatus[] {
     }
   }
   return statuses
+}
+
+/**
+ * Recursively re-derive all parent node statuses from leaf test statuses.
+ * Called when a run finishes to clear stale 'running' from describe/file nodes.
+ */
+function rederiveTree(node: TestTreeNode): TestTreeNode {
+  if (node.type === 'test' || !node.children) return node
+  const children = node.children.map(rederiveTree)
+  const childStatuses = flattenStatuses(children)
+  const hasFailed = childStatuses.includes('failed')
+  const hasPassed = childStatuses.includes('passed')
+  const status: TestNodeStatus = hasFailed ? 'failed'
+    : hasPassed ? 'passed'
+    : node.status === 'running' ? 'idle'
+    : node.status
+  return { ...node, children, status }
 }
 
 function filterTree(

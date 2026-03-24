@@ -22,6 +22,7 @@ import { resolveTraceConfig } from './trace/types.js';
 import { shouldRecord, shouldRetain } from './trace/trace-mode.js';
 import { packageTrace } from './trace/trace-packager.js';
 import { TraceCollector, setActiveTraceCollector } from './trace/trace-collector.js';
+import type { AnyTraceEvent } from './trace/types.js';
 
 // ─── Result types ───
 
@@ -308,6 +309,44 @@ async function invokeHook(fn: HookFn, device?: Device): Promise<void> {
   }
 }
 
+/**
+ * Replay saved beforeAll trace events through a test's event callback.
+ * Reads screenshots from the beforeAll collector's temp dir so they appear
+ * in the UI for every test, not just the first.
+ */
+function replayBeforeAllEvents(
+  testCollector: TraceCollector,
+  events: readonly AnyTraceEvent[],
+  beforeAllCollector: TraceCollector | null,
+  hierarchies: Map<number, { before?: string; after?: string }>,
+): void {
+  const cb = testCollector.getEventCallback();
+  if (!cb) return;
+  const screenshotDir = beforeAllCollector
+    ? path.join(beforeAllCollector.tempDir, 'screenshots')
+    : null;
+
+  for (const event of events) {
+    if ((event.type === 'action' || event.type === 'assertion') && screenshotDir) {
+      const pad = String(event.actionIndex).padStart(3, '0');
+      const beforePath = path.join(screenshotDir, `action-${pad}-before.png`);
+      const afterPath = path.join(screenshotDir, `action-${pad}-after.png`);
+      const captures: {
+        before?: Buffer; after?: Buffer;
+        hierarchyBefore?: string; hierarchyAfter?: string;
+      } = {};
+      try { if (fs.existsSync(beforePath)) captures.before = fs.readFileSync(beforePath); } catch { /* best-effort */ }
+      try { if (fs.existsSync(afterPath)) captures.after = fs.readFileSync(afterPath); } catch { /* best-effort */ }
+      const hier = hierarchies.get(event.actionIndex);
+      if (hier?.before) captures.hierarchyBefore = hier.before;
+      if (hier?.after) captures.hierarchyAfter = hier.after;
+      cb(event, captures);
+    } else {
+      cb(event);
+    }
+  }
+}
+
 async function runSuiteContext(
   ctx: SuiteContext,
   parentPrefix: string,
@@ -360,14 +399,27 @@ async function runSuiteContext(
   // Run beforeAll hooks with tracing. We create a standalone collector
   // (via setActiveTraceCollector) that Device._traceCollector falls back to.
   // This is simpler than managing the Tracing-managed collector lifecycle.
+  //
+  // After beforeAll completes, we save the recorded events so they can be
+  // replayed into each test's trace. This ensures beforeAll actions are
+  // visible for every test in the suite (UI mode + trace viewer).
   let beforeAllCollector: TraceCollector | null = null;
+  let beforeAllFirstFullName: string | undefined;
   if (ctx.beforeAll.length > 0 && opts.device) {
     const traceConfig = resolveTraceConfig(opts.config.trace);
     if (shouldRecord(traceConfig.mode, 0)) {
-      const firstTest = ctx.tests.find((t) => !t.skip);
-      if (firstTest && opts.beforeEachTest) {
-        const firstFullName = parentPrefix ? `${parentPrefix} > ${firstTest.name}` : firstTest.name;
-        await opts.beforeEachTest(firstFullName);
+      // Pick the test to tag beforeAll trace events with. When running a
+      // single test (testFilter), use that test so we don't mark an
+      // unrelated test as 'running' in the UI.
+      const targetTest = opts.testFilter
+        ? ctx.tests.find((t) => {
+            const fn = parentPrefix ? `${parentPrefix} > ${t.name}` : t.name;
+            return fn === opts.testFilter;
+          })
+        : ctx.tests.find((t) => !t.skip);
+      if (targetTest && opts.beforeEachTest) {
+        beforeAllFirstFullName = parentPrefix ? `${parentPrefix} > ${targetTest.name}` : targetTest.name;
+        await opts.beforeEachTest(beforeAllFirstFullName);
       }
       const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pilot-trace-ba-'));
       // Trigger _startManaged to fire the monkey-patch (ui-run.ts sets up
@@ -380,7 +432,7 @@ async function runSuiteContext(
       opts.device.tracing._stopManaged();
 
       setActiveTraceCollector(beforeAllCollector);
-      beforeAllCollector.startGroup('Before Hooks (suite)');
+      beforeAllCollector.startGroup('beforeAll Hooks');
     }
   }
   for (const hook of ctx.beforeAll) {
@@ -389,6 +441,25 @@ async function runSuiteContext(
   if (beforeAllCollector) {
     beforeAllCollector.endGroup();
     setActiveTraceCollector(null);
+  }
+
+  // Save beforeAll events for replay into each test's trace.
+  const savedBeforeAllEvents = beforeAllCollector ? beforeAllCollector.events.slice() : [];
+  const beforeAllActionCount = beforeAllCollector ? beforeAllCollector.currentActionIndex : 0;
+  // Build hierarchy lookup for replay (hierarchies are in-memory, not on disk)
+  const beforeAllHierarchies = new Map<number, { before?: string; after?: string }>();
+  if (beforeAllCollector) {
+    for (const h of beforeAllCollector.hierarchies) {
+      const match = h.archivePath.match(/action-(\d+)-(before|after)\.xml/);
+      if (match) {
+        const idx = parseInt(match[1]);
+        const position = match[2];
+        const entry = beforeAllHierarchies.get(idx) ?? {};
+        if (position === 'before') entry.before = h.xml;
+        else entry.after = h.xml;
+        beforeAllHierarchies.set(idx, entry);
+      }
+    }
   }
 
   // All beforeEach hooks (inherited + local)
@@ -439,6 +510,11 @@ async function runSuiteContext(
       traceCollector = opts.device.tracing._startManaged(traceConfig, tempDir);
       setActiveTraceCollector(traceCollector);
 
+      // Offset action index so per-test actions don't collide with beforeAll
+      if (beforeAllActionCount > 0) {
+        traceCollector.setActionIndexOffset(beforeAllActionCount);
+      }
+
       // Start network capture if configured
       if (traceConfig.network) {
         try {
@@ -457,8 +533,15 @@ async function runSuiteContext(
           await opts.beforeEachTest(fullName);
         }
 
+        // Replay beforeAll events into this test's trace stream.
+        // For the first test (which received beforeAll's live-streamed events),
+        // skip replay to avoid duplicates.
+        if (fullName !== beforeAllFirstFullName && savedBeforeAllEvents.length > 0 && traceCollector) {
+          replayBeforeAllEvents(traceCollector, savedBeforeAllEvents, beforeAllCollector, beforeAllHierarchies);
+        }
+
         // Run beforeEach hooks
-        traceCollector?.startGroup('Before Hooks');
+        traceCollector?.startGroup('beforeEach Hooks');
 
         for (const hook of allBeforeEach) {
           await invokeHook(hook, opts.device);
@@ -522,7 +605,7 @@ async function runSuiteContext(
     } finally {
       // Run afterEach hooks (always)
       if (allAfterEach.length > 0) {
-        traceCollector?.startGroup('After Hooks');
+        traceCollector?.startGroup('afterEach Hooks');
         for (const hook of allAfterEach) {
           try {
             await invokeHook(hook, opts.device);
@@ -707,13 +790,58 @@ async function runSuiteContext(
     result.suites.push(childResult);
   }
 
-  // Run afterAll hooks
-  for (const hook of ctx.afterAll) {
-    try {
-      await invokeHook(hook, opts.device);
-    } catch {
-      // afterAll errors are logged but don't fail individual tests
+  // Run afterAll hooks with tracing (same pattern as beforeAll).
+  // Events are streamed to the UI tagged with the last test that ran.
+  if (ctx.afterAll.length > 0 && opts.device) {
+    const traceConfig = resolveTraceConfig(opts.config.trace);
+    if (shouldRecord(traceConfig.mode, 0)) {
+      // Find the last test that actually ran (not skipped) to tag events
+      const lastRunTest = [...ctx.tests].reverse().find((t) => !t.skip);
+      if (lastRunTest && opts.beforeEachTest) {
+        const lastFullName = parentPrefix ? `${parentPrefix} > ${lastRunTest.name}` : lastRunTest.name;
+        await opts.beforeEachTest(lastFullName);
+      }
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pilot-trace-aa-'));
+      const managedCollector = opts.device.tracing._startManaged(traceConfig, tempDir);
+      const afterAllCollector = new TraceCollector(traceConfig, tempDir);
+      const cb = managedCollector.getEventCallback();
+      if (cb) afterAllCollector.setEventCallback(cb);
+      opts.device.tracing._stopManaged();
+
+      setActiveTraceCollector(afterAllCollector);
+      afterAllCollector.startGroup('afterAll Hooks');
+      for (const hook of ctx.afterAll) {
+        try {
+          await invokeHook(hook, opts.device);
+        } catch {
+          // afterAll errors are logged but don't fail individual tests
+        }
+      }
+      afterAllCollector.endGroup();
+      setActiveTraceCollector(null);
+      afterAllCollector.cleanup();
+    } else {
+      for (const hook of ctx.afterAll) {
+        try {
+          await invokeHook(hook, opts.device);
+        } catch {
+          // afterAll errors are logged but don't fail individual tests
+        }
+      }
     }
+  } else {
+    for (const hook of ctx.afterAll) {
+      try {
+        await invokeHook(hook, opts.device);
+      } catch {
+        // afterAll errors are logged but don't fail individual tests
+      }
+    }
+  }
+
+  // Clean up beforeAll trace temp dir (screenshots are no longer needed)
+  if (beforeAllCollector) {
+    beforeAllCollector.cleanup();
   }
 
   } finally {
