@@ -498,6 +498,17 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
             process.stderr.write(
               `${DIM}Skipping project "${project.name}" — dependency "${blockedBy}" failed${RESET}\n`,
             )
+            for (const file of project.testFiles) {
+              const skippedResult: TestResult = {
+                name: path.basename(file),
+                fullName: path.basename(file),
+                status: 'skipped',
+                durationMs: 0,
+                project: project.name,
+              }
+              allResults.push(skippedResult)
+              reporter.onTestEnd?.(skippedResult)
+            }
             failedProjects.add(project.name)
             continue
           }

@@ -863,9 +863,10 @@ async function main(): Promise<void> {
             reporter.onTestFileStart(file);
             const skippedResult: TestResult = {
               name: path.basename(file),
-              fullName: `[${project.name}] ${path.basename(file)}`,
+              fullName: path.basename(file),
               status: 'skipped',
               durationMs: 0,
+              project: project.name,
             };
             allResults.push(skippedResult);
             reporter.onTestFileEnd(file, [skippedResult]);
