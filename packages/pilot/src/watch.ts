@@ -41,6 +41,120 @@ const RED = '\x1b[31m'
 const YELLOW = '\x1b[33m'
 const CYAN = '\x1b[36m'
 
+// ─── Keypress mapping ───
+
+export type WatchAction = 'run-all' | 'run-failed' | 'rerun' | 'quit'
+
+export function mapKeyToAction(key: string): WatchAction | null {
+  switch (key) {
+    case 'a': return 'run-all'
+    case 'f': return 'run-failed'
+    case '\r': // Enter
+    case '\n': return 'rerun'
+    case 'q':
+    case '\x03': return 'quit' // Ctrl+C
+    default: return null
+  }
+}
+
+// ─── Run queue ───
+
+export type RunRequest = { type: 'files'; files: string[] } | { type: 'all' }
+
+/**
+ * Manages debounce and queuing for watch mode re-runs.
+ *
+ * - Debounces rapid file changes, accumulating files across calls
+ * - Queues runs while another is in progress
+ * - 'run-all' supersedes individual pending files
+ */
+export class RunQueue {
+  private _debounceFiles = new Set<string>()
+  private _debounceTimer: ReturnType<typeof setTimeout> | null = null
+  private _pendingFiles: Set<string> | 'all' | null = null
+  private _isRunning = false
+  private _debounceMs: number
+  private _onRun: (request: RunRequest) => void
+
+  constructor(debounceMs: number, onRun: (request: RunRequest) => void) {
+    this._debounceMs = debounceMs
+    this._onRun = onRun
+  }
+
+  get isRunning(): boolean { return this._isRunning }
+
+  /** Schedule specific files with debounce accumulation. */
+  scheduleFiles(files: string[]): void {
+    if (this._debounceTimer) {
+      clearTimeout(this._debounceTimer)
+    }
+
+    if (this._isRunning) {
+      if (this._pendingFiles === 'all') return
+      if (this._pendingFiles) {
+        for (const f of files) this._pendingFiles.add(f)
+      } else {
+        this._pendingFiles = new Set(files)
+      }
+      return
+    }
+
+    for (const f of files) this._debounceFiles.add(f)
+
+    this._debounceTimer = setTimeout(() => {
+      this._debounceTimer = null
+      const batch = [...this._debounceFiles]
+      this._debounceFiles.clear()
+      this._onRun({ type: 'files', files: batch })
+    }, this._debounceMs)
+  }
+
+  /** Schedule a full run (immediate, no debounce). */
+  scheduleAll(): void {
+    if (this._isRunning) {
+      this._pendingFiles = 'all'
+      return
+    }
+    if (this._debounceTimer) {
+      clearTimeout(this._debounceTimer)
+      this._debounceTimer = null
+    }
+    this._onRun({ type: 'all' })
+  }
+
+  /** Schedule specific files immediately (no debounce). */
+  scheduleImmediate(files: string[]): void {
+    if (this._isRunning) {
+      this._pendingFiles = new Set(files)
+      return
+    }
+    if (this._debounceTimer) {
+      clearTimeout(this._debounceTimer)
+      this._debounceTimer = null
+    }
+    this._onRun({ type: 'files', files })
+  }
+
+  /** Mark that a run has started. */
+  notifyRunStarted(): void {
+    this._isRunning = true
+  }
+
+  /** Mark that a run has finished and drain any queued work. */
+  notifyRunFinished(): void {
+    this._isRunning = false
+    if (this._pendingFiles) {
+      const pending = this._pendingFiles
+      this._pendingFiles = null
+      if (pending === 'all') {
+        this._onRun({ type: 'all' })
+      } else {
+        this._onRun({ type: 'files', files: [...pending] })
+      }
+    }
+  }
+}
+
 // ─── Types ───
 
 export interface WatchModeContext {
@@ -65,11 +179,7 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
     knownFiles: new Set(ctx.testFiles),
     failedFiles: new Set<string>(),
     lastRunFiles: [] as string[],
-    isRunning: false,
     isInitialRun: true,
-    pendingFiles: null as Set<string> | 'all' | null,
-    debounceTimer: null as ReturnType<typeof setTimeout> | null,
-    debounceFiles: new Set<string>(),
     watcher: null as FSWatcher | null,
     activeChild: null as ChildProcess | null,
   }
@@ -113,11 +223,23 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
     tsxBin = fs.existsSync(localTsx) ? localTsx : 'tsx'
   }
 
+  // ─── Run queue ───
+
+  const queue = new RunQueue(300, (request) => {
+    const run = request.type === 'all'
+      ? executeWaveRun()
+      : executeFileRun(request.files)
+    run.catch((err) => {
+      process.stderr.write(`${RED}Watch run error: ${err instanceof Error ? err.message : err}${RESET}\n`)
+      queue.notifyRunFinished()
+    })
+  })
+
   // ─── Run execution ───
 
   /** Run files respecting project wave ordering (used for initial run and run-all). */
   async function executeWaveRun(): Promise<void> {
-    state.isRunning = true
+    queue.notifyRunStarted()
     state.lastRunFiles = [...state.knownFiles]
 
     if (!state.isInitialRun) {
@@ -228,7 +350,7 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
   /** Run specific files (used for file-change re-runs and run-failed). */
   async function executeFileRun(files: string[]): Promise<void> {
     if (files.length === 0) return
-    state.isRunning = true
+    queue.notifyRunStarted()
     state.lastRunFiles = files
 
     process.stdout.write('\x1b[2J\x1b[H') // clear visible area, cursor to top
@@ -289,19 +411,8 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
     await reporter.onRunEnd(fullResult)
     printStatusLine(allResults, totalDuration)
 
-    state.isRunning = false
     state.isInitialRun = false
-
-    // Process any queued runs
-    if (state.pendingFiles) {
-      const next = state.pendingFiles === 'all' ? null : [...state.pendingFiles]
-      state.pendingFiles = null
-      if (next) {
-        await executeFileRun(next)
-      } else {
-        await executeWaveRun()
-      }
-    }
+    queue.notifyRunFinished()
   }
 
   function makeErrorResult(file: string, err: unknown, projectName?: string): TestResult {
@@ -418,7 +529,7 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
         return
       }
       if (state.knownFiles.has(filePath)) {
-        scheduleFileRun([filePath])
+        queue.scheduleFiles([filePath])
       }
     })
 
@@ -428,98 +539,6 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
     })
 
     return watcher
-  }
-
-  // ─── Debounce + queue ───
-
-  function scheduleFileRun(files: string[]): void {
-    if (state.debounceTimer) {
-      clearTimeout(state.debounceTimer)
-    }
-
-    if (state.isRunning) {
-      if (state.pendingFiles === 'all') return
-      if (state.pendingFiles) {
-        for (const f of files) state.pendingFiles.add(f)
-      } else {
-        state.pendingFiles = new Set(files)
-      }
-      return
-    }
-
-    // Accumulate files across rapid-fire debounce calls
-    for (const f of files) state.debounceFiles.add(f)
-
-    state.debounceTimer = setTimeout(() => {
-      state.debounceTimer = null
-      const batch = [...state.debounceFiles]
-      state.debounceFiles.clear()
-      executeFileRun(batch).catch((err) => {
-        process.stderr.write(`${RED}Watch run error: ${err instanceof Error ? err.message : err}${RESET}\n`)
-        state.isRunning = false
-      })
-    }, 300)
-  }
-
-  function scheduleRunAll(): void {
-    if (state.isRunning) {
-      state.pendingFiles = 'all'
-      return
-    }
-
-    if (state.debounceTimer) {
-      clearTimeout(state.debounceTimer)
-      state.debounceTimer = null
-    }
-
-    executeWaveRun().catch((err) => {
-      process.stderr.write(`${RED}Watch run error: ${err instanceof Error ? err.message : err}${RESET}\n`)
-      state.isRunning = false
-    })
-  }
-
-  function scheduleRunFailed(): void {
-    const failedList = [...state.failedFiles].filter((f) => state.knownFiles.has(f))
-    if (failedList.length === 0) {
-      process.stdout.write(`${DIM}No failed tests to re-run.${RESET}\n`)
-      return
-    }
-
-    if (state.isRunning) {
-      state.pendingFiles = new Set(failedList)
-      return
-    }
-
-    if (state.debounceTimer) {
-      clearTimeout(state.debounceTimer)
-      state.debounceTimer = null
-    }
-
-    executeFileRun(failedList).catch((err) => {
-      process.stderr.write(`${RED}Watch run error: ${err instanceof Error ? err.message : err}${RESET}\n`)
-      state.isRunning = false
-    })
-  }
-
-  function scheduleRerun(): void {
-    if (state.lastRunFiles.length === 0) return
-    const validFiles = state.lastRunFiles.filter((f) => state.knownFiles.has(f))
-    if (validFiles.length === 0) return
-
-    if (state.isRunning) {
-      state.pendingFiles = new Set(validFiles)
-      return
-    }
-
-    if (state.debounceTimer) {
-      clearTimeout(state.debounceTimer)
-      state.debounceTimer = null
-    }
-
-    executeFileRun(validFiles).catch((err) => {
-      process.stderr.write(`${RED}Watch run error: ${err instanceof Error ? err.message : err}${RESET}\n`)
-      state.isRunning = false
-    })
   }
 
   // ─── Keyboard input ───
@@ -532,19 +551,30 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
     process.stdin.setEncoding('utf8')
 
     process.stdin.on('data', (key: string) => {
-      switch (key) {
-        case 'a':
-          scheduleRunAll()
+      const action = mapKeyToAction(key)
+      if (!action) return
+
+      switch (action) {
+        case 'run-all':
+          queue.scheduleAll()
           break
-        case 'f':
-          scheduleRunFailed()
+        case 'run-failed': {
+          const failedList = [...state.failedFiles].filter((f) => state.knownFiles.has(f))
+          if (failedList.length === 0) {
+            process.stdout.write(`${DIM}No failed tests to re-run.${RESET}\n`)
+          } else {
+            queue.scheduleImmediate(failedList)
+          }
           break
-        case '\r': // Enter
-        case '\n':
-          scheduleRerun()
+        }
+        case 'rerun': {
+          const validFiles = state.lastRunFiles.filter((f) => state.knownFiles.has(f))
+          if (validFiles.length > 0) {
+            queue.scheduleImmediate(validFiles)
+          }
           break
-        case 'q':
-        case '\x03': // Ctrl+C
+        }
+        case 'quit':
           cleanup()
           break
       }

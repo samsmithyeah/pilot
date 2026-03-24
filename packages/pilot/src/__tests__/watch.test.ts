@@ -1,68 +1,204 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { RunQueue, mapKeyToAction, type RunRequest, type WatchAction } from '../watch.js'
 import type { WatchRunMessage, WatchRunChildMessage } from '../watch-run.js'
 
-// ─── Mock child_process.fork ───
+// ─── Tests for mapKeyToAction ───
 
-interface MockChild {
-  on: ReturnType<typeof vi.fn>
-  send: ReturnType<typeof vi.fn>
-  kill: ReturnType<typeof vi.fn>
-  _listeners: Record<string, Array<(...args: unknown[]) => void>>
-  _emit: (event: string, ...args: unknown[]) => void
-}
+describe('mapKeyToAction', () => {
+  it('maps "a" to run-all', () => {
+    expect(mapKeyToAction('a')).toBe('run-all')
+  })
 
-function createMockChild(): MockChild {
-  const listeners: Record<string, Array<(...args: unknown[]) => void>> = {}
-  return {
-    _listeners: listeners,
-    on: vi.fn((event: string, cb: (...args: unknown[]) => void) => {
-      if (!listeners[event]) listeners[event] = []
-      listeners[event].push(cb)
-    }),
-    send: vi.fn(),
-    kill: vi.fn(),
-    _emit(event: string, ...args: unknown[]) {
-      for (const cb of listeners[event] ?? []) cb(...args)
-    },
-  }
-}
+  it('maps "f" to run-failed', () => {
+    expect(mapKeyToAction('f')).toBe('run-failed')
+  })
 
-vi.mock('node:child_process', () => ({
-  fork: vi.fn(() => createMockChild()),
-}))
+  it('maps Enter to rerun', () => {
+    expect(mapKeyToAction('\r')).toBe('rerun')
+    expect(mapKeyToAction('\n')).toBe('rerun')
+  })
 
-vi.mock('chokidar', () => {
-  const listeners: Record<string, Array<(...args: unknown[]) => void>> = {}
-  return {
-    watch: vi.fn(() => ({
-      on: vi.fn((event: string, cb: (...args: unknown[]) => void) => {
-        if (!listeners[event]) listeners[event] = []
-        listeners[event].push(cb)
-        return { on: vi.fn() }
-      }),
-      close: vi.fn(),
-      _listeners: listeners,
-    })),
-  }
+  it('maps "q" and Ctrl+C to quit', () => {
+    expect(mapKeyToAction('q')).toBe('quit')
+    expect(mapKeyToAction('\x03')).toBe('quit')
+  })
+
+  it('returns null for unknown keys', () => {
+    expect(mapKeyToAction('x')).toBeNull()
+    expect(mapKeyToAction('b')).toBeNull()
+    expect(mapKeyToAction(' ')).toBeNull()
+  })
+
+  it('covers all WatchAction values', () => {
+    const allActions: WatchAction[] = ['run-all', 'run-failed', 'rerun', 'quit']
+    const keys = ['a', 'f', '\r', 'q']
+    const results = keys.map(mapKeyToAction)
+    for (const action of allActions) {
+      expect(results).toContain(action)
+    }
+  })
 })
 
-vi.mock('../reporter.js', () => ({
-  createReporters: vi.fn(async () => []),
-  ReporterDispatcher: vi.fn(() => ({
-    onRunStart: vi.fn(),
-    onTestFileStart: vi.fn(),
-    onTestEnd: vi.fn(),
-    onTestFileEnd: vi.fn(),
-    onRunEnd: vi.fn(async () => {}),
-    onError: vi.fn(),
-  })),
-}))
+// ─── Tests for RunQueue ───
 
-vi.mock('../emulator.js', () => ({
-  preserveEmulatorsForReuse: vi.fn(),
-}))
+describe('RunQueue', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
 
-// ─── Tests for watch-run.ts IPC protocol ───
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('debounces file scheduling with the configured delay', () => {
+    const runs: RunRequest[] = []
+    const q = new RunQueue(300, (req) => runs.push(req))
+
+    q.scheduleFiles(['/test/a.test.ts'])
+
+    expect(runs).toHaveLength(0)
+    vi.advanceTimersByTime(300)
+    expect(runs).toHaveLength(1)
+    expect(runs[0]).toEqual({ type: 'files', files: ['/test/a.test.ts'] })
+  })
+
+  it('accumulates files across rapid debounce calls', () => {
+    const runs: RunRequest[] = []
+    const q = new RunQueue(300, (req) => runs.push(req))
+
+    q.scheduleFiles(['/test/a.test.ts'])
+    q.scheduleFiles(['/test/b.test.ts'])
+    q.scheduleFiles(['/test/a.test.ts']) // duplicate
+
+    vi.advanceTimersByTime(300)
+
+    expect(runs).toHaveLength(1)
+    expect(runs[0].type).toBe('files')
+    const files = (runs[0] as { type: 'files'; files: string[] }).files
+    expect(files).toHaveLength(2)
+    expect(files).toContain('/test/a.test.ts')
+    expect(files).toContain('/test/b.test.ts')
+  })
+
+  it('resets debounce timer on each call', () => {
+    const runs: RunRequest[] = []
+    const q = new RunQueue(300, (req) => runs.push(req))
+
+    q.scheduleFiles(['/test/a.test.ts'])
+    vi.advanceTimersByTime(200) // 200ms in
+    q.scheduleFiles(['/test/b.test.ts'])
+    vi.advanceTimersByTime(200) // 400ms total, 200ms since last call
+
+    expect(runs).toHaveLength(0) // not yet
+
+    vi.advanceTimersByTime(100) // 300ms since last call
+    expect(runs).toHaveLength(1)
+  })
+
+  it('queues files while a run is in progress', () => {
+    const runs: RunRequest[] = []
+    const q = new RunQueue(300, (req) => runs.push(req))
+
+    // Start a run
+    q.scheduleAll()
+    q.notifyRunStarted()
+    expect(runs).toHaveLength(1)
+
+    // Queue files during run
+    q.scheduleFiles(['/test/a.test.ts'])
+    q.scheduleFiles(['/test/b.test.ts'])
+
+    // Nothing fires yet
+    vi.advanceTimersByTime(500)
+    expect(runs).toHaveLength(1)
+
+    // Finish run → queued files execute
+    q.notifyRunFinished()
+    expect(runs).toHaveLength(2)
+    expect(runs[1].type).toBe('files')
+    const files = (runs[1] as { type: 'files'; files: string[] }).files
+    expect(files).toContain('/test/a.test.ts')
+    expect(files).toContain('/test/b.test.ts')
+  })
+
+  it('scheduleAll supersedes queued individual files', () => {
+    const runs: RunRequest[] = []
+    const q = new RunQueue(300, (req) => runs.push(req))
+
+    q.scheduleAll()
+    q.notifyRunStarted()
+
+    // Queue individual files, then run-all
+    q.scheduleFiles(['/test/a.test.ts'])
+    q.scheduleAll()
+
+    // Further individual files are ignored
+    q.scheduleFiles(['/test/b.test.ts'])
+
+    q.notifyRunFinished()
+    expect(runs).toHaveLength(2)
+    expect(runs[1]).toEqual({ type: 'all' })
+  })
+
+  it('scheduleAll fires immediately (no debounce)', () => {
+    const runs: RunRequest[] = []
+    const q = new RunQueue(300, (req) => runs.push(req))
+
+    q.scheduleAll()
+    expect(runs).toHaveLength(1)
+    expect(runs[0]).toEqual({ type: 'all' })
+  })
+
+  it('scheduleImmediate fires immediately (no debounce)', () => {
+    const runs: RunRequest[] = []
+    const q = new RunQueue(300, (req) => runs.push(req))
+
+    q.scheduleImmediate(['/test/a.test.ts'])
+    expect(runs).toHaveLength(1)
+    expect(runs[0]).toEqual({ type: 'files', files: ['/test/a.test.ts'] })
+  })
+
+  it('scheduleImmediate queues when running', () => {
+    const runs: RunRequest[] = []
+    const q = new RunQueue(300, (req) => runs.push(req))
+
+    q.scheduleAll()
+    q.notifyRunStarted()
+
+    q.scheduleImmediate(['/test/a.test.ts'])
+    expect(runs).toHaveLength(1) // still only the first
+
+    q.notifyRunFinished()
+    expect(runs).toHaveLength(2)
+    expect(runs[1]).toEqual({ type: 'files', files: ['/test/a.test.ts'] })
+  })
+
+  it('scheduleAll cancels a pending debounce timer', () => {
+    const runs: RunRequest[] = []
+    const q = new RunQueue(300, (req) => runs.push(req))
+
+    q.scheduleFiles(['/test/a.test.ts'])
+    q.scheduleAll() // should cancel the debounce
+
+    vi.advanceTimersByTime(500)
+    // Only the scheduleAll fired, not the debounced files
+    expect(runs).toHaveLength(1)
+    expect(runs[0]).toEqual({ type: 'all' })
+  })
+
+  it('notifyRunFinished with no pending is a no-op', () => {
+    const runs: RunRequest[] = []
+    const q = new RunQueue(300, (req) => runs.push(req))
+
+    q.scheduleAll()
+    q.notifyRunStarted()
+    q.notifyRunFinished()
+
+    expect(runs).toHaveLength(1) // only the initial run
+  })
+})
+
+// ─── Tests for IPC protocol types ───
 
 describe('watch-run IPC protocol', () => {
   it('WatchRunMessage has the expected shape', () => {
@@ -90,26 +226,22 @@ describe('watch-run IPC protocol', () => {
     const msg: WatchRunChildMessage = {
       type: 'file-done',
       filePath: '/test/login.test.ts',
-      results: [
-        {
+      results: [{
+        name: 'should login',
+        fullName: 'Login > should login',
+        status: 'passed',
+        durationMs: 1234,
+        workerIndex: 0,
+      }],
+      suite: {
+        name: '',
+        tests: [{
           name: 'should login',
           fullName: 'Login > should login',
           status: 'passed',
           durationMs: 1234,
           workerIndex: 0,
-        },
-      ],
-      suite: {
-        name: '',
-        tests: [
-          {
-            name: 'should login',
-            fullName: 'Login > should login',
-            status: 'passed',
-            durationMs: 1234,
-            workerIndex: 0,
-          },
-        ],
+        }],
         suites: [],
         durationMs: 1234,
       },
@@ -128,207 +260,5 @@ describe('watch-run IPC protocol', () => {
 
     expect(msg.type).toBe('error')
     expect(msg.error.message).toBe('daemon not reachable')
-  })
-})
-
-// ─── Tests for WatchModeContext types ───
-
-describe('WatchModeContext', () => {
-  it('accepts valid context shape', async () => {
-    // Type-level test — if this compiles, the types are correct
-    const _ctx: import('../watch.js').WatchModeContext = {
-      config: {
-        timeout: 30_000,
-        retries: 0,
-        screenshot: 'only-on-failure',
-        testMatch: ['**/*.test.ts'],
-        daemonAddress: 'localhost:50051',
-        rootDir: '/project',
-        outputDir: 'pilot-results',
-        workers: 1,
-        launchEmulators: false,
-      },
-      device: { close: vi.fn() } as unknown as import('../device.js').Device,
-      client: { close: vi.fn() } as unknown as import('../grpc-client.js').PilotGrpcClient,
-      deviceSerial: 'emulator-5554',
-      daemonAddress: 'localhost:50051',
-      testFiles: ['/project/tests/login.test.ts'],
-      launchedEmulators: [],
-    }
-    expect(_ctx.deviceSerial).toBe('emulator-5554')
-  })
-})
-
-// ─── Tests for debounce and queue logic ───
-// These test the scheduling behavior indirectly through the module
-
-describe('watch mode scheduling logic', () => {
-  beforeEach(() => {
-    vi.useFakeTimers()
-  })
-
-  afterEach(() => {
-    vi.useRealTimers()
-  })
-
-  it('debounce timer of 300ms collapses rapid changes', async () => {
-    // Simulate the debounce logic used in watch.ts
-    let runCount = 0
-    let debounceTimer: ReturnType<typeof setTimeout> | null = null
-    const collectedFiles = new Set<string>()
-
-    function scheduleRun(files: string[]): void {
-      if (debounceTimer) clearTimeout(debounceTimer)
-      for (const f of files) collectedFiles.add(f)
-      debounceTimer = setTimeout(() => {
-        runCount++
-        debounceTimer = null
-      }, 300)
-    }
-
-    // Rapid changes within 300ms
-    scheduleRun(['/test/a.test.ts'])
-    scheduleRun(['/test/b.test.ts'])
-    scheduleRun(['/test/a.test.ts']) // duplicate
-
-    expect(runCount).toBe(0) // not yet fired
-
-    vi.advanceTimersByTime(300)
-
-    expect(runCount).toBe(1) // single batch
-    expect(collectedFiles.size).toBe(2) // deduplicated
-  })
-
-  it('queues runs while another is in progress', () => {
-    let isRunning = false
-    let pendingFiles: Set<string> | null = null
-    const runs: string[][] = []
-
-    function scheduleRun(files: string[]): void {
-      if (isRunning) {
-        if (!pendingFiles) pendingFiles = new Set(files)
-        else for (const f of files) pendingFiles.add(f)
-        return
-      }
-      isRunning = true
-      runs.push(files)
-    }
-
-    function finishRun(): void {
-      isRunning = false
-      if (pendingFiles) {
-        const next = [...pendingFiles]
-        pendingFiles = null
-        scheduleRun(next)
-      }
-    }
-
-    // First run starts
-    scheduleRun(['/test/a.test.ts'])
-    expect(runs).toHaveLength(1)
-
-    // Changes during run get queued
-    scheduleRun(['/test/b.test.ts'])
-    scheduleRun(['/test/c.test.ts'])
-    expect(runs).toHaveLength(1) // still only 1 run
-
-    // Finish triggers queued run
-    finishRun()
-    expect(runs).toHaveLength(2)
-    expect(runs[1]).toEqual(expect.arrayContaining(['/test/b.test.ts', '/test/c.test.ts']))
-  })
-
-  it('run-all supersedes individual pending files', () => {
-    let pendingFiles: Set<string> | 'all' | null = null
-
-    function queueFile(file: string): void {
-      if (pendingFiles === 'all') return
-      if (pendingFiles) pendingFiles.add(file)
-      else pendingFiles = new Set([file])
-    }
-
-    function queueAll(): void {
-      pendingFiles = 'all'
-    }
-
-    queueFile('/test/a.test.ts')
-    expect(pendingFiles).toBeInstanceOf(Set)
-
-    queueAll()
-    expect(pendingFiles).toBe('all')
-
-    // Further individual files are ignored
-    queueFile('/test/b.test.ts')
-    expect(pendingFiles).toBe('all')
-  })
-})
-
-// ─── Tests for file tracking ───
-
-describe('file tracking', () => {
-  it('tracks known files and handles add/unlink', () => {
-    const knownFiles = new Set(['/test/a.test.ts', '/test/b.test.ts'])
-    const failedFiles = new Set(['/test/b.test.ts'])
-
-    // Add new file
-    knownFiles.add('/test/c.test.ts')
-    expect(knownFiles.size).toBe(3)
-
-    // Remove file
-    knownFiles.delete('/test/b.test.ts')
-    failedFiles.delete('/test/b.test.ts')
-    expect(knownFiles.size).toBe(2)
-    expect(failedFiles.size).toBe(0)
-
-    // Remove non-existent file is a no-op
-    knownFiles.delete('/test/z.test.ts')
-    expect(knownFiles.size).toBe(2)
-  })
-
-  it('failed files only includes known files', () => {
-    const knownFiles = new Set(['/test/a.test.ts', '/test/b.test.ts'])
-    const failedFiles = new Set(['/test/a.test.ts', '/test/deleted.test.ts'])
-
-    const runnableFailedFiles = [...failedFiles].filter((f) => knownFiles.has(f))
-    expect(runnableFailedFiles).toEqual(['/test/a.test.ts'])
-  })
-})
-
-// ─── Tests for interactive key handling ───
-
-describe('interactive key dispatch', () => {
-  it('maps keys to correct actions', () => {
-    const actions: string[] = []
-
-    function handleKey(key: string): void {
-      switch (key) {
-        case 'a':
-          actions.push('run-all')
-          break
-        case 'f':
-          actions.push('run-failed')
-          break
-        case '\r':
-        case '\n':
-          actions.push('rerun')
-          break
-        case 'q':
-        case '\x03':
-          actions.push('quit')
-          break
-      }
-    }
-
-    handleKey('a')
-    handleKey('f')
-    handleKey('\r')
-    handleKey('\n')
-    handleKey('q')
-    handleKey('\x03')
-    handleKey('x') // unknown key — no action
-
-    expect(actions).toEqual([
-      'run-all', 'run-failed', 'rerun', 'rerun', 'quit', 'quit',
-    ])
   })
 })
