@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { RunQueue, mapKeyToAction, type RunRequest, type WatchAction } from '../watch.js'
+import { RunQueue, mapKeyToAction, type RunRequest, type WatchAction } from '../watch-queue.js'
 import type { WatchRunMessage, WatchRunChildMessage } from '../watch-run.js'
 
 // ─── Tests for mapKeyToAction ───

@@ -30,6 +30,7 @@ import {
   type RunFileUseOptions,
 } from './worker-protocol.js'
 import type { WatchRunMessage, WatchRunChildMessage } from './watch-run.js'
+import { RunQueue, mapKeyToAction } from './watch-queue.js'
 import { preserveEmulatorsForReuse, type LaunchedEmulator } from './emulator.js'
 
 // ─── ANSI helpers ───
@@ -41,120 +42,6 @@ const GREEN = '\x1b[32m'
 const RED = '\x1b[31m'
 const YELLOW = '\x1b[33m'
 const CYAN = '\x1b[36m'
-
-// ─── Keypress mapping ───
-
-export type WatchAction = 'run-all' | 'run-failed' | 'rerun' | 'quit'
-
-export function mapKeyToAction(key: string): WatchAction | null {
-  switch (key) {
-    case 'a': return 'run-all'
-    case 'f': return 'run-failed'
-    case '\r': // Enter
-    case '\n': return 'rerun'
-    case 'q':
-    case '\x03': return 'quit' // Ctrl+C
-    default: return null
-  }
-}
-
-// ─── Run queue ───
-
-export type RunRequest = { type: 'files'; files: string[] } | { type: 'all' }
-
-/**
- * Manages debounce and queuing for watch mode re-runs.
- *
- * - Debounces rapid file changes, accumulating files across calls
- * - Queues runs while another is in progress
- * - 'run-all' supersedes individual pending files
- */
-export class RunQueue {
-  private _debounceFiles = new Set<string>()
-  private _debounceTimer: ReturnType<typeof setTimeout> | null = null
-  private _pendingFiles: Set<string> | 'all' | null = null
-  private _isRunning = false
-  private _debounceMs: number
-  private _onRun: (request: RunRequest) => void
-
-  constructor(debounceMs: number, onRun: (request: RunRequest) => void) {
-    this._debounceMs = debounceMs
-    this._onRun = onRun
-  }
-
-  get isRunning(): boolean { return this._isRunning }
-
-  /** Schedule specific files with debounce accumulation. */
-  scheduleFiles(files: string[]): void {
-    if (this._debounceTimer) {
-      clearTimeout(this._debounceTimer)
-    }
-
-    if (this._isRunning) {
-      if (this._pendingFiles === 'all') return
-      if (this._pendingFiles) {
-        for (const f of files) this._pendingFiles.add(f)
-      } else {
-        this._pendingFiles = new Set(files)
-      }
-      return
-    }
-
-    for (const f of files) this._debounceFiles.add(f)
-
-    this._debounceTimer = setTimeout(() => {
-      this._debounceTimer = null
-      const batch = [...this._debounceFiles]
-      this._debounceFiles.clear()
-      this._onRun({ type: 'files', files: batch })
-    }, this._debounceMs)
-  }
-
-  /** Schedule a full run (immediate, no debounce). */
-  scheduleAll(): void {
-    if (this._isRunning) {
-      this._pendingFiles = 'all'
-      return
-    }
-    if (this._debounceTimer) {
-      clearTimeout(this._debounceTimer)
-      this._debounceTimer = null
-    }
-    this._onRun({ type: 'all' })
-  }
-
-  /** Schedule specific files immediately (no debounce). */
-  scheduleImmediate(files: string[]): void {
-    if (this._isRunning) {
-      this._pendingFiles = new Set(files)
-      return
-    }
-    if (this._debounceTimer) {
-      clearTimeout(this._debounceTimer)
-      this._debounceTimer = null
-    }
-    this._onRun({ type: 'files', files })
-  }
-
-  /** Mark that a run has started. */
-  notifyRunStarted(): void {
-    this._isRunning = true
-  }
-
-  /** Mark that a run has finished and drain any queued work. */
-  notifyRunFinished(): void {
-    this._isRunning = false
-    if (this._pendingFiles) {
-      const pending = this._pendingFiles
-      this._pendingFiles = null
-      if (pending === 'all') {
-        this._onRun({ type: 'all' })
-      } else {
-        this._onRun({ type: 'files', files: [...pending] })
-      }
-    }
-  }
-}
 
 // ─── Types ───
 
@@ -268,15 +155,10 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
           if (blockedBy) {
             process.stdout.write(`${DIM}Skipping project "${project.name}" — dependency "${blockedBy}" failed${RESET}\n`)
             for (const file of project.testFiles) {
-              const skippedResult: TestResult = {
-                name: path.basename(file),
-                fullName: path.basename(file),
-                status: 'skipped',
-                durationMs: 0,
-                project: project.name,
-              }
-              allResults.push(skippedResult)
-              reporter.onTestEnd?.(skippedResult)
+              const { result, suite } = makeSkippedResult(file, project.name)
+              allResults.push(result)
+              allSuites.push(suite)
+              reporter.onTestEnd?.(result)
             }
             failedProjects.add(project.name)
             continue
@@ -305,10 +187,11 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
                 state.failedFiles.delete(file)
               }
             } catch (err) {
-              const errorResult = makeErrorResult(file, err, project.name)
-              allResults.push(errorResult)
-              reporter.onTestEnd?.(errorResult)
-              reporter.onTestFileEnd?.(file, [errorResult])
+              const { result, suite } = makeErrorResult(file, err, project.name)
+              allResults.push(result)
+              allSuites.push(suite)
+              reporter.onTestEnd?.(result)
+              reporter.onTestFileEnd?.(file, [result])
               state.failedFiles.add(file)
               projectFailed = true
             }
@@ -336,10 +219,11 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
             state.failedFiles.delete(file)
           }
         } catch (err) {
-          const errorResult = makeErrorResult(file, err)
-          allResults.push(errorResult)
-          reporter.onTestEnd?.(errorResult)
-          reporter.onTestFileEnd?.(file, [errorResult])
+          const { result, suite } = makeErrorResult(file, err)
+          allResults.push(result)
+          allSuites.push(suite)
+          reporter.onTestEnd?.(result)
+          reporter.onTestFileEnd?.(file, [result])
           state.failedFiles.add(file)
         }
       }
@@ -384,10 +268,11 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
           state.failedFiles.delete(file)
         }
       } catch (err) {
-        const errorResult = makeErrorResult(file, err, projectName)
-        allResults.push(errorResult)
-        reporter.onTestEnd?.(errorResult)
-        reporter.onTestFileEnd?.(file, [errorResult])
+        const { result, suite } = makeErrorResult(file, err, projectName)
+        allResults.push(result)
+        allSuites.push(suite)
+        reporter.onTestEnd?.(result)
+        reporter.onTestFileEnd?.(file, [result])
         state.failedFiles.add(file)
       }
     }
@@ -416,14 +301,32 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
     queue.notifyRunFinished()
   }
 
-  function makeErrorResult(file: string, err: unknown, projectName?: string): TestResult {
-    return {
+  function makeErrorResult(file: string, err: unknown, projectName?: string): { result: TestResult; suite: SuiteResult } {
+    const testResult: TestResult = {
       name: path.basename(file),
       fullName: path.basename(file),
       status: 'failed',
       durationMs: 0,
       error: err instanceof Error ? err : new Error(String(err)),
       project: projectName,
+    }
+    return {
+      result: testResult,
+      suite: { name: path.basename(file), tests: [testResult], suites: [], durationMs: 0 },
+    }
+  }
+
+  function makeSkippedResult(file: string, projectName: string): { result: TestResult; suite: SuiteResult } {
+    const testResult: TestResult = {
+      name: path.basename(file),
+      fullName: path.basename(file),
+      status: 'skipped',
+      durationMs: 0,
+      project: projectName,
+    }
+    return {
+      result: testResult,
+      suite: { name: path.basename(file), tests: [testResult], suites: [], durationMs: 0 },
     }
   }
 
