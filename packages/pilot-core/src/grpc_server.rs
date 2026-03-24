@@ -2286,29 +2286,49 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
 
         // 6. Fix ownership and SELinux context (root only)
         if is_root {
-            // Get the app's UID from package manager
-            let uid_output = adb::shell_lenient(&serial, &format!("stat -c '%u' {data_dir}"))
-                .await
-                .unwrap_or_default();
+            // Get the app's UID from the data directory
+            let uid_output =
+                match adb::shell_lenient(&serial, &format!("stat -c '%u' {data_dir}")).await {
+                    Ok(output) => output,
+                    Err(e) => {
+                        let _ = adb::shell_lenient(&serial, &format!("rm -f {device_tmp}")).await;
+                        return Ok(self
+                            .action_error(
+                                request_id,
+                                "APP_STATE_RESTORE_FAILED",
+                                format!("Failed to determine app UID via stat: {e}"),
+                            )
+                            .await);
+                    }
+                };
             let uid = uid_output.trim().to_string();
 
-            if !uid.is_empty() {
-                if let Err(e) = adb::shell_with_timeout(
-                    &serial,
-                    &format!("chown -R {uid}:{uid} {data_dir}"),
-                    Duration::from_secs(60),
-                )
-                .await
-                {
-                    let _ = adb::shell_lenient(&serial, &format!("rm -f {device_tmp}")).await;
-                    return Ok(self
-                        .action_error(
-                            request_id,
-                            "APP_STATE_RESTORE_FAILED",
-                            format!("Failed to fix ownership on restored app state: {e}"),
-                        )
-                        .await);
-                }
+            if uid.is_empty() {
+                let _ = adb::shell_lenient(&serial, &format!("rm -f {device_tmp}")).await;
+                return Ok(self
+                    .action_error(
+                        request_id,
+                        "APP_STATE_RESTORE_FAILED",
+                        "Failed to determine app UID: stat returned empty output".to_string(),
+                    )
+                    .await);
+            }
+
+            if let Err(e) = adb::shell_with_timeout(
+                &serial,
+                &format!("chown -R {uid}:{uid} {data_dir}"),
+                Duration::from_secs(60),
+            )
+            .await
+            {
+                let _ = adb::shell_lenient(&serial, &format!("rm -f {device_tmp}")).await;
+                return Ok(self
+                    .action_error(
+                        request_id,
+                        "APP_STATE_RESTORE_FAILED",
+                        format!("Failed to fix ownership on restored app state: {e}"),
+                    )
+                    .await);
             }
 
             if let Err(e) = adb::shell_with_timeout(
