@@ -98,6 +98,22 @@ impl PilotServiceImpl {
         screenshot::capture_for_error(serial.as_deref()).await
     }
 
+    async fn action_error(
+        &self,
+        request_id: String,
+        error_type: &str,
+        error_message: String,
+    ) -> Response<proto::ActionResponse> {
+        let screenshot = self.error_screenshot().await;
+        Response::new(proto::ActionResponse {
+            request_id,
+            success: false,
+            error_type: error_type.to_string(),
+            error_message,
+            screenshot,
+        })
+    }
+
     /// Clean up network proxy state: revert device proxy settings, remove CA
     /// cert, and stop the proxy. Called during graceful shutdown to ensure the
     /// device isn't left with a dangling proxy configuration.
@@ -2132,29 +2148,26 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         };
 
         if let Err(e) = tar_result {
-            let screenshot = self.error_screenshot().await;
-            // Clean up temp file on failure
             let _ = adb::shell_lenient(&serial, &format!("rm -f {device_tmp}")).await;
-            return Ok(Response::new(proto::ActionResponse {
-                request_id,
-                success: false,
-                error_type: "APP_STATE_SAVE_FAILED".to_string(),
-                error_message: format!("Failed to archive app data: {e}"),
-                screenshot,
-            }));
+            return Ok(self
+                .action_error(
+                    request_id,
+                    "APP_STATE_SAVE_FAILED",
+                    format!("Failed to archive app data: {e}"),
+                )
+                .await);
         }
 
         // 4. Pull archive to host
         if let Err(e) = adb::pull_file(&serial, &device_tmp, local_path).await {
-            let screenshot = self.error_screenshot().await;
             let _ = adb::shell_lenient(&serial, &format!("rm -f {device_tmp}")).await;
-            return Ok(Response::new(proto::ActionResponse {
-                request_id,
-                success: false,
-                error_type: "APP_STATE_SAVE_FAILED".to_string(),
-                error_message: format!("Failed to pull app state archive: {e}"),
-                screenshot,
-            }));
+            return Ok(self
+                .action_error(
+                    request_id,
+                    "APP_STATE_SAVE_FAILED",
+                    format!("Failed to pull app state archive: {e}"),
+                )
+                .await);
         }
 
         // 5. Clean up temp file on device
@@ -2205,38 +2218,35 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         // 2. Clear app data — creates clean data dir with correct base permissions
         match adb::shell(&serial, &format!("pm clear {pkg}")).await {
             Ok(output) if !output.trim().starts_with("Success") => {
-                let screenshot = self.error_screenshot().await;
-                return Ok(Response::new(proto::ActionResponse {
-                    request_id,
-                    success: false,
-                    error_type: "APP_STATE_RESTORE_FAILED".to_string(),
-                    error_message: format!("pm clear failed: {}", output.trim()),
-                    screenshot,
-                }));
+                return Ok(self
+                    .action_error(
+                        request_id,
+                        "APP_STATE_RESTORE_FAILED",
+                        format!("pm clear failed: {}", output.trim()),
+                    )
+                    .await);
             }
             Err(e) => {
-                let screenshot = self.error_screenshot().await;
-                return Ok(Response::new(proto::ActionResponse {
-                    request_id,
-                    success: false,
-                    error_type: "APP_STATE_RESTORE_FAILED".to_string(),
-                    error_message: format!("Failed to clear app data: {e}"),
-                    screenshot,
-                }));
+                return Ok(self
+                    .action_error(
+                        request_id,
+                        "APP_STATE_RESTORE_FAILED",
+                        format!("Failed to clear app data: {e}"),
+                    )
+                    .await);
             }
             _ => {}
         }
 
         // 3. Push archive to device
         if let Err(e) = adb::push_file(&serial, local_path, &device_tmp).await {
-            let screenshot = self.error_screenshot().await;
-            return Ok(Response::new(proto::ActionResponse {
-                request_id,
-                success: false,
-                error_type: "APP_STATE_RESTORE_FAILED".to_string(),
-                error_message: format!("Failed to push app state archive: {e}"),
-                screenshot,
-            }));
+            return Ok(self
+                .action_error(
+                    request_id,
+                    "APP_STATE_RESTORE_FAILED",
+                    format!("Failed to push app state archive: {e}"),
+                )
+                .await);
         }
 
         // 4. Determine access strategy
@@ -2263,15 +2273,14 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         };
 
         if let Err(e) = tar_result {
-            let screenshot = self.error_screenshot().await;
             let _ = adb::shell_lenient(&serial, &format!("rm -f {device_tmp}")).await;
-            return Ok(Response::new(proto::ActionResponse {
-                request_id,
-                success: false,
-                error_type: "APP_STATE_RESTORE_FAILED".to_string(),
-                error_message: format!("Failed to extract app state archive: {e}"),
-                screenshot,
-            }));
+            return Ok(self
+                .action_error(
+                    request_id,
+                    "APP_STATE_RESTORE_FAILED",
+                    format!("Failed to extract app state archive: {e}"),
+                )
+                .await);
         }
 
         // 6. Fix ownership and SELinux context (root only)
@@ -2290,17 +2299,14 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
                 )
                 .await
                 {
-                    let screenshot = self.error_screenshot().await;
                     let _ = adb::shell_lenient(&serial, &format!("rm -f {device_tmp}")).await;
-                    return Ok(Response::new(proto::ActionResponse {
-                        request_id,
-                        success: false,
-                        error_type: "APP_STATE_RESTORE_FAILED".to_string(),
-                        error_message: format!(
-                            "Failed to fix ownership on restored app state: {e}"
-                        ),
-                        screenshot,
-                    }));
+                    return Ok(self
+                        .action_error(
+                            request_id,
+                            "APP_STATE_RESTORE_FAILED",
+                            format!("Failed to fix ownership on restored app state: {e}"),
+                        )
+                        .await);
                 }
             }
 
@@ -2311,17 +2317,14 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
             )
             .await
             {
-                let screenshot = self.error_screenshot().await;
                 let _ = adb::shell_lenient(&serial, &format!("rm -f {device_tmp}")).await;
-                return Ok(Response::new(proto::ActionResponse {
-                    request_id,
-                    success: false,
-                    error_type: "APP_STATE_RESTORE_FAILED".to_string(),
-                    error_message: format!(
-                        "Failed to fix SELinux context on restored app state: {e}"
-                    ),
-                    screenshot,
-                }));
+                return Ok(self
+                    .action_error(
+                        request_id,
+                        "APP_STATE_RESTORE_FAILED",
+                        format!("Failed to fix SELinux context on restored app state: {e}"),
+                    )
+                    .await);
             }
         }
 

@@ -19,6 +19,7 @@ import {
   formatError,
   formatSummaryLine,
   workerTag,
+  projectTag,
 } from './base.js'
 
 export class ListReporter implements PilotReporter {
@@ -26,11 +27,16 @@ export class ListReporter implements PilotReporter {
   private _totalTests = 0
   private _parallel = false
   private _multipleWorkers = false
+  private _showProjectTags = false
 
   onRunStart(config: PilotConfig, fileCount: number): void {
     this._testIndex = 0
     this._totalTests = 0
     this._parallel = config.workers > 1
+    this._multipleWorkers = config.workers > 1
+    // In parallel mode, show inline [project] tags since results interleave.
+    // In sequential mode, the CLI prints section headers per project instead.
+    this._showProjectTags = config.workers > 1 && (config.projects?.length ?? 0) > 1
     process.stdout.write(`\nRunning tests from ${fileCount} file(s)\n\n`)
   }
 
@@ -45,15 +51,13 @@ export class ListReporter implements PilotReporter {
   onTestEnd(test: TestResult): void {
     this._testIndex++
     this._totalTests++
-    if (test.workerIndex != null && test.workerIndex > 0) {
-      this._multipleWorkers = true
-    }
 
     const icon = statusIcon(test.status)
     const duration = dim(`(${formatDuration(test.durationMs)})`)
     const counter = dim(`[${this._testIndex}]`)
     const worker = this._multipleWorkers ? workerTag(test.workerIndex) : ''
-    process.stdout.write(`  ${icon} ${counter} ${worker}${test.fullName} ${duration}\n`)
+    const project = this._showProjectTags ? projectTag(test.project) : ''
+    process.stdout.write(`  ${icon} ${counter} ${worker}${project}${test.fullName} ${duration}\n`)
 
     if (test.error) {
       process.stdout.write(formatError(test.error) + '\n')
@@ -89,7 +93,8 @@ export class ListReporter implements PilotReporter {
       for (const test of result.tests) {
         if (test.status === 'failed' && test.error) {
           const worker = this._multipleWorkers ? workerTag(test.workerIndex) : ''
-          process.stdout.write(`  ${red('✗')} ${worker}${test.fullName}\n`)
+          const project = this._showProjectTags ? projectTag(test.project) : ''
+          process.stdout.write(`  ${red('✗')} ${worker}${project}${test.fullName}\n`)
           process.stdout.write(formatError(test.error) + '\n')
           if (test.tracePath) {
             process.stdout.write(`        ${dim(`Trace: npx pilot show-trace ${test.tracePath}`)}\n`)

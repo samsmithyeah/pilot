@@ -7,7 +7,7 @@ export default defineConfig({
   timeout: 10_000,
   retries: 0,
   screenshot: "only-on-failure",
-  workers: 1,
+  workers: 2,
   trace: "retain-on-failure",
   launchEmulators: true,
   avd: "Pilot_Generic_Phone_API_35",
@@ -17,18 +17,18 @@ export default defineConfig({
     "../agent/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk",
   projects: [
     {
-      name: "setup",
+      name: "authentication",
       testMatch: ["**/auth.setup.ts"],
     },
     {
       name: "default",
       testMatch: ["**/*.test.ts"],
       testIgnore: ["**/app-state.test.ts"],
-      dependencies: ["setup"],
+      dependencies: ["authentication"],
     },
     {
       name: "authenticated",
-      dependencies: ["setup"],
+      dependencies: ["authentication"],
       use: { appState: "./pilot-results/auth-state.tar.gz" },
       testMatch: ["**/app-state.test.ts"],
     },
