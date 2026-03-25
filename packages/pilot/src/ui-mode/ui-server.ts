@@ -198,6 +198,12 @@ export async function startUIServer(
     }
   }
 
+  /** Catch handler that broadcasts the error to connected clients. */
+  function broadcastError(err: unknown): void {
+    const message = err instanceof Error ? err.message : String(err);
+    broadcast({ type: 'error', message });
+  }
+
   function broadcastBinary(data: Buffer): void {
     for (const ws of clients) {
       if (ws.readyState === ws.OPEN) {
@@ -1674,10 +1680,10 @@ export async function startUIServer(
 
   const watchQueue = new RunQueue(300, (request) => {
     if (request.type === 'all') {
-      runAllFiles().catch(() => {});
+      runAllFiles().catch(broadcastError);
     } else {
       const file = request.files[0];
-      if (file) runFile(file).catch(() => {});
+      if (file) runFile(file).catch(broadcastError);
     }
   });
 
@@ -1689,16 +1695,16 @@ export async function startUIServer(
     switch (msg.type) {
       case 'run-test':
         if (!knownTestFiles.has(msg.filePath)) break;
-        if (msg.runDeps) runFileWithDeps(msg.filePath, msg.fullName).catch(() => {});
-        else runFile(msg.filePath, msg.fullName).catch(() => {});
+        if (msg.runDeps) runFileWithDeps(msg.filePath, msg.fullName).catch(broadcastError);
+        else runFile(msg.filePath, msg.fullName).catch(broadcastError);
         break;
       case 'run-file':
         if (!knownTestFiles.has(msg.filePath)) break;
-        if (msg.runDeps) runFileWithDeps(msg.filePath).catch(() => {});
-        else runFile(msg.filePath).catch(() => {});
+        if (msg.runDeps) runFileWithDeps(msg.filePath).catch(broadcastError);
+        else runFile(msg.filePath).catch(broadcastError);
         break;
       case 'run-all':
-        runAllFiles().catch(() => {});
+        runAllFiles().catch(broadcastError);
         break;
       case 'run-failed': {
         const files = [...failedFiles];
@@ -1744,13 +1750,13 @@ export async function startUIServer(
               // Single-worker: run files sequentially via runFile (each manages isRunning)
               for (const f of files) await runFile(f);
             }
-          })().catch(() => {});
+          })().catch(broadcastError);
         }
         break;
       }
       case 'run-project':
-        if (msg.runDeps) runProject(msg.projectName).catch(() => {});
-        else runProjectOnly(msg.projectName).catch(() => {});
+        if (msg.runDeps) runProject(msg.projectName).catch(broadcastError);
+        else runProjectOnly(msg.projectName).catch(broadcastError);
         break;
       case 'stop-run':
         if (useParallel()) {
