@@ -121,6 +121,9 @@ function App() {
     }
   }, []);
 
+  // Clean up run timer on unmount
+  useEffect(() => () => stopRunTimer(), [stopRunTimer]);
+
   const tree = useTestTree();
   // Ref to tree methods so handleMessage doesn't depend on the tree object
   // (which is recreated each render), preventing useCallback churn.
