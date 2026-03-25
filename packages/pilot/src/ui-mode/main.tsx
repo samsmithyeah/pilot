@@ -143,18 +143,16 @@ function App() {
   }, [tree.allFiles]);
 
   // Get the currently viewed test's trace data.
-  // Prefer the test selected in the explorer; fall back to the actively running test.
+  // Only show trace data when a test is explicitly selected in the tree.
   const viewedTestName = useMemo(() => {
-    // If a test node is selected in the tree, use its fullName
     if (tree.selectedTestId) {
-      // selectedTestId is in the format "filePath::fullName" for tests
       const sep = tree.selectedTestId.indexOf('::');
       if (sep !== -1) {
         return tree.selectedTestId.slice(sep + 2);
       }
     }
-    return activeTestName;
-  }, [tree.selectedTestId, activeTestName]);
+    return null;
+  }, [tree.selectedTestId]);
 
   const currentTrace = viewedTestName ? testTraces.get(viewedTestName) : undefined;
   const traceEvents = currentTrace?.events ?? EMPTY_EVENTS;
@@ -279,32 +277,12 @@ function App() {
         // Mark this test (and its parent describe/file) as running
         tree.updateTestStatus(msg.fullName, msg.filePath, 'running');
 
-        // Decide whether to auto-select this test.
-        // In single-worker mode, always follow. In multi-worker mode, only
-        // follow if the user hasn't manually selected something, and lock
-        // onto the first worker we see so the view doesn't jump around.
-        const isMultiWorker = workers.length > 1;
-        const follow = autoFollowRef.current;
-        let shouldFollow = false;
-        if (follow === 'manual') {
-          shouldFollow = false;
-        } else if (!isMultiWorker || follow === 'auto') {
-          shouldFollow = true;
-          // In multi-worker, lock onto this worker so we stick with it
-          if (isMultiWorker && msg.workerId != null) {
-            autoFollowRef.current = `worker:${msg.workerId}`;
-          }
-        } else if (msg.workerId != null && follow === `worker:${msg.workerId}`) {
-          shouldFollow = true;
-        }
-
-        if (shouldFollow) {
-          activeTestRef.current = msg.fullName;
-          setActiveTestName(msg.fullName);
-          setPinnedIndex(0);
-          setHoveredIndex(null);
-          tree.setSelectedTestId(`${msg.filePath}::${msg.fullName}`);
-        }
+        // Track the active test for trace data accumulation, but don't
+        // auto-select in the tree — only failures trigger auto-selection.
+        activeTestRef.current = msg.fullName;
+        setActiveTestName(msg.fullName);
+        setPinnedIndex(0);
+        setHoveredIndex(null);
         // Ensure trace data exists for this test, snapshotting its source file
         setTestTraces((prev) => {
           if (prev.has(msg.fullName)) return prev;
@@ -333,6 +311,26 @@ function App() {
             const next = new Map(prev);
             next.set(msg.fullName, { ...data, tracePath: msg.tracePath });
             return next;
+          });
+        }
+        // Auto-expand tree path to failing test, select it, and pin the failing action
+        if (msg.status === 'failed') {
+          tree.expandPathTo(msg.fullName, msg.filePath);
+          tree.setSelectedTestId(`${msg.filePath}::${msg.fullName}`);
+          autoFollowRef.current = 'manual';
+          activeTestRef.current = msg.fullName;
+          setActiveTestName(msg.fullName);
+          // Find the last failed action and pin it
+          setTestTraces((prev) => {
+            const trace = prev.get(msg.fullName);
+            if (trace) {
+              const failIdx = trace.actionEvents.findLastIndex((e) => e.status === 'failed');
+              if (failIdx !== -1) {
+                setPinnedIndex(failIdx);
+                setHoveredIndex(null);
+              }
+            }
+            return prev;
           });
         }
         break;
@@ -574,17 +572,11 @@ function App() {
         <RunControls
           connected={connected}
           isRunning={isRunning}
-          isStopping={isStopping}
-          isWatching={tree.hasWatchedFiles}
           deviceSerial={deviceSerial}
           counts={tree.counts}
           theme={theme}
           onThemeChange={handleThemeChange}
           onSend={handleSend}
-          onStop={() => { send({ type: 'stop-run' }); setIsStopping(true); }}
-          hasProjectDeps={hasProjectDeps}
-          runDepsFirst={runDepsFirst}
-          onToggleRunDeps={handleToggleRunDeps}
           workers={workers}
           runElapsed={runElapsed}
         />
@@ -597,7 +589,15 @@ function App() {
           nameFilter={tree.nameFilter}
           statusFilter={tree.statusFilter}
           counts={tree.counts}
+          connected={connected}
+          isRunning={isRunning}
+          isStopping={isStopping}
+          isWatching={tree.hasWatchedFiles}
+          hasProjectDeps={hasProjectDeps}
+          runDepsFirst={runDepsFirst}
           onToggleExpanded={tree.toggleExpanded}
+          onExpandAll={tree.expandAll}
+          onCollapseAll={tree.collapseAll}
           onSelectTest={useCallback((id: string | null) => {
             if (id != null) autoFollowRef.current = 'manual';
             tree.setSelectedTestId(id);
@@ -605,7 +605,8 @@ function App() {
           onSetNameFilter={tree.setNameFilter}
           onSetStatusFilter={tree.setStatusFilter}
           onSend={handleSend}
-          isRunning={isRunning}
+          onStop={() => { send({ type: 'stop-run' }); setIsStopping(true); }}
+          onToggleRunDeps={handleToggleRunDeps}
         />
       }
       filmstrip={
@@ -1119,6 +1120,40 @@ html, body, #app {
 .te-status-btn.active.te-status-failed { color: var(--color-error); }
 
 .te-count { font-weight: 600; margin-left: 2px; }
+
+.te-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.te-toolbar-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.te-toolbar-actions { display: flex; gap: 2px; }
+.te-toolbar-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 22px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  padding: 0;
+}
+.te-toolbar-btn:hover:not(:disabled) { background: var(--bg-hover); color: var(--color-text); }
+.te-toolbar-btn:disabled { opacity: 0.35; cursor: default; }
+.te-toolbar-btn.active { color: var(--color-accent); background: var(--bg-hover); }
+.te-toolbar-btn.active:hover:not(:disabled) { color: var(--color-accent); }
+.te-toolbar-sep { width: 1px; height: 14px; background: var(--border); margin: 0 2px; align-self: center; }
 
 .te-tree { flex: 1; overflow-y: auto; padding: 4px 0; }
 

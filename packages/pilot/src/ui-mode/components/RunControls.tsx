@@ -3,7 +3,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'preact/hooks';
-import { Eye, Link, Play, RefreshCw, Square } from 'lucide-preact';
+import { RefreshCw } from 'lucide-preact';
 import type { ClientMessage } from '../ui-protocol.js';
 
 export type Theme = 'system' | 'light' | 'dark'
@@ -22,18 +22,11 @@ interface WorkerInfo {
 interface RunControlsProps {
   connected: boolean
   isRunning: boolean
-  isStopping: boolean
-  isWatching: boolean
   deviceSerial: string
   counts: { passed: number; failed: number; skipped: number; total: number }
   theme: Theme
   onThemeChange: (theme: Theme) => void
   onSend: (msg: ClientMessage) => void
-  onStop: () => void
-  /** Whether any project has dependencies (controls visibility of the deps toggle). */
-  hasProjectDeps: boolean
-  runDepsFirst: boolean
-  onToggleRunDeps: () => void
   /** Workers in multi-worker mode. Empty array for single-worker. */
   workers: WorkerInfo[]
   /** Elapsed run time in ms. */
@@ -130,19 +123,8 @@ function WorkerDevice({ w, onSend }: { w: WorkerInfo; onSend: (msg: ClientMessag
 
 // ─── RunControls ───
 
-export function RunControls({ connected, isRunning, isStopping, isWatching, deviceSerial, counts, theme, onThemeChange, onSend, onStop, hasProjectDeps, runDepsFirst, onToggleRunDeps, workers, runElapsed }: RunControlsProps) {
+export function RunControls({ connected, isRunning, deviceSerial, counts, theme, onThemeChange, onSend, workers, runElapsed }: RunControlsProps) {
   const hasWorkers = workers.length > 1;
-
-  // Delay showing "Stopping…" text so quick stops don't flicker
-  const [showStoppingText, setShowStoppingText] = useState(false);
-  useEffect(() => {
-    if (!isStopping) {
-      setShowStoppingText(false);
-      return;
-    }
-    const timer = setTimeout(() => setShowStoppingText(true), 200);
-    return () => clearTimeout(timer);
-  }, [isStopping]);
 
   return (
     <div class="run-controls">
@@ -154,14 +136,6 @@ export function RunControls({ connected, isRunning, isStopping, isWatching, devi
       </div>
 
       <div class="rc-center">
-        <button
-          class="rc-btn rc-run-all"
-          onClick={() => onSend({ type: 'run-all' })}
-          disabled={isRunning || !connected}
-          title="Run all tests (r)"
-        >
-          <Play size={ICON_SIZE} /> Run All <span class="rc-kbd">R</span>
-        </button>
         {counts.failed > 0 && (
           <button
             class="rc-btn rc-run-failed"
@@ -170,35 +144,6 @@ export function RunControls({ connected, isRunning, isStopping, isWatching, devi
             title="Re-run failed tests (f)"
           >
             <RefreshCw size={ICON_SIZE} /> Rerun Failed <span class="rc-kbd">F</span>
-          </button>
-        )}
-        {isRunning && (
-          <button
-            class="rc-btn rc-stop"
-            onClick={onStop}
-            disabled={isStopping}
-            title="Stop current run (Esc)"
-          >
-            <Square size={ICON_SIZE} /> {showStoppingText ? 'Stopping\u2026' : 'Stop'} <span class="rc-kbd">Esc</span>
-          </button>
-        )}
-        <button
-          class={`rc-btn rc-toggle ${isWatching ? 'active' : ''}`}
-          onClick={() => onSend({ type: 'toggle-watch', filePath: 'all' })}
-          disabled={!connected}
-          title={isWatching ? 'Disable watch mode (w)' : 'Watch all files for changes (w)'}
-        >
-          <Eye size={ICON_SIZE} /> Watch <span class="rc-kbd">W</span>
-        </button>
-        {hasProjectDeps && (
-          <button
-            class={`rc-btn rc-toggle ${runDepsFirst ? 'active' : ''}`}
-            onClick={onToggleRunDeps}
-            title={runDepsFirst
-              ? 'Dependencies run automatically before tests — click to disable'
-              : 'Run dependency projects before tests — click to enable'}
-          >
-            <Link size={ICON_SIZE} /> Run deps
           </button>
         )}
       </div>

@@ -25,19 +25,58 @@ export function useTestTree() {
 
   const setTestTree = useCallback((newFiles: TestTreeNode[]) => {
     setFiles(newFiles);
-    // Auto-expand project and file nodes
+    // Expand project nodes only — files and below start collapsed
     const expanded = new Set<string>();
     for (const node of newFiles) {
-      expanded.add(node.id);
-      // For project nodes, also expand their file children
-      if (node.type === 'project' && node.children) {
-        for (const child of node.children) {
-          if (child.type === 'file') expanded.add(child.id);
-        }
-      }
+      if (node.type === 'project') expanded.add(node.id);
     }
     setExpandedNodes(expanded);
   }, []);
+
+  /** Expand all nodes in the tree. */
+  const expandAll = useCallback(() => {
+    setExpandedNodes((prev) => {
+      const next = new Set(prev);
+      function walk(nodes: TestTreeNode[]) {
+        for (const node of nodes) {
+          if (node.children && node.children.length > 0) {
+            next.add(node.id);
+            walk(node.children);
+          }
+        }
+      }
+      walk(files);
+      return next;
+    });
+  }, [files]);
+
+  /** Collapse all nodes in the tree. */
+  const collapseAll = useCallback(() => {
+    setExpandedNodes(new Set());
+  }, []);
+
+  /** Expand the path from root to a specific test node. */
+  const expandPathTo = useCallback((fullName: string, filePath: string) => {
+    setExpandedNodes((prev) => {
+      const next = new Set(prev);
+      function walk(nodes: TestTreeNode[]): boolean {
+        for (const node of nodes) {
+          if (node.type === 'test' && node.fullName === fullName && node.filePath === filePath) {
+            return true;
+          }
+          if (node.children) {
+            if (walk(node.children)) {
+              next.add(node.id);
+              return true;
+            }
+          }
+        }
+        return false;
+      }
+      walk(files);
+      return next;
+    });
+  }, [files]);
 
   const toggleExpanded = useCallback((nodeId: string) => {
     setExpandedNodes((prev) => {
@@ -120,6 +159,9 @@ export function useTestTree() {
     counts,
     setTestTree,
     toggleExpanded,
+    expandAll,
+    collapseAll,
+    expandPathTo,
     setSelectedTestId,
     setNameFilter,
     setStatusFilter,

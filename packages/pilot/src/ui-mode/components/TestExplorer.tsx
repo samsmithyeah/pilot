@@ -6,11 +6,12 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'preact/hooks';
-import { ArrowLeft, Check, Circle, CircleSlash, Eye, Play, X } from 'lucide-preact';
+import { ArrowLeft, Check, ChevronsDownUp, ChevronsUpDown, Circle, CircleSlash, Eye, Link, Play, Square, X } from 'lucide-preact';
 import type { TestTreeNode, ClientMessage } from '../ui-protocol.js';
 
 const ICON_SIZE = 13;
 const STATUS_SIZE = 12;
+const TOOLBAR_ICON_SIZE = 14;
 
 interface TestExplorerProps {
   files: TestTreeNode[]
@@ -19,18 +20,29 @@ interface TestExplorerProps {
   nameFilter: string
   statusFilter: 'all' | 'passed' | 'failed' | 'skipped'
   counts: { passed: number; failed: number; skipped: number; total: number }
+  connected: boolean
+  isRunning: boolean
+  isStopping: boolean
+  isWatching: boolean
+  hasProjectDeps: boolean
+  runDepsFirst: boolean
   onToggleExpanded: (nodeId: string) => void
+  onExpandAll: () => void
+  onCollapseAll: () => void
   onSelectTest: (testId: string | null) => void
   onSetNameFilter: (filter: string) => void
   onSetStatusFilter: (filter: 'all' | 'passed' | 'failed' | 'skipped') => void
   onSend: (msg: ClientMessage) => void
-  isRunning: boolean
+  onStop: () => void
+  onToggleRunDeps: () => void
 }
 
 export function TestExplorer(props: TestExplorerProps) {
   const {
     files, expandedNodes, selectedTestId, nameFilter, statusFilter,
-    counts, onToggleExpanded, onSelectTest, onSetNameFilter, onSetStatusFilter, onSend, isRunning,
+    counts, connected, isRunning, isStopping, isWatching, hasProjectDeps, runDepsFirst,
+    onToggleExpanded, onExpandAll, onCollapseAll, onSelectTest,
+    onSetNameFilter, onSetStatusFilter, onSend, onStop, onToggleRunDeps,
   } = props;
 
   return (
@@ -48,6 +60,55 @@ export function TestExplorer(props: TestExplorerProps) {
           <StatusButton label="Pass" value="passed" count={counts.passed} active={statusFilter} onClick={onSetStatusFilter} />
           <StatusButton label="Fail" value="failed" count={counts.failed} active={statusFilter} onClick={onSetStatusFilter} />
           <StatusButton label="Skip" value="skipped" count={counts.skipped} active={statusFilter} onClick={onSetStatusFilter} />
+        </div>
+      </div>
+      <div class="te-toolbar">
+        <span class="te-toolbar-title">Tests</span>
+        <div class="te-toolbar-actions">
+          <button
+            class="te-toolbar-btn"
+            onClick={() => onSend({ type: 'run-all' })}
+            disabled={isRunning || !connected}
+            title="Run all tests"
+          >
+            <Play size={TOOLBAR_ICON_SIZE} />
+          </button>
+          {isRunning && (
+            <button
+              class="te-toolbar-btn"
+              onClick={onStop}
+              disabled={isStopping}
+              title="Stop current run"
+            >
+              <Square size={TOOLBAR_ICON_SIZE} />
+            </button>
+          )}
+          <button
+            class={`te-toolbar-btn ${isWatching ? 'active' : ''}`}
+            onClick={() => onSend({ type: 'toggle-watch', filePath: 'all' })}
+            disabled={!connected}
+            title={isWatching ? 'Disable watch mode' : 'Watch all files for changes'}
+          >
+            <Eye size={TOOLBAR_ICON_SIZE} />
+          </button>
+          {hasProjectDeps && (
+            <button
+              class={`te-toolbar-btn ${runDepsFirst ? 'active' : ''}`}
+              onClick={onToggleRunDeps}
+              title={runDepsFirst
+                ? 'Dependencies run automatically — click to disable'
+                : 'Run dependency projects first — click to enable'}
+            >
+              <Link size={TOOLBAR_ICON_SIZE} />
+            </button>
+          )}
+          <span class="te-toolbar-sep" />
+          <button class="te-toolbar-btn" onClick={onExpandAll} title="Expand all">
+            <ChevronsUpDown size={TOOLBAR_ICON_SIZE} />
+          </button>
+          <button class="te-toolbar-btn" onClick={onCollapseAll} title="Collapse all">
+            <ChevronsDownUp size={TOOLBAR_ICON_SIZE} />
+          </button>
         </div>
       </div>
       <div class="te-tree">
