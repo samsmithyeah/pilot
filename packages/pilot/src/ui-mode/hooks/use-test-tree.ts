@@ -8,14 +8,6 @@
 import { useState, useCallback, useMemo } from 'preact/hooks';
 import type { TestTreeNode, TestNodeStatus } from '../ui-protocol.js';
 
-interface TestTreeState {
-  files: TestTreeNode[]
-  expandedNodes: Set<string>
-  selectedTestId: string | null
-  nameFilter: string
-  statusFilter: 'all' | 'passed' | 'failed' | 'skipped'
-}
-
 export function useTestTree() {
   const [files, setFiles] = useState<TestTreeNode[]>([]);
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set());

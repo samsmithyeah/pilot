@@ -11,7 +11,7 @@
     "build": "tsc && npm run build:trace-viewer && npm run build:ui-mode",
     "build:trace-viewer": "vite build",
     "build:ui-mode": "vite build --config vite.config.ui-mode.ts",
-    "lint": "eslint src/ --ignore-pattern src/trace-viewer/ --ignore-pattern src/ui-mode/",
+    "lint": "eslint src/ --ignore-pattern src/trace-viewer/",
     "knip": "knip",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",

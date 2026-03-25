@@ -83,7 +83,7 @@ function App() {
   // Ref tracks the currently-running test — a ref (not state) so the message
   // handler always reads the latest value regardless of React batching.
   const activeTestRef = useRef<string | null>(null);
-  const [activeTestName, setActiveTestName] = useState<string | null>(null);
+  const [_activeTestName, setActiveTestName] = useState<string | null>(null);
   // Pending source files keyed by filename — accumulated from 'source' messages
   // and snapshotted into per-test trace data when 'test-start' fires.
   const pendingSourcesRef = useRef<Map<string, string>>(new Map());

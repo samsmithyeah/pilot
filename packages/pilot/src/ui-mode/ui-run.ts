@@ -20,7 +20,6 @@ import {
   serializeTestResult,
   serializeSuiteResult,
   type SerializedConfig,
-  type RunFileUseOptions,
 } from '../worker-protocol.js';
 import type {
   UIRunMessage,

@@ -7,10 +7,10 @@
  *   - "All" tab: vertical grid of all worker devices.
  */
 
-import type { RefObject } from 'preact'
-import { useRef, useEffect } from 'preact/hooks'
-import type { WorkerInfo } from '../ui-protocol.js'
-import { DeviceMirror } from './DeviceMirror.js'
+import type { RefObject } from 'preact';
+import { useRef, useEffect } from 'preact/hooks';
+import type { WorkerInfo } from '../ui-protocol.js';
+import { DeviceMirror } from './DeviceMirror.js';
 
 interface DevicePaneProps {
   canvasRef: RefObject<HTMLCanvasElement>
@@ -29,7 +29,7 @@ const DOT_CLASS: Record<WorkerInfo['status'], string> = {
   done: 'done',
   initializing: 'initializing',
   error: 'error',
-}
+};
 
 /** Canvas ref callback for the "All" grid — registers/unregisters with multi-mirror hook. */
 function WorkerCanvas({ workerId, label, connected, registerCanvas, unregisterCanvas }: {
@@ -39,14 +39,14 @@ function WorkerCanvas({ workerId, label, connected, registerCanvas, unregisterCa
   registerCanvas: (id: number, canvas: HTMLCanvasElement) => void
   unregisterCanvas: (id: number) => void
 }) {
-  const ref = useRef<HTMLCanvasElement>(null)
+  const ref = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
     if (ref.current) {
-      registerCanvas(workerId, ref.current)
+      registerCanvas(workerId, ref.current);
     }
-    return () => unregisterCanvas(workerId)
-  }, [workerId, registerCanvas, unregisterCanvas])
+    return () => unregisterCanvas(workerId);
+  }, [workerId, registerCanvas, unregisterCanvas]);
 
   return (
     <div class="device-pane-grid-item">
@@ -73,20 +73,20 @@ function WorkerCanvas({ workerId, label, connected, registerCanvas, unregisterCa
         <canvas ref={ref} class="dm-canvas" />
       </div>
     </div>
-  )
+  );
 }
 
 export function DevicePane({
   canvasRef,
   connected,
   workers,
-  selectedWorkerId,
+  selectedWorkerId: _selectedWorkerId,
   deviceViewMode,
   onSelectDeviceView,
   registerCanvas,
   unregisterCanvas,
 }: DevicePaneProps) {
-  const hasWorkers = workers.length > 1
+  const hasWorkers = workers.length > 1;
 
   return (
     <div class="device-pane">
@@ -135,5 +135,5 @@ export function DevicePane({
         )}
       </div>
     </div>
-  )
+  );
 }
