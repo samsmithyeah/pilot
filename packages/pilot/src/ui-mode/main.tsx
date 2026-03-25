@@ -367,10 +367,16 @@ function App() {
           if (ev.type === 'action' || ev.type === 'assertion') {
             const pad = String(ev.actionIndex).padStart(3, '0');
             if (msg.screenshotBefore) {
-              screenshots.set(`screenshots/action-${pad}-before.png`, base64ToBlobUrl(msg.screenshotBefore));
+              const key = `screenshots/action-${pad}-before.png`;
+              const old = screenshots.get(key);
+              if (old) try { URL.revokeObjectURL(old); } catch { /* already revoked */ }
+              screenshots.set(key, base64ToBlobUrl(msg.screenshotBefore));
             }
             if (msg.screenshotAfter) {
-              screenshots.set(`screenshots/action-${pad}-after.png`, base64ToBlobUrl(msg.screenshotAfter));
+              const key = `screenshots/action-${pad}-after.png`;
+              const old = screenshots.get(key);
+              if (old) try { URL.revokeObjectURL(old); } catch { /* already revoked */ }
+              screenshots.set(key, base64ToBlobUrl(msg.screenshotAfter));
             }
             // For actions without screenshots (e.g. generic toBe assertions),
             // inherit the most recent screenshot so clicking them still shows
