@@ -1845,9 +1845,9 @@ export async function startUIServer(
   // ─── HTTP Server ───
 
   let spaHtml: string;
-  if (fs.existsSync(SPA_HTML_PATH)) {
+  try {
     spaHtml = fs.readFileSync(SPA_HTML_PATH, 'utf-8');
-  } else {
+  } catch {
     spaHtml = buildFallbackHtml();
   }
 
@@ -1878,13 +1878,22 @@ export async function startUIServer(
         res.end('Trace not found');
         return;
       }
-      const stat = fs.statSync(resolvedTrace);
+      let stat: fs.Stats;
+      try {
+        stat = fs.statSync(resolvedTrace);
+      } catch {
+        res.writeHead(404);
+        res.end('Trace not found');
+        return;
+      }
       res.writeHead(200, {
         'Content-Type': 'application/zip',
         'Content-Length': stat.size,
         'Content-Disposition': `attachment; filename="${path.basename(resolvedTrace)}"`,
       });
-      fs.createReadStream(resolvedTrace).pipe(res);
+      fs.createReadStream(resolvedTrace)
+        .on('error', () => { res.end(); })
+        .pipe(res);
       return;
     }
 
