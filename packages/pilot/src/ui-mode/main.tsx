@@ -1,8 +1,20 @@
 import { render } from 'preact';
 import { useState, useCallback, useMemo, useRef, useEffect } from 'preact/hooks';
 import type { ServerMessage, ClientMessage, TestTreeNode, WorkerInfo } from './ui-protocol.js';
-import type { AnyTraceEvent, ActionTraceEvent, AssertionTraceEvent, TraceMetadata, NetworkEntry } from '../trace/types.js';
+import type { ActionTraceEvent, AssertionTraceEvent, TraceMetadata } from '../trace/types.js';
 import { useWebSocket } from './hooks/use-websocket.js';
+import {
+  useTraceData,
+  base64ToBlobUrl,
+  revokeTraceScreenshots,
+  emptyTraceData,
+  getOrCreateTrace,
+  EMPTY_MAP,
+  EMPTY_EVENTS,
+  EMPTY_ACTION_EVENTS,
+  EMPTY_NETWORK,
+  type TestTraceData,
+} from './hooks/use-trace-data.js';
 import { useScreenMirror, useMultiScreenMirror } from './hooks/use-screen-mirror.js';
 import { useTestTree } from './hooks/use-test-tree.js';
 import { useRunTimer } from './hooks/use-run-timer.js';
@@ -16,45 +28,6 @@ import { ScreenshotPanel } from '../trace-viewer/components/ScreenshotPanel.js';
 import { DetailTabs } from '../trace-viewer/components/DetailTabs.js';
 import { TimelineFilmstrip } from '../trace-viewer/components/TimelineFilmstrip.js';
 import { uiModeStyles } from './styles/ui-mode.css.js';
-
-// ─── Helpers ───
-
-function base64ToBlobUrl(base64: string): string {
-  const bytes = atob(base64);
-  const arr = new Uint8Array(bytes.length);
-  for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
-  return URL.createObjectURL(new Blob([arr], { type: 'image/png' }));
-}
-
-/** Revoke all blob URLs in a trace's screenshot map to free memory. */
-function revokeTraceScreenshots(data: TestTraceData): void {
-  for (const blobUrl of data.screenshots.values()) {
-    try { URL.revokeObjectURL(blobUrl); } catch { /* already revoked */ }
-  }
-}
-
-const EMPTY_MAP = new Map<string, string>();
-const EMPTY_EVENTS: AnyTraceEvent[] = [];
-const EMPTY_ACTION_EVENTS: (ActionTraceEvent | AssertionTraceEvent)[] = [];
-const EMPTY_NETWORK: NetworkEntry[] = [];
-
-/** Per-test trace data accumulated during execution. */
-interface TestTraceData {
-  events: AnyTraceEvent[]
-  actionEvents: (ActionTraceEvent | AssertionTraceEvent)[]
-  screenshots: Map<string, string>
-  hierarchies: Map<string, string>
-  sources: Map<string, string>
-  network: NetworkEntry[]
-  /** File this test belongs to — used to scope clearing on re-runs. */
-  filePath?: string
-  /** Path to the trace ZIP on the server (set when test completes). */
-  tracePath?: string
-}
-
-function emptyTraceData(filePath?: string): TestTraceData {
-  return { events: [], actionEvents: [], screenshots: new Map(), hierarchies: new Map(), sources: new Map(), network: [], filePath };
-}
 
 // ─── App ───
 
@@ -80,15 +53,7 @@ function App() {
    */
   const autoFollowRef = useRef<'auto' | `worker:${number}` | 'manual'>('auto');
 
-  // Per-test trace data, keyed by test fullName
-  const [testTraces, setTestTraces] = useState<Map<string, TestTraceData>>(new Map());
-  // Ref tracks the currently-running test — a ref (not state) so the message
-  // handler always reads the latest value regardless of React batching.
-  const activeTestRef = useRef<string | null>(null);
-  const [_activeTestName, setActiveTestName] = useState<string | null>(null);
-  // Pending source files keyed by filename — accumulated from 'source' messages
-  // and snapshotted into per-test trace data when 'test-start' fires.
-  const pendingSourcesRef = useRef<Map<string, string>>(new Map());
+  const { testTraces, setTestTraces, activeTestRef, pendingSourcesRef } = useTraceData();
   const [pinnedIndex, setPinnedIndex] = useState(0);
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const selectedIndex = hoveredIndex ?? pinnedIndex;
@@ -177,16 +142,6 @@ function App() {
 
   const selectedEvent = actionEvents[selectedIndex];
 
-  /** Get or create trace data for a test. */
-  function getOrCreateTrace(testFullName: string, traces: Map<string, TestTraceData>): { data: TestTraceData; map: Map<string, TestTraceData> } {
-    const existing = traces.get(testFullName);
-    if (existing) return { data: existing, map: traces };
-    const data = emptyTraceData();
-    const map = new Map(traces);
-    map.set(testFullName, data);
-    return { data, map };
-  }
-
   const handleMessage = useCallback((msg: ServerMessage) => {
     switch (msg.type) {
       case 'test-tree':
@@ -229,7 +184,7 @@ function App() {
           });
         }
         activeTestRef.current = null;
-        setActiveTestName(null);
+
         pendingSourcesRef.current = new Map();
         setPinnedIndex(0);
         setHoveredIndex(null);
@@ -257,7 +212,7 @@ function App() {
         // Track the active test for trace data accumulation, but don't
         // auto-select in the tree — only failures trigger auto-selection.
         activeTestRef.current = msg.fullName;
-        setActiveTestName(msg.fullName);
+
         setPinnedIndex(0);
         setHoveredIndex(null);
         // Ensure trace data exists for this test, snapshotting its source file.
@@ -300,7 +255,7 @@ function App() {
           treeRef.current.setSelectedTestId(`${msg.filePath}::${msg.fullName}`);
           autoFollowRef.current = 'manual';
           activeTestRef.current = msg.fullName;
-          setActiveTestName(msg.fullName);
+  
           // Find the last failed action and pin it
           setTestTraces((prev) => {
             const trace = prev.get(msg.fullName);
