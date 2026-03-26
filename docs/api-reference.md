@@ -784,7 +784,7 @@ Swipes in the given direction, checking visibility between each attempt. Throws 
 
 | Option | Default | Description |
 |---|---|---|
-| `direction` | `"up"` | Swipe direction (`"up"` scrolls content up, `"down"` scrolls content down) |
+| `direction` | `"up"` | Swipe direction. `"up"` scrolls down (reveals content below), `"down"` scrolls up (reveals content above). |
 | `maxScrolls` | `5` | Maximum swipe attempts before throwing |
 | `speed` | `2000` | Swipe speed in pixels/second |
 

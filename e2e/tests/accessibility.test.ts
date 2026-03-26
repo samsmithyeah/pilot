@@ -4,8 +4,9 @@ import { AccessibilityScreen } from "../screens/accessibility.screen.js"
 describe("Accessibility screen", () => {
   beforeEach(async ({ device }) => {
     await device.restartApp()
-    await device.element(contentDesc("Accessibility")).scrollIntoView()
-    await device.tap(contentDesc("Accessibility"))
+    const accessibilityCard = device.element(contentDesc("Accessibility"))
+    await accessibilityCard.scrollIntoView()
+    await accessibilityCard.tap()
     await expect(device.element(text("Accessibility Testing"))).toBeVisible()
   })
 

@@ -130,6 +130,10 @@ export async function tracedAction(
     log.push(`Action completed successfully (${Date.now() - start}ms)`);
   }
 
+  // Snapshot action duration before the async capture so it reflects the
+  // actual action time, not action + screenshot overhead.
+  const duration = Date.now() - start;
+
   // Fire-and-forget the after-action capture so the test can proceed
   // immediately. This avoids consuming the visibility window of transient
   // UI elements (toasts, animations) with screenshot overhead.
@@ -139,7 +143,7 @@ export async function tracedAction(
   ).then((afterCaptures) => {
     ctx.collector.addActionEvent({
       category, action, selector: selectorStr, inputValue: extra?.inputValue,
-      duration: Date.now() - start, success, error, errorStack,
+      duration, success, error, errorStack,
       bounds, point, log,
       hasScreenshotBefore: !!beforeCaptures.screenshotBefore,
       hasScreenshotAfter: !!afterCaptures.screenshotAfter,
@@ -151,7 +155,7 @@ export async function tracedAction(
     // Best-effort: emit event without after-captures
     ctx.collector.addActionEvent({
       category, action, selector: selectorStr, inputValue: extra?.inputValue,
-      duration: Date.now() - start, success, error, errorStack,
+      duration, success, error, errorStack,
       bounds, point, log: [...log, 'After-action capture failed'],
       hasScreenshotBefore: !!beforeCaptures.screenshotBefore,
       hasScreenshotAfter: false,
