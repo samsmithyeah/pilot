@@ -27,6 +27,10 @@ export interface BoundingBox {
   height: number;
 }
 
+/** Timeout for quick visibility probes in scrollIntoView(). Short so the
+ *  loop isn't blocked waiting for an element that's simply off-screen. */
+const SCROLL_PROBE_TIMEOUT_MS = 1000;
+
 // ─── Filter options for .filter() ───
 
 export interface FilterOptions {
@@ -662,13 +666,9 @@ export class ElementHandle {
     const maxScrolls = options?.maxScrolls ?? 5;
     const speed = options?.speed ?? 2000;
 
-    // Quick visibility probe: use a short timeout so we don't block the loop
-    // waiting for an element that's simply off-screen.
-    const probeTimeoutMs = 1000;
-
     for (let i = 0; i <= maxScrolls; i++) {
       try {
-        const res = await this._client.findElement(this._selector, probeTimeoutMs);
+        const res = await this._client.findElement(this._selector, SCROLL_PROBE_TIMEOUT_MS);
         if (res.found && res.element?.visible) {
           await this._traceQuery(
             'scrollIntoView',
@@ -678,8 +678,14 @@ export class ElementHandle {
           );
           return;
         }
-      } catch {
-        // Element not in tree yet — keep scrolling
+      } catch (err) {
+        // findElement throws when the element isn't in the tree at all
+        // (e.g. virtualized list hasn't rendered it yet). This is expected
+        // during scrolling — swipe again and retry.
+        if (err instanceof Error && err.message.includes('UNAVAILABLE')) {
+          // gRPC transport error — daemon/agent is down, don't swallow
+          throw err;
+        }
       }
 
       if (i < maxScrolls) {
