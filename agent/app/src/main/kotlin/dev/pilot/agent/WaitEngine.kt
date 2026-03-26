@@ -15,7 +15,7 @@ import androidx.test.uiautomator.Until
 class WaitEngine(private val device: UiDevice) {
     companion object {
         private const val TAG = "PilotWait"
-        private const val STABILITY_WINDOW_MS = 300L
+        private const val STABILITY_WINDOW_MS = 100L
         private const val DEFAULT_IDLE_TIMEOUT_MS = 5000L
         private const val DEFAULT_ELEMENT_TIMEOUT_MS = 10000L
     }

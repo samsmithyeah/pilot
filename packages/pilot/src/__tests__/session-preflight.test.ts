@@ -36,7 +36,7 @@ describe('session-preflight', () => {
     const ctx = makeContext();
     await expect(ensureSessionReady(ctx, 'startup')).resolves.toBeUndefined();
     expect(ctx.client.ping).toHaveBeenCalledTimes(1);
-    expect(ctx.device.waitForIdle).toHaveBeenCalledWith(5_000);
+    expect(ctx.device.waitForIdle).toHaveBeenCalledWith(2_000);
   });
 
   it('restarts the session once when the agent is disconnected', async () => {

@@ -386,11 +386,29 @@ impl AgentResponse {
 // ─── Connection Management ───
 
 /// Manages the TCP connection to the on-device Pilot agent.
-#[derive(Debug)]
+///
+/// Keeps a persistent TCP stream and reuses it across commands to avoid the
+/// overhead of reconnecting on every request (~5-15ms per connect).  The stream
+/// is dropped and re-established only when a send/receive error occurs.
+///
+/// Wraps the stream in a `BufReader` so that buffered data is not lost between
+/// successive `read_line` calls.
 pub struct AgentConnection {
     connected: bool,
     device_serial: Option<String>,
     host_port: u16,
+    reader: Option<BufReader<TcpStream>>,
+}
+
+impl std::fmt::Debug for AgentConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentConnection")
+            .field("connected", &self.connected)
+            .field("device_serial", &self.device_serial)
+            .field("host_port", &self.host_port)
+            .field("has_stream", &self.reader.is_some())
+            .finish()
+    }
 }
 
 impl AgentConnection {
@@ -403,6 +421,7 @@ impl AgentConnection {
             connected: false,
             device_serial: None,
             host_port,
+            reader: None,
         }
     }
 
@@ -441,6 +460,7 @@ impl AgentConnection {
         }
         self.connected = false;
         self.device_serial = None;
+        self.reader = None;
         debug!("Agent disconnected");
     }
 
@@ -476,51 +496,88 @@ impl AgentConnection {
         }
     }
 
+    /// Ensure we have a live connection, connecting if needed.
+    async fn ensure_connected(&mut self) -> Result<()> {
+        if self.reader.is_none() {
+            let addr = format!("127.0.0.1:{}", self.host_port);
+            let stream = tokio::time::timeout(Duration::from_secs(5), async {
+                TcpStream::connect(&addr).await
+            })
+            .await
+            .map_err(|_| anyhow!("Timed out connecting to agent socket"))?
+            .context("Failed to connect to agent socket")?;
+            self.reader = Some(BufReader::new(stream));
+        }
+        Ok(())
+    }
+
     async fn try_send_command(
-        &self,
+        &mut self,
         command: &AgentCommand,
         timeout: Duration,
     ) -> Result<AgentResponse> {
-        let addr = format!("127.0.0.1:{}", self.host_port);
-        let mut stream = tokio::time::timeout(Duration::from_secs(5), async {
-            TcpStream::connect(&addr).await
-        })
-        .await
-        .map_err(|_| anyhow!("Timed out connecting to agent socket"))?
-        .context("Failed to connect to agent socket")?;
+        self.ensure_connected().await?;
 
         let request_id = uuid::Uuid::new_v4().to_string();
         let json_msg = command.to_json(&request_id);
         let payload = serde_json::to_string(&json_msg).context("Failed to serialize command")?;
         debug!(payload = %payload, "Sending command to agent");
 
-        // Write the command as a newline-delimited JSON message
-        stream
-            .write_all(payload.as_bytes())
-            .await
-            .context("Failed to write to agent socket")?;
-        stream
-            .write_all(b"\n")
-            .await
-            .context("Failed to write newline to agent socket")?;
-        stream.flush().await?;
+        // Write the command as a newline-delimited JSON message.
+        // Use get_mut() to access the underlying TcpStream for writes.
+        // If any I/O fails, drop the connection so the next call reconnects.
+        let reader = self.reader.as_mut().unwrap();
+        let stream = reader.get_mut();
+        let io_result: Result<()> = async {
+            stream
+                .write_all(payload.as_bytes())
+                .await
+                .context("Failed to write to agent socket")?;
+            stream
+                .write_all(b"\n")
+                .await
+                .context("Failed to write newline to agent socket")?;
+            stream
+                .flush()
+                .await
+                .context("Failed to flush agent socket")?;
+            Ok(())
+        }
+        .await;
 
-        // Read the response (newline-delimited JSON)
-        let reader = BufReader::new(&mut stream);
+        if let Err(e) = io_result {
+            self.reader = None;
+            return Err(e);
+        }
+
+        // Read the response (newline-delimited JSON) through the BufReader
+        // so buffered data from prior reads is not lost.
+        let reader = self.reader.as_mut().unwrap();
         let mut line = String::new();
 
-        tokio::time::timeout(timeout, async {
-            let mut reader = reader;
+        let read_result = tokio::time::timeout(timeout, async {
             reader
                 .read_line(&mut line)
                 .await
                 .context("Failed to read from agent socket")
         })
-        .await
-        .map_err(|_| anyhow!("Agent command timed out after {timeout:?}"))??;
+        .await;
+
+        match read_result {
+            Err(_) => {
+                self.reader = None;
+                bail!("Agent command timed out after {timeout:?}");
+            }
+            Ok(Err(e)) => {
+                self.reader = None;
+                return Err(e);
+            }
+            Ok(Ok(_)) => {}
+        }
 
         let line = line.trim();
         if line.is_empty() {
+            self.reader = None;
             bail!("Agent returned empty response");
         }
 
@@ -561,6 +618,7 @@ impl AgentConnection {
     async fn reconnect(&mut self, serial: &str) -> Result<()> {
         info!(serial, "Attempting to reconnect to agent");
         self.connected = false;
+        self.reader = None;
 
         // Re-establish port forwarding
         let _ = adb::remove_forward(serial, self.host_port).await;

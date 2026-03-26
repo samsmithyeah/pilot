@@ -18,11 +18,12 @@ export interface SessionPreflightContext {
   deviceSerial?: string
 }
 
-const DEFAULT_READY_TIMEOUT_MS = 5_000;
+const DEFAULT_READY_TIMEOUT_MS = 2_000;
 const DEFAULT_MAX_ATTEMPTS = 2;
 /** Time to wait for UIAutomator2 to produce a non-empty hierarchy on cold start. */
 const HIERARCHY_READY_TIMEOUT_MS = 10_000;
-const HIERARCHY_POLL_INTERVAL_MS = 500;
+const HIERARCHY_POLL_INITIAL_MS = 50;
+const HIERARCHY_POLL_MAX_MS = 500;
 
 export async function ensureSessionReady(
   ctx: SessionPreflightContext,
@@ -163,12 +164,14 @@ async function waitForHierarchy(
   client: SessionClient,
 ): Promise<{ hierarchyXml: string }> {
   const deadline = Date.now() + HIERARCHY_READY_TIMEOUT_MS;
+  let interval = HIERARCHY_POLL_INITIAL_MS;
   while (Date.now() < deadline) {
     const hierarchy = await client.getUiHierarchy();
     if (hierarchy.hierarchyXml.trim()) {
       return hierarchy;
     }
-    await new Promise(resolve => setTimeout(resolve, HIERARCHY_POLL_INTERVAL_MS));
+    await new Promise(resolve => setTimeout(resolve, interval));
+    interval = Math.min(interval * 2, HIERARCHY_POLL_MAX_MS);
   }
   throw new Error('UI hierarchy is empty (timed out waiting for UIAutomator2)');
 }

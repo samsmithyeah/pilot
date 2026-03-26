@@ -46,36 +46,42 @@ export async function tracedAction(
   const selectorStr = selector ? JSON.stringify(selectorToProto(selector)) : undefined;
   const log: string[] = [];
 
-  // Best-effort element bounds lookup for trace overlay
+  // Run bounds lookup and before-action capture in parallel — they use
+  // independent data paths (bounds goes through the agent socket, screenshot
+  // goes through ADB) so there is no contention.
   let bounds: { left: number; top: number; right: number; bottom: number } | undefined;
   let point: { x: number; y: number } | undefined;
-  if (selector && ctx.findElement) {
-    const lookupStart = Date.now();
-    try {
-      const res = await ctx.findElement(selector, 500);
-      if (res.found && res.element?.bounds) {
-        bounds = res.element.bounds;
-        log.push(`Element found at [${bounds.left},${bounds.top}][${bounds.right},${bounds.bottom}] (${Date.now() - lookupStart}ms)`);
-        if (category === 'tap') {
-          point = {
-            x: (bounds.left + bounds.right) / 2,
-            y: (bounds.top + bounds.bottom) / 2,
-          };
-          log.push(`Tap target: (${point.x}, ${point.y})`);
+
+  const boundsPromise = (selector && ctx.findElement)
+    ? (async () => {
+      const lookupStart = Date.now();
+      try {
+        const res = await ctx.findElement!(selector, 500);
+        if (res.found && res.element?.bounds) {
+          bounds = res.element.bounds;
+          log.push(`Element found at [${bounds.left},${bounds.top}][${bounds.right},${bounds.bottom}] (${Date.now() - lookupStart}ms)`);
+          if (category === 'tap') {
+            point = {
+              x: (bounds.left + bounds.right) / 2,
+              y: (bounds.top + bounds.bottom) / 2,
+            };
+            log.push(`Tap target: (${point.x}, ${point.y})`);
+          }
+        } else {
+          log.push(`Element lookup returned no match (${Date.now() - lookupStart}ms)`);
         }
-      } else {
-        log.push(`Element lookup returned no match (${Date.now() - lookupStart}ms)`);
+      } catch {
+        log.push(`Element lookup failed (${Date.now() - lookupStart}ms)`);
       }
-    } catch {
-      log.push(`Element lookup failed (${Date.now() - lookupStart}ms)`);
-    }
-  }
+    })()
+    : Promise.resolve();
 
   log.push('Capturing before screenshot + hierarchy');
 
-  const { actionIndex, captures: beforeCaptures } = await ctx.collector.captureBeforeAction(
-    ctx.takeScreenshot, ctx.captureHierarchy,
-  );
+  const [, { actionIndex, captures: beforeCaptures }] = await Promise.all([
+    boundsPromise,
+    ctx.collector.captureBeforeAction(ctx.takeScreenshot, ctx.captureHierarchy),
+  ]);
 
   const start = Date.now();
   let success = true;

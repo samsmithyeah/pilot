@@ -7,6 +7,7 @@
  */
 
 import * as fs from 'node:fs';
+import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import type {
   ActionTraceEvent,
@@ -301,11 +302,11 @@ export class TraceCollector {
 
     if (this.config.screenshots) {
       tasks.push(
-        takeScreenshot().then((data) => {
+        takeScreenshot().then(async (data) => {
           if (data) {
             const filename = `action-${String(actionIndex).padStart(3, '0')}-before.png`;
             const diskPath = path.join(this._tempDir, 'screenshots', filename);
-            fs.writeFileSync(diskPath, data);
+            await fsp.writeFile(diskPath, data);
             const capture: ScreenshotCapture = {
               archivePath: `screenshots/${filename}`,
               diskPath,
@@ -360,11 +361,11 @@ export class TraceCollector {
 
     if (this.config.screenshots) {
       tasks.push(
-        takeScreenshot().then((data) => {
+        takeScreenshot().then(async (data) => {
           if (data) {
             const filename = `action-${String(actionIndex).padStart(3, '0')}-after.png`;
             const diskPath = path.join(this._tempDir, 'screenshots', filename);
-            fs.writeFileSync(diskPath, data);
+            await fsp.writeFile(diskPath, data);
             const capture: ScreenshotCapture = {
               archivePath: `screenshots/${filename}`,
               diskPath,

@@ -129,14 +129,14 @@ class ActionExecutor(private val device: UiDevice) {
             // Select all (Ctrl+A) then delete
             element.clear()
         } catch (e: Exception) {
-            // Fallback: triple-click to select all, then press delete
+            // Fallback: move to start, select all, delete — using direct key
+            // injection instead of shell commands to avoid process fork overhead
             try {
                 element.click()
                 device.waitForIdle(200)
-                // Use shell to select all and delete
-                device.executeShellCommand("input keyevent KEYCODE_MOVE_HOME")
-                device.executeShellCommand("input keyevent --longpress KEYCODE_SHIFT_LEFT KEYCODE_MOVE_END")
-                device.executeShellCommand("input keyevent KEYCODE_DEL")
+                device.pressKeyCode(KeyEvent.KEYCODE_MOVE_HOME)
+                device.pressKeyCode(KeyEvent.KEYCODE_MOVE_END, KeyEvent.META_SHIFT_ON)
+                device.pressKeyCode(KeyEvent.KEYCODE_DEL)
             } catch (e2: Exception) {
                 throw ActionFailedException("Failed to clear text: ${e.message}")
             }

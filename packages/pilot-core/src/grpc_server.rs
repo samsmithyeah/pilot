@@ -1045,31 +1045,38 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
             }));
         }
 
-        // Give the agent a moment to start
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
-        // Connect to the agent
+        // Poll until the agent is reachable instead of a fixed 2s sleep.
+        // Try every 200ms for up to 5 seconds — most starts succeed within 500ms.
         let mut agent = self.agent.write().await;
-        match agent.connect(&serial).await {
-            Ok(()) => Ok(Response::new(proto::ActionResponse {
+        let poll_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut connected = false;
+        while tokio::time::Instant::now() < poll_deadline {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            if agent.connect(&serial).await.is_ok() {
+                connected = true;
+                break;
+            }
+        }
+
+        if connected {
+            return Ok(Response::new(proto::ActionResponse {
                 request_id,
                 success: true,
                 error_type: String::new(),
                 error_message: String::new(),
                 screenshot: Vec::new(),
-            })),
-            Err(e) => {
-                error!(error = %e, "Failed to connect to agent");
-                let screenshot = screenshot::capture_for_error(Some(&serial)).await;
-                Ok(Response::new(proto::ActionResponse {
-                    request_id,
-                    success: false,
-                    error_type: "AGENT_CONNECTION_FAILED".to_string(),
-                    error_message: e.to_string(),
-                    screenshot,
-                }))
-            }
+            }));
         }
+
+        error!("Agent did not become reachable within 5 seconds");
+        let screenshot = screenshot::capture_for_error(Some(&serial)).await;
+        Ok(Response::new(proto::ActionResponse {
+            request_id,
+            success: false,
+            error_type: "AGENT_START_FAILED".to_string(),
+            error_message: "Agent did not become reachable within 5 seconds".to_string(),
+            screenshot,
+        }))
     }
 
     async fn ping(

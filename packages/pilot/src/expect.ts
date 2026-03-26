@@ -23,7 +23,10 @@ import { selectorToProto } from "./selectors.js";
 import { extractSourceLocation, getActiveTraceCollector } from "./trace/trace-collector.js";
 
 const DEFAULT_ASSERTION_TIMEOUT_MS = 5_000;
-const POLL_INTERVAL_MS = 250;
+// Adaptive polling: start fast to catch quick state changes, back off to
+// reduce device load.  Sequence: 50 → 100 → 200 → 400 → 500 → 500 …
+const POLL_INITIAL_INTERVAL_MS = 50;
+const POLL_MAX_INTERVAL_MS = 500;
 // Short server-side timeout for element lookups inside assertion polls.
 // Must be > 0 because the Rust daemon treats 0 as "use 30s default".
 // 100ms was too aggressive under multi-emulator load and produced false
@@ -33,6 +36,9 @@ const POLL_FIND_TIMEOUT_MS = 500;
 /**
  * Repeatedly call `check` until it returns the expected value or the timeout
  * is exceeded.
+ *
+ * Uses exponential back-off (50ms → 500ms cap) so fast UI transitions are
+ * caught immediately while sustained polling doesn't overload the device.
  *
  * @param negated When true, the poll succeeds as soon as `check` returns
  *   `false` — used for negated assertions (`.not.toBeVisible()` etc.) so they
@@ -47,10 +53,12 @@ async function poll(
 ): Promise<boolean> {
   const target = !negated; // true = want check() to be true; false = want false
   const deadline = Date.now() + timeoutMs;
+  let interval = POLL_INITIAL_INTERVAL_MS;
   while (Date.now() < deadline) {
     const value = await check();
     if (value === target) return value;
-    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+    await new Promise((r) => setTimeout(r, interval));
+    interval = Math.min(interval * 2, POLL_MAX_INTERVAL_MS);
   }
   // Final attempt
   return check();
@@ -289,7 +297,7 @@ function wrapAssertionWithTrace(
         soft: false,
         negated,
         duration: Date.now() - start,
-        attempts: Math.max(1, Math.round((Date.now() - start) / POLL_INTERVAL_MS)),
+        attempts: Math.max(1, Math.round((Date.now() - start) / POLL_INITIAL_INTERVAL_MS)),
         error: timeoutError,
         sourceLocation,
         hasScreenshotBefore: !!beforeCaptures.screenshotBefore,
@@ -317,7 +325,7 @@ function wrapAssertionWithTrace(
 
     // After capture (success or failure)
     const duration = Date.now() - start;
-    const attempts = Math.max(1, Math.round(duration / POLL_INTERVAL_MS));
+    const attempts = Math.max(1, Math.round(duration / POLL_INITIAL_INTERVAL_MS));
     const afterCaptures = await trace.collector.captureAfterAction(
       actionIndex,
       trace.takeScreenshot,
@@ -1413,7 +1421,7 @@ function createPollAssertions(
   options: PollOptions,
 ): GenericAssertions {
   const timeout = options.timeout ?? DEFAULT_ASSERTION_TIMEOUT_MS;
-  const intervals = options.intervals ?? [POLL_INTERVAL_MS];
+  const intervals = options.intervals ?? [POLL_INITIAL_INTERVAL_MS];
 
   // Return a GenericAssertions where each method polls until passing
   function wrapAssertion(
