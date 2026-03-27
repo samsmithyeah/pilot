@@ -279,11 +279,19 @@ class SnapshotElementFinder {
             if placeholderValue != hint { return false }
         }
 
-        // Role selector
+        // Role selector — match by element type OR accessibility traits.
+        // React Native's Pressable/TouchableOpacity with accessibilityRole="button"
+        // sets the UIAccessibilityTraitButton trait but the element type stays .other.
+        // We need to check both to match cross-platform role() selectors.
         if let role = selector.role {
             let elType = XCUIElement.ElementType(rawValue: elTypeRaw) ?? .other
             let types = (try? RoleMapping.elementTypes(for: role)) ?? []
-            if !types.contains(elType) { return false }
+            let traits = node["traits"] as? UInt64 ?? 0
+
+            let typeMatch = types.contains(elType)
+            let traitMatch = !typeMatch && RoleMapping.matchesTrait(role: role, traits: traits)
+
+            if !typeMatch && !traitMatch { return false }
 
             // Filter by name if provided
             if let name = selector.name {

@@ -54,6 +54,31 @@ enum RoleMapping {
         return types
     }
 
+    /// Check if a UIAccessibilityTraits bitmask matches a role.
+    /// This handles React Native components (Pressable, TouchableOpacity) that
+    /// set accessibilityRole but render as generic UIViews (.other element type).
+    static func matchesTrait(role: String, traits: UInt64) -> Bool {
+        // UIAccessibilityTrait constants (from UIKit)
+        let buttonTrait: UInt64 = 1 << 0           // UIAccessibilityTraitButton
+        let linkTrait: UInt64 = 1 << 1              // UIAccessibilityTraitLink
+        let headerTrait: UInt64 = 1 << 16           // UIAccessibilityTraitHeader
+        let searchFieldTrait: UInt64 = 1 << 20      // UIAccessibilityTraitSearchField
+        let imageTrait: UInt64 = 1 << 2             // UIAccessibilityTraitImage
+        let staticTextTrait: UInt64 = 1 << 6        // UIAccessibilityTraitStaticText
+        let adjustableTrait: UInt64 = 1 << 17       // UIAccessibilityTraitAdjustable (slider/picker)
+
+        switch role.lowercased() {
+        case "button": return traits & buttonTrait != 0
+        case "link": return traits & linkTrait != 0
+        case "heading", "header": return traits & headerTrait != 0
+        case "image": return traits & imageTrait != 0
+        case "text": return traits & staticTextTrait != 0
+        case "seekbar", "slider": return traits & adjustableTrait != 0
+        case "searchfield": return traits & searchFieldTrait != 0
+        default: return false
+        }
+    }
+
     /// Convert an XCUIElement.ElementType to a string name for the className field.
     /// Uses the XCUIElementType naming convention (e.g., "XCUIElementTypeButton").
     static func typeName(for elementType: XCUIElement.ElementType) -> String {

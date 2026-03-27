@@ -1,14 +1,15 @@
 # Pilot
 
 Mobile app testing framework with a Playwright-inspired API. Three-tier architecture:
-**TypeScript SDK** (test runner + assertions) → **gRPC** → **Rust daemon** (pilot-core) → **ADB/socket** → **Kotlin on-device agent** (UIAutomator2).
+**TypeScript SDK** (test runner + assertions) → **gRPC** → **Rust daemon** (pilot-core) → **ADB/simctl + socket** → **On-device agent** (Android: Kotlin/UIAutomator2, iOS: Swift/XCUITest).
 
 ## Project structure
 
 ```
 packages/pilot/        # TypeScript SDK — selectors, element handles, assertions, runner, CLI
-packages/pilot-core/   # Rust daemon — gRPC server, ADB bridge, device management
+packages/pilot-core/   # Rust daemon — gRPC server, ADB/simctl bridge, device management
 agent/                 # Android Kotlin agent — UIAutomator2 instrumentation
+ios-agent/             # iOS Swift agent — XCUITest instrumentation
 proto/pilot.proto      # gRPC contract (single proto file, buf for linting)
 docs/                  # User-facing documentation
 test-app/              # React Native (Expo) test app for E2E testing
@@ -42,6 +43,15 @@ Requires `protobuf-compiler` installed for tonic-build.
 ```bash
 ./gradlew assembleDebug
 ./gradlew ktlintCheck
+```
+
+### iOS agent (`ios-agent/`)
+```bash
+cd ios-agent && ./create-xcode-project.sh    # first time only
+xcodebuild build-for-testing \
+  -project PilotAgent.xcodeproj \
+  -scheme PilotAgentUITests \
+  -destination 'platform=iOS Simulator,name=iPhone 16'
 ```
 
 ### Proto (`proto/`)

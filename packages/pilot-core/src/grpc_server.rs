@@ -1448,12 +1448,11 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
                 // Restart the XCUITest agent (which also restarts the app)
                 let config = self.ios_agent_config.read().await.clone();
                 if let Some(config) = config {
-                    // Kill old agent, terminate app, relaunch app, start fresh agent.
+                    // Kill old agent, terminate app, start fresh agent.
+                    // The runner's app.activate() handles relaunching the target app.
                     info!("Restarting iOS agent for launchApp");
                     ios::agent_launch::kill_existing_agents_on(&serial).await;
                     let _ = ios::device::terminate_app(&serial, &req.package_name).await;
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                    let _ = ios::device::launch_app(&serial, &req.package_name).await;
                     tokio::time::sleep(Duration::from_millis(500)).await;
                     if let Err(e) = ios::agent_launch::start_agent_fresh(
                         &serial,
@@ -1483,13 +1482,6 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
                             screenshot,
                         }));
                     }
-                    drop(agent);
-                    // Ensure the target app is in the foreground. The XCUITest
-                    // runner app may have taken focus during startup, and
-                    // app.activate() in the runner may not reliably bring the
-                    // target app back on Xcode 26.
-                    let _ = ios::device::launch_app(&serial, &req.package_name).await;
-                    tokio::time::sleep(Duration::from_millis(300)).await;
                 } else {
                     // No stored config — just try simctl launch
                     if let Err(e) = ios::device::launch_app(&serial, &req.package_name).await {
@@ -1693,16 +1685,17 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
             Platform::Ios => {
                 // Full agent restart: terminate app, kill the XCUITest
                 // runner, relaunch app, start a fresh agent and reconnect.
-                // This is slower (~8s) but reliable — the accessibility
-                // bridge is fully re-established.
+                // This is the only reliable approach on iOS — the XCUITest
+                // runner loses its accessibility bridge when the target app
+                // is terminated, so a fresh runner is needed.
                 let config = self.ios_agent_config.read().await.clone();
                 if let Some(config) = config {
-                    info!("Restarting iOS agent for restartApp");
                     ios::agent_launch::kill_existing_agents_on(&serial).await;
                     let _ = ios::device::terminate_app(&serial, &req.package_name).await;
                     tokio::time::sleep(Duration::from_millis(500)).await;
-                    let _ = ios::device::launch_app(&serial, &req.package_name).await;
-                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    // Don't simctl launch here — the runner's app.activate()
+                    // handles launching the app fresh. Using both causes the
+                    // runner to fight with simctl over app lifecycle.
                     if let Err(e) = ios::agent_launch::start_agent_fresh(
                         &serial,
                         &config.xctestrun_path,
@@ -1730,10 +1723,6 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
                             screenshot,
                         }));
                     }
-                    drop(agent);
-                    // Ensure the target app is in the foreground
-                    let _ = ios::device::launch_app(&serial, &req.package_name).await;
-                    tokio::time::sleep(Duration::from_millis(300)).await;
                 } else {
                     let _ = ios::device::terminate_app(&serial, &req.package_name).await;
                     if let Err(e) = ios::device::launch_app(&serial, &req.package_name).await {

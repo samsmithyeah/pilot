@@ -393,12 +393,13 @@ class CommandHandler {
         // ─── App Lifecycle ───
 
         case "launchApp":
-            // Relaunch the app via XCUIApplication.launch().
-            // This terminates any running instance and starts a fresh
-            // process, re-establishing the accessibility bridge without
-            // requiring an agent restart.
-            app.launch()
-            Thread.sleep(forTimeInterval: 0.5)
+            // Reactivate the app via XCUIApplication.activate().
+            // If the app was terminated, this launches a fresh process.
+            // If running in background, this brings it to foreground.
+            // Unlike launch(), activate() doesn't trigger a full
+            // quiescence wait on the launch sequence.
+            app.activate()
+            Thread.sleep(forTimeInterval: 0.3)
             return ["success": true]
 
         case "terminateApp":

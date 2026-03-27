@@ -21,10 +21,7 @@ describe("Login screen", () => {
 
   test("email field is editable", async ({ device }) => {
     const login = new LoginScreen(device)
-    await expect(login.emailField).toHaveAttribute(
-      "className",
-      "android.widget.EditText",
-    )
+    await expect(login.emailField).toBeEnabled()
   })
 
   test("sign in button starts disabled", async ({ device }) => {

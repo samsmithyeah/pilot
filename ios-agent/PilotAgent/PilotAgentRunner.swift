@@ -73,8 +73,11 @@ class PilotAgentRunner: XCTestCase {
             return false
         }
 
-        app.activate()
-        // Step 3: Property-based disable on this instance AFTER activate().
+        // launch() always starts fresh (discards saved state like navigation).
+        // activate() would restore the previous state, causing tests to land
+        // on whichever screen was last visible instead of the home screen.
+        app.launch()
+        // Step 3: Property-based disable on this instance AFTER launch().
         QuiescenceDisabler.disable(for: app)
         NSLog("[PilotAgent] Quiescence disabled")
 
