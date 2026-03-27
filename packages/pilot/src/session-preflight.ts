@@ -58,9 +58,10 @@ export async function launchConfiguredApp(
   }
 
   if (ctx.config.platform === 'ios') {
-    // On iOS, restart the app for file-level isolation.
-    // Use restartApp which does a full agent restart — terminate the
-    // app, kill the XCUITest runner, relaunch, and start a fresh agent.
+    // On iOS, clear data for isolation then restart the app.
+    // clearAppData removes AsyncStorage, caches, etc. without uninstalling.
+    // restartApp does a full agent restart — terminate, kill runner, relaunch.
+    await ctx.device.clearAppData(ctx.config.package);
     await ctx.device.restartApp(ctx.config.package);
     return;
   }
