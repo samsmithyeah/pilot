@@ -123,7 +123,7 @@ export default function DialogsScreen() {
 
       {/* Snackbar overlay */}
       {snackbarVisible && (
-        <View style={styles.snackbar} testID="snackbar">
+        <View style={styles.snackbar} accessibilityRole="alert" testID="snackbar">
           <Text style={styles.snackbarText}>{snackbarMessage}</Text>
           <TouchableOpacity
             onPress={() => setSnackbarVisible(false)}

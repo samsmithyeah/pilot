@@ -34,6 +34,7 @@ export default function ListScreen() {
         value={filter}
         onChangeText={setFilter}
         placeholder="Search items..."
+        accessibilityRole="search"
         accessibilityLabel="Search"
         accessibilityHint="Filter the list by name or category"
         testID="search-input"

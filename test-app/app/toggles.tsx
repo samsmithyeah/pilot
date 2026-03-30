@@ -30,6 +30,7 @@ export default function TogglesScreen() {
           onValueChange={setDarkMode}
           accessibilityRole="switch"
           accessibilityLabel="Dark Mode"
+          accessibilityState={{ checked: darkMode }}
           testID="dark-mode-switch"
         />
       </View>
@@ -41,6 +42,7 @@ export default function TogglesScreen() {
           onValueChange={setNotifications}
           accessibilityRole="switch"
           accessibilityLabel="Notifications"
+          accessibilityState={{ checked: notifications }}
           testID="notifications-switch"
         />
       </View>
@@ -52,6 +54,7 @@ export default function TogglesScreen() {
           onValueChange={setSound}
           accessibilityRole="switch"
           accessibilityLabel="Sound"
+          accessibilityState={{ checked: sound }}
           testID="sound-switch"
         />
       </View>
@@ -63,6 +66,7 @@ export default function TogglesScreen() {
           onValueChange={setVibration}
           accessibilityRole="switch"
           accessibilityLabel="Vibration"
+          accessibilityState={{ checked: vibration }}
           testID="vibration-switch"
         />
       </View>

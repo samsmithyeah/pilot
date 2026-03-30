@@ -21,7 +21,7 @@ const SECTIONS = [
 
 export default function ScrollScreen() {
   return (
-    <ScrollView style={styles.container} accessibilityRole="scrollbar" testID="main-scroll">
+    <ScrollView style={styles.container} testID="main-scroll">
       <Text style={styles.heading} accessibilityRole="header">
         Scroll Testing
       </Text>
