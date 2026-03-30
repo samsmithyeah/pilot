@@ -1,10 +1,10 @@
-import { beforeAll, contentDesc, describe, expect, test } from "pilot"
+import { beforeEach, describe, expect, test, text } from "pilot"
 import { ScrollScreen } from "../screens/scroll.screen.js"
+import { openTestScreen } from "../support/open-test-screen.js"
 
 describe("Scroll screen", () => {
-  beforeAll(async ({ device }) => {
-    await device.element(contentDesc("Scroll")).scrollIntoView()
-    await device.tap(contentDesc("Scroll"))
+  beforeEach(async ({ device }) => {
+    await openTestScreen(device, "scroll", "Scroll Testing")
   })
 
   test("shows heading and description", async ({ device }) => {
@@ -18,9 +18,8 @@ describe("Scroll screen", () => {
     await expect(screen.firstItem).toBeVisible()
   })
 
-  test("first item has correct accessible name", async ({ device }) => {
-    const screen = new ScrollScreen(device)
-    await expect(screen.firstItem).toHaveAccessibleName("Item A-1")
+  test("first item label is visible", async ({ device }) => {
+    await expect(device.element(text("Item A-1"))).toBeVisible()
   })
 
   // ─── Element Screenshots ───

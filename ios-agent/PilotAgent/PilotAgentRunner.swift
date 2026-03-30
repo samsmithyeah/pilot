@@ -14,6 +14,7 @@ class PilotAgentRunner: XCTestCase {
     private static let defaultPort: UInt16 = 18700
     private static let envTargetBundleId = "PILOT_TARGET_BUNDLE_ID"
     private static let envPort = "PILOT_AGENT_PORT"
+    private static let envAttachToRunningApp = "PILOT_ATTACH_TO_RUNNING_APP"
 
     private var socketServer: SocketServer?
 
@@ -23,6 +24,7 @@ class PilotAgentRunner: XCTestCase {
     func testRunAgent() {
         let bundleId = ProcessInfo.processInfo.environment[Self.envTargetBundleId] ?? ""
         let port = UInt16(ProcessInfo.processInfo.environment[Self.envPort] ?? "") ?? Self.defaultPort
+        let attachToRunningApp = ProcessInfo.processInfo.environment[Self.envAttachToRunningApp] == "1"
 
         NSLog("[PilotAgent] Starting with target bundle: \(bundleId), port: \(port)")
 
@@ -73,10 +75,14 @@ class PilotAgentRunner: XCTestCase {
             return false
         }
 
-        // launch() always starts fresh (discards saved state like navigation).
-        // activate() would restore the previous state, causing tests to land
-        // on whichever screen was last visible instead of the home screen.
-        app.launch()
+        if attachToRunningApp {
+            // When the daemon has already relaunched the app via simctl, attach
+            // without triggering another runner-mediated launch. This avoids
+            // Xcode 26 restoring stale navigation state during restartApp().
+            app.activate()
+        } else {
+            app.launch()
+        }
         // Step 3: Property-based disable on this instance AFTER launch().
         QuiescenceDisabler.disable(for: app)
         NSLog("[PilotAgent] Quiescence disabled")

@@ -241,7 +241,72 @@ enum EventSynthesizer {
             record.perform(addPathSel, with: path)
         }
 
-        return dispatchViaDaemonSession(record) || dispatchSync(record) || dispatchViaDevice(record)
+        // Swipe/drag paths can stall waiting for the daemon callback on Xcode 26.
+        // Prefer synchronous/local dispatch first so a stuck daemon reply does not
+        // burn the full action timeout before we try the working fallbacks.
+        return dispatchSync(record) || dispatchViaDevice(record) || dispatchViaDaemonSession(record)
+    }
+
+    /// Drag from one point to another using a touch-down, short hold, move, and lift.
+    /// Unlike swipe(), this intentionally avoids async fallback dispatchers because
+    /// they are the part that tends to wedge the XCTest session on Xcode 26.
+    static func drag(from start: CGPoint, to end: CGPoint, holdDuration: TimeInterval = 0.15) -> Bool {
+        guard let pathClass = objc_lookUpClass("XCPointerEventPath"),
+              let recordClass = objc_lookUpClass("XCSynthesizedEventRecord")
+        else { return false }
+
+        let pathObj = pathClass.alloc() as! NSObject
+        let initSel = NSSelectorFromString("initForTouchAtPoint:offset:")
+        guard pathObj.responds(to: initSel) else { return false }
+
+        let initImp = pathObj.method(for: initSel)
+        typealias InitMethod = @convention(c) (NSObject, Selector, CGPoint, TimeInterval) -> NSObject
+        let path = unsafeBitCast(initImp, to: InitMethod.self)(pathObj, initSel, start, 0.0)
+
+        let moveSel = NSSelectorFromString("moveToPoint:atOffset:")
+        if path.responds(to: moveSel) {
+            let moveImp = path.method(for: moveSel)
+            typealias MoveMethod = @convention(c) (NSObject, Selector, CGPoint, TimeInterval) -> Void
+            let moveFunc = unsafeBitCast(moveImp, to: MoveMethod.self)
+            let nudge = CGPoint(
+                x: start.x + (end.x - start.x) * 0.08,
+                y: start.y + (end.y - start.y) * 0.08
+            )
+            let midpoint = CGPoint(x: (start.x + end.x) / 2, y: (start.y + end.y) / 2)
+            moveFunc(path, moveSel, nudge, holdDuration + 0.04)
+            moveFunc(path, moveSel, midpoint, holdDuration + 0.08)
+            moveFunc(path, moveSel, end, holdDuration + 0.2)
+        }
+
+        let liftSel = NSSelectorFromString("liftUpAtOffset:")
+        if path.responds(to: liftSel) {
+            let liftImp = path.method(for: liftSel)
+            typealias LiftMethod = @convention(c) (NSObject, Selector, TimeInterval) -> Void
+            unsafeBitCast(liftImp, to: LiftMethod.self)(path, liftSel, holdDuration + 0.24)
+        }
+
+        let recordObj = recordClass.alloc() as! NSObject
+        let recordInitSel = NSSelectorFromString("initWithName:interfaceOrientation:")
+        let record: NSObject
+        if recordObj.responds(to: recordInitSel) {
+            let imp = recordObj.method(for: recordInitSel)
+            typealias RMethod = @convention(c) (NSObject, Selector, NSString, Int) -> NSObject
+            record = unsafeBitCast(imp, to: RMethod.self)(
+                recordObj,
+                recordInitSel,
+                "pilot-drag" as NSString,
+                UIInterfaceOrientation.portrait.rawValue
+            )
+        } else {
+            record = (recordClass as! NSObject.Type).init()
+        }
+
+        let addPathSel = NSSelectorFromString("addPointerEventPath:")
+        if record.responds(to: addPathSel) {
+            record.perform(addPathSel, with: path)
+        }
+
+        return dispatchSync(record)
     }
 
     /// Long-press at a screen coordinate.

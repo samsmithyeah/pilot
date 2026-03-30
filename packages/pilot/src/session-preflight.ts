@@ -4,12 +4,12 @@ import type { LaunchAppOptions, PilotGrpcClient } from './grpc-client.js';
 import { text } from './selectors.js';
 import { detectBlockingSystemDialog, dismissSystemDialogsViaAdb } from './emulator.js';
 
-type SessionDevice = Pick<Device, 'startAgent' | 'terminateApp' | 'launchApp' | 'restartApp' | 'waitForIdle' | 'currentPackage' | 'tap' | 'pressBack' | 'clearAppData'>
+type SessionDevice = Pick<Device, 'startAgent' | 'terminateApp' | 'launchApp' | 'restartApp' | 'waitForIdle' | 'currentPackage' | 'tap' | 'pressBack' | 'clearAppData' | 'openDeepLink'>
 type SessionClient = Pick<PilotGrpcClient, 'ping' | 'getUiHierarchy'>
 
 export interface SessionPreflightContext {
   label: string
-  config: Pick<PilotConfig, 'package' | 'activity' | 'platform'>
+  config: Pick<PilotConfig, 'package' | 'activity' | 'platform' | 'resetAppDeepLink' | 'resetAppWaitMs'>
   device: SessionDevice
   client: SessionClient
   agentApkPath?: string
@@ -24,6 +24,7 @@ const DEFAULT_MAX_ATTEMPTS = 2;
 /** Time to wait for UIAutomator2 to produce a non-empty hierarchy on cold start. */
 const HIERARCHY_READY_TIMEOUT_MS = 10_000;
 const HIERARCHY_POLL_INTERVAL_MS = 500;
+const DEFAULT_SOFT_RESET_WAIT_MS = 750;
 
 export async function ensureSessionReady(
   ctx: SessionPreflightContext,
@@ -51,13 +52,21 @@ export async function ensureSessionReady(
 export async function launchConfiguredApp(
   ctx: SessionPreflightContext,
   phase: string,
+  options: { allowSoftReset?: boolean } = {},
 ): Promise<void> {
   if (!ctx.config.package) {
     await ensureSessionReady(ctx, phase);
     return;
   }
 
+  const allowSoftReset = options.allowSoftReset ?? true;
   if (ctx.config.platform === 'ios') {
+    if (allowSoftReset && ctx.config.resetAppDeepLink) {
+      await softResetAppViaDeepLink(ctx);
+      await ensureSessionReady(ctx, phase);
+      return;
+    }
+
     // On iOS, clear data for isolation then restart the app.
     // clearAppData removes AsyncStorage, caches, etc. without uninstalling.
     // restartApp does a full agent restart — terminate, kill runner, relaunch.
@@ -143,6 +152,29 @@ async function recoverSession(ctx: SessionPreflightContext): Promise<void> {
   await ctx.device.launchApp(ctx.config.package, launchOptions(ctx.config));
 }
 
+async function softResetAppViaDeepLink(ctx: SessionPreflightContext): Promise<void> {
+  const resetDeepLink = ctx.config.resetAppDeepLink!;
+  await ctx.device.openDeepLink(resetDeepLink);
+
+  const waitMs = ctx.config.resetAppWaitMs ?? DEFAULT_SOFT_RESET_WAIT_MS;
+  try {
+    await ctx.device.waitForIdle(waitMs);
+  } catch {
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+  }
+
+  const homeDeepLink = getHomeDeepLink(resetDeepLink);
+  if (!homeDeepLink || homeDeepLink === resetDeepLink) return;
+
+  await ctx.device.openDeepLink(homeDeepLink);
+
+  try {
+    await ctx.device.waitForIdle(waitMs);
+  } catch {
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+  }
+}
+
 async function dismissBlockingSystemUi(ctx: SessionPreflightContext): Promise<void> {
   let hierarchy = '';
   try {
@@ -194,4 +226,16 @@ async function waitForHierarchy(
 function formatError(err: unknown): string {
   if (err instanceof Error) return err.message;
   return String(err);
+}
+
+function getHomeDeepLink(uri: string): string | null {
+  try {
+    const parsed = new URL(uri);
+    parsed.pathname = '/';
+    parsed.search = '';
+    parsed.hash = '';
+    return parsed.toString();
+  } catch {
+    return null;
+  }
 }

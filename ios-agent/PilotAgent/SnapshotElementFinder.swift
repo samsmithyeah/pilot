@@ -80,12 +80,22 @@ class SnapshotElementFinder {
 
             let elementId = UUID().uuidString
             let label = nodeDict["label"] as? String ?? ""
+            let title = nodeDict["title"] as? String ?? ""
             let identifier = nodeDict["identifier"] as? String ?? ""
             let elTypeRaw = nodeDict["elementType"] as? UInt ?? 0
             let elType = XCUIElement.ElementType(rawValue: elTypeRaw) ?? .other
             let className = RoleMapping.typeName(for: elType)
             let role = RoleMapping.resolveRole(for: elType)
             let isEnabled = nodeDict["enabled"] as? Bool ?? true
+            let value = nodeDict["value"] as? String
+            let isSelected = nodeDict["selected"] as? Bool ?? false
+            let isChecked = checkedState(
+                for: elType,
+                value: value,
+                selected: isSelected
+            )
+            let snapshotFocused = (nodeDict["hasFocus"] as? Bool)
+                ?? (nodeDict["hasKeyboardFocus"] as? Bool)
 
             // Cache the snapshot bounds for fast coordinate-based actions.
             lock.lock()
@@ -96,40 +106,44 @@ class SnapshotElementFinder {
             // This is deferred — the query object is created but not evaluated until
             // a property (like .isHittable) is accessed.
             cacheQueryElement(elementId: elementId, selector: selector)
+            let resolvedFocus = snapshotFocused ?? ((try? getElement(elementId).hasFocus) ?? false)
 
             // For text fields, prefer the "value" property (typed text) over "label"
             // (accessibility label). React Native TextInput has label="Email" and
             // value="test@example.com" — we want the value for toHaveText assertions.
-            let value = nodeDict["value"] as? String
             let placeholderValue = nodeDict["placeholderValue"] as? String
             let displayText: String?
             if let value = value, !value.isEmpty {
                 displayText = value
+            } else if !title.isEmpty {
+                displayText = title
             } else if !label.isEmpty {
                 displayText = label
             } else {
                 displayText = nil
             }
 
+            let viewportRatio = computeViewportRatio(bounds, screenSize: screenSize)
+
             return ElementInfo(
                 elementId: elementId,
                 className: className,
                 text: displayText,
-                contentDescription: label.isEmpty ? nil : label,
+                contentDescription: label.isEmpty ? (title.isEmpty ? nil : title) : label,
                 resourceId: identifier.isEmpty ? nil : identifier,
                 hint: nil,
                 bounds: bounds,
                 isEnabled: isEnabled,
-                isChecked: false,
-                isFocused: false,
+                isChecked: isChecked,
+                isFocused: resolvedFocus,
                 isClickable: frame.width > 0 && frame.height > 0,
                 isFocusable: true,
                 isScrollable: elType == .scrollView || elType == .table || elType == .collectionView,
-                isVisible: frame.width > 0 && frame.height > 0,
-                isSelected: false,
+                isVisible: viewportRatio > 0,
+                isSelected: isSelected,
                 childCount: (nodeDict["children"] as? [[String: Any]])?.count ?? 0,
                 role: role,
-                viewportRatio: computeViewportRatio(bounds, screenSize: screenSize)
+                viewportRatio: viewportRatio
             )
         }
     }
@@ -234,11 +248,14 @@ class SnapshotElementFinder {
 
     private func matchesSelector(_ node: [String: Any], selector: ElementSelector) -> Bool {
         let label = node["label"] as? String ?? ""
+        let title = node["title"] as? String ?? ""
         let identifier = node["identifier"] as? String ?? ""
         let value = node["value"] as? String ?? ""
         let placeholderValue = node["placeholderValue"] as? String ?? ""
-        let elTypeRaw = node["elementType"] as? UInt ?? 0
+        let elTypeRaw = parseUInt(node["elementType"]) ?? 0
+        let elType = XCUIElement.ElementType(rawValue: elTypeRaw) ?? .other
         let isEnabled = node["enabled"] as? Bool ?? true
+        let isSelected = node["selected"] as? Bool ?? false
 
         // Text selector — exact match, OR match within iOS's auto-concatenated
         // labels. iOS touchable components merge child text into a single label
@@ -247,20 +264,25 @@ class SnapshotElementFinder {
         // and also lets `text("Text inputs, buttons, focus/blur, keyboard")`
         // match the second child's text.
         if let text = selector.text {
-            let exactMatch = label == text || value == text
-            let containsAsChild = !exactMatch && containsChildText(label, childText: text)
+            let exactMatch = label == text || title == text || value == text
+            let containsAsChild = !exactMatch
+                && (containsChildText(label, childText: text) || containsChildText(title, childText: text))
             if !exactMatch && !containsAsChild { return false }
         }
 
         // TextContains selector
         if let textContains = selector.textContains {
-            if !label.contains(textContains) && !value.contains(textContains) { return false }
+            if !label.contains(textContains) && !title.contains(textContains) && !value.contains(textContains) {
+                return false
+            }
         }
 
         // ContentDesc selector (maps to label on iOS)
         if let contentDesc = selector.contentDesc {
-            let exactMatch = label == contentDesc
-            let containsAsChild = !exactMatch && containsChildText(label, childText: contentDesc)
+            let exactMatch = label == contentDesc || title == contentDesc
+            let containsAsChild = !exactMatch
+                && (containsChildText(label, childText: contentDesc)
+                    || containsChildText(title, childText: contentDesc))
             if !exactMatch && !containsAsChild { return false }
         }
 
@@ -284,9 +306,8 @@ class SnapshotElementFinder {
         // sets the UIAccessibilityTraitButton trait but the element type stays .other.
         // We need to check both to match cross-platform role() selectors.
         if let role = selector.role {
-            let elType = XCUIElement.ElementType(rawValue: elTypeRaw) ?? .other
             let types = (try? RoleMapping.elementTypes(for: role)) ?? []
-            let traits = node["traits"] as? UInt64 ?? 0
+            let traits = parseUInt64(node["traits"]) ?? 0
 
             let typeMatch = types.contains(elType)
             let traitMatch = !typeMatch && RoleMapping.matchesTrait(role: role, traits: traits)
@@ -295,13 +316,15 @@ class SnapshotElementFinder {
 
             // Filter by name if provided
             if let name = selector.name {
-                if label != name { return false }
+                let exactMatch = label == name || title == name
+                let containsAsChild = !exactMatch
+                    && (containsChildText(label, childText: name) || containsChildText(title, childText: name))
+                if !exactMatch && !containsAsChild { return false }
             }
         }
 
         // ClassName selector
         if let className = selector.className {
-            let elType = XCUIElement.ElementType(rawValue: elTypeRaw) ?? .other
             let typeName = RoleMapping.typeName(for: elType)
             if typeName != className { return false }
         }
@@ -309,6 +332,23 @@ class SnapshotElementFinder {
         // Enabled filter
         if let wantEnabled = selector.enabled {
             if isEnabled != wantEnabled { return false }
+        }
+
+        if let wantChecked = selector.checked {
+            let isChecked = checkedState(
+                for: elType,
+                value: value,
+                selected: isSelected
+            )
+            if isChecked != wantChecked { return false }
+        }
+
+        // Focus filter
+        if let wantFocused = selector.focused {
+            let isFocused = (node["hasFocus"] as? Bool)
+                ?? (node["hasKeyboardFocus"] as? Bool)
+                ?? false
+            if isFocused != wantFocused { return false }
         }
 
         // Must have at least one positive match criterion
@@ -333,11 +373,47 @@ class SnapshotElementFinder {
         return .zero
     }
 
+    private func parseUInt(_ raw: Any?) -> UInt? {
+        guard let raw else { return nil }
+        switch raw {
+        case let value as UInt:
+            return value
+        case let value as UInt64:
+            return UInt(value)
+        case let value as Int:
+            return value >= 0 ? UInt(value) : nil
+        case let value as NSNumber:
+            return UInt(value.uint64Value)
+        case let value as String:
+            return UInt(value)
+        default:
+            return nil
+        }
+    }
+
+    private func parseUInt64(_ raw: Any?) -> UInt64? {
+        guard let raw else { return nil }
+        switch raw {
+        case let value as UInt64:
+            return value
+        case let value as UInt:
+            return UInt64(value)
+        case let value as Int:
+            return value >= 0 ? UInt64(value) : nil
+        case let value as NSNumber:
+            return value.uint64Value
+        case let value as String:
+            return UInt64(value)
+        default:
+            return nil
+        }
+    }
+
     private func parseNode(_ dict: [String: Any]) -> AXNode {
         let children = (dict["children"] as? [[String: Any]] ?? []).map { parseNode($0) }
         return AXNode(
-            elementType: dict["elementType"] as? UInt ?? 0,
-            label: dict["label"] as? String ?? "",
+            elementType: parseUInt(dict["elementType"]) ?? 0,
+            label: (dict["label"] as? String) ?? (dict["title"] as? String ?? ""),
             identifier: dict["identifier"] as? String ?? "",
             value: (dict["value"] as? String) ?? "",
             placeholderValue: dict["placeholderValue"] as? String ?? "",
@@ -375,16 +451,12 @@ class SnapshotElementFinder {
                 .firstMatch
         } else if let role = selector.role, let name = selector.name {
             // Role + name: e.g. role("button", "Sign in")
-            // Build a query for the specific element type + label
-            if let types = try? RoleMapping.elementTypes(for: role), let firstType = types.first {
-                element = app.descendants(matching: firstType)
-                    .matching(concatenatedLabelPredicate(name))
-                    .firstMatch
-            } else {
-                element = app.descendants(matching: .any)
-                    .matching(concatenatedLabelPredicate(name))
-                    .firstMatch
-            }
+            // Match by accessible name across all descendants. React Native
+            // buttons often surface as XCUIElementTypeOther with traits, so a
+            // type-constrained query can miss the element we just found in the snapshot.
+            element = app.descendants(matching: .any)
+                .matching(concatenatedLabelPredicate(name))
+                .firstMatch
         } else if let role = selector.role {
             // Role-only: match the first element of this type
             if let types = try? RoleMapping.elementTypes(for: role), let firstType = types.first {
@@ -453,6 +525,14 @@ class SnapshotElementFinder {
         )
         let className = RoleMapping.typeName(for: elType)
         let role = RoleMapping.resolveRole(for: elType)
+        let isSelected = element.isSelected
+        let isChecked = checkedState(
+            for: elType,
+            value: element.value as? String,
+            selected: isSelected
+        )
+
+        let viewportRatio = computeViewportRatio(bounds, screenSize: screenSize)
 
         return ElementInfo(
             elementId: elementId, className: className,
@@ -460,13 +540,13 @@ class SnapshotElementFinder {
             contentDescription: label.isEmpty ? nil : label,
             resourceId: identifier.isEmpty ? nil : identifier,
             hint: nil, bounds: bounds,
-            isEnabled: element.isEnabled, isChecked: false, isFocused: false,
+            isEnabled: element.isEnabled, isChecked: isChecked, isFocused: element.hasFocus,
             isClickable: frame.width > 0 && frame.height > 0,
             isFocusable: true,
             isScrollable: elType == .scrollView || elType == .table || elType == .collectionView,
-            isVisible: frame.width > 0 && frame.height > 0,
-            isSelected: false, childCount: 0,
-            role: role, viewportRatio: computeViewportRatio(bounds, screenSize: screenSize)
+            isVisible: viewportRatio > 0,
+            isSelected: isSelected, childCount: 0,
+            role: role, viewportRatio: viewportRatio
         )
     }
 
@@ -482,5 +562,29 @@ class SnapshotElementFinder {
         if let v = selector.testId { parts.append("testId=\(v)") }
         if let v = selector.id { parts.append("id=\(v)") }
         return parts.joined(separator: ", ")
+    }
+
+    private func checkedState(
+        for elementType: XCUIElement.ElementType,
+        value: String?,
+        selected: Bool
+    ) -> Bool {
+        let normalized = value?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? ""
+
+        switch normalized {
+        case "1", "true", "on", "yes", "selected", "checked":
+            return true
+        case "0", "false", "off", "no", "not selected", "unchecked":
+            return false
+        default:
+            switch elementType {
+            case .switch, .toggle, .checkBox, .radioButton:
+                return selected
+            default:
+                return false
+            }
+        }
     }
 }

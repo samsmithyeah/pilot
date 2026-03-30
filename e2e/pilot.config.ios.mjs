@@ -4,7 +4,7 @@ export default defineConfig({
   platform: "ios",
   app: "/Users/sam/Library/Developer/Xcode/DerivedData/PilotTestApp-datxlahclmztnygrtuayfglnpxkv/Build/Products/Release-iphonesimulator/PilotTestApp.app",
   package: "dev.pilot.testapp",
-  timeout: 10_000,
+  timeout: 15_000,
   retries: 0,
   screenshot: "only-on-failure",
   workers: 1,

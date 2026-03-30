@@ -80,6 +80,8 @@ function configFromSerialized(s: SerializedConfig, daemonAddress: string): Pilot
     app: s.app,
     iosXctestrun: s.iosXctestrun,
     simulator: s.simulator,
+    resetAppDeepLink: s.resetAppDeepLink,
+    resetAppWaitMs: s.resetAppWaitMs,
   };
 }
 

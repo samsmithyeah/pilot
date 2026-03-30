@@ -18,7 +18,7 @@ const AGENT_PORT: u16 = 18700;
 /// configuration exclusively from that file.
 #[instrument(skip(xctestrun_path, target_bundle_id))]
 pub async fn start_agent(udid: &str, xctestrun_path: &str, target_bundle_id: &str) -> Result<()> {
-    start_agent_impl(udid, xctestrun_path, target_bundle_id, false).await
+    start_agent_impl(udid, xctestrun_path, target_bundle_id, false, false).await
 }
 
 /// Start the agent, optionally forcing a fresh launch even if an agent
@@ -29,7 +29,7 @@ pub async fn start_agent_fresh(
     xctestrun_path: &str,
     target_bundle_id: &str,
 ) -> Result<()> {
-    start_agent_impl(udid, xctestrun_path, target_bundle_id, true).await
+    start_agent_impl(udid, xctestrun_path, target_bundle_id, true, true).await
 }
 
 async fn start_agent_impl(
@@ -37,6 +37,7 @@ async fn start_agent_impl(
     xctestrun_path: &str,
     target_bundle_id: &str,
     force: bool,
+    attach_to_running_app: bool,
 ) -> Result<()> {
     // Check if agent is already running by trying to connect
     if !force && ping_agent().await.is_ok() {
@@ -49,9 +50,10 @@ async fn start_agent_impl(
     // Patch the xctestrun file to inject target bundle ID and env vars.
     // xcodebuild process env vars don't reach the XCUITest runner — they must
     // be in the plist's EnvironmentVariables / TestingEnvironmentVariables dicts.
-    let patched_xctestrun = patch_xctestrun(xctestrun_path, target_bundle_id)
-        .await
-        .context("Failed to patch xctestrun file")?;
+    let patched_xctestrun =
+        patch_xctestrun(xctestrun_path, target_bundle_id, attach_to_running_app)
+            .await
+            .context("Failed to patch xctestrun file")?;
 
     // Launch xcodebuild test-without-building in background
     let mut cmd = Command::new("xcodebuild");
@@ -151,8 +153,17 @@ pub async fn kill_existing_agents() {
 /// application bundle ID and the agent's environment variables.
 ///
 /// Uses PlistBuddy to modify a copy — the original file is left untouched.
-async fn patch_xctestrun(xctestrun_path: &str, target_bundle_id: &str) -> Result<String> {
-    let patched_path = format!("{xctestrun_path}.patched.xctestrun");
+async fn patch_xctestrun(
+    xctestrun_path: &str,
+    target_bundle_id: &str,
+    attach_to_running_app: bool,
+) -> Result<String> {
+    let mode = if attach_to_running_app {
+        "attach"
+    } else {
+        "launch"
+    };
+    let patched_path = format!("{xctestrun_path}.{mode}.patched.xctestrun");
 
     // Copy original to patched location
     tokio::fs::copy(xctestrun_path, &patched_path)
@@ -171,6 +182,15 @@ async fn patch_xctestrun(xctestrun_path: &str, target_bundle_id: &str) -> Result
         format!("Add :{base}:TestingEnvironmentVariables:PILOT_TARGET_BUNDLE_ID string {target_bundle_id}"),
         format!("Add :{base}:TestingEnvironmentVariables:PILOT_AGENT_PORT string {AGENT_PORT}"),
     ];
+    let mut commands = commands;
+    if attach_to_running_app {
+        commands.push(format!(
+            "Add :{base}:EnvironmentVariables:PILOT_ATTACH_TO_RUNNING_APP string 1"
+        ));
+        commands.push(format!(
+            "Add :{base}:TestingEnvironmentVariables:PILOT_ATTACH_TO_RUNNING_APP string 1"
+        ));
+    }
 
     let mut cmd = std::process::Command::new(plist_buddy);
     for c in &commands {

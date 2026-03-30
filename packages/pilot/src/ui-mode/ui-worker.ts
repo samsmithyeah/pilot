@@ -77,6 +77,8 @@ function configFromSerialized(s: SerializedConfig, daemonAddress: string): Pilot
     app: s.app,
     iosXctestrun: s.iosXctestrun,
     simulator: s.simulator,
+    resetAppDeepLink: s.resetAppDeepLink,
+    resetAppWaitMs: s.resetAppWaitMs,
   };
 }
 
@@ -357,7 +359,11 @@ async function recoverFileSession(filePath: string, err: unknown): Promise<void>
     `UI Worker ${workerId}: Recovering session after infrastructure error in ${path.basename(filePath)}: ${err instanceof Error ? err.message : err}\n`,
   );
   if (config?.package) {
-    await launchConfiguredApp(sessionContext(undefined), `recovery for ${path.basename(filePath)}`);
+    await launchConfiguredApp(
+      sessionContext(undefined),
+      `recovery for ${path.basename(filePath)}`,
+      { allowSoftReset: false },
+    );
   } else {
     await ensureSessionReady(sessionContext(undefined), `recovery for ${path.basename(filePath)}`);
   }

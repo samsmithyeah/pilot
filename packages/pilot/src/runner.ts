@@ -393,7 +393,12 @@ async function runSuiteContext(
   // - appState: '' → clear app data (fresh unauthenticated state)
   if (scopeAppState !== undefined && opts.device && opts.config.package) {
     if (scopeAppState) {
-      await opts.device.restoreAppState(opts.config.package, scopeAppState);
+      // Resolve relative paths against rootDir so the daemon can find the archive
+      // regardless of its own working directory.
+      const resolvedPath = path.isAbsolute(scopeAppState)
+        ? scopeAppState
+        : path.resolve(opts.config.rootDir, scopeAppState);
+      await opts.device.restoreAppState(opts.config.package, resolvedPath);
     } else {
       await opts.device.clearAppData(opts.config.package);
     }

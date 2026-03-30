@@ -106,6 +106,21 @@ export function installApp(udid: string, appPath: string): void {
 }
 
 /**
+ * Check whether an app bundle is already installed on a simulator.
+ */
+export function isAppInstalled(udid: string, bundleId: string): boolean {
+  try {
+    execFileSync('xcrun', ['simctl', 'get_app_container', udid, bundleId, 'app'], {
+      timeout: 10_000,
+      stdio: 'ignore',
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Find a simulator matching the given name (or UDID).
  * Prefers booted simulators. Returns undefined if no match found.
  */

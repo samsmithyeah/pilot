@@ -138,6 +138,8 @@ export interface SerializedConfig {
   app?: string
   iosXctestrun?: string
   simulator?: string
+  resetAppDeepLink?: string
+  resetAppWaitMs?: number
 }
 
 /** TestResult with Error serialized to plain object for IPC. */

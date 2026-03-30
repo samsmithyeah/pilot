@@ -30,6 +30,8 @@ export interface BoundingBox {
 /** Timeout for quick visibility probes in scrollIntoView(). Short so the
  *  loop isn't blocked waiting for an element that's simply off-screen. */
 const SCROLL_PROBE_TIMEOUT_MS = 1000;
+/** Brief settle after swipe-based scrolling so taps do not race ScrollView deceleration. */
+const SCROLL_SETTLE_MS = 250;
 
 // ─── Filter options for .filter() ───
 
@@ -693,6 +695,7 @@ export class ElementHandle {
         if (!swipeRes.success) {
           throw new Error(swipeRes.errorMessage || 'Swipe failed during scrollIntoView');
         }
+        await new Promise((resolve) => setTimeout(resolve, SCROLL_SETTLE_MS));
       }
     }
 

@@ -100,6 +100,196 @@ impl PilotServiceImpl {
             .map_err(|e| Status::internal(e.to_string()))
     }
 
+    async fn probe_ios_agent_session(
+        &self,
+        wait_for_idle: bool,
+        idle_timeout_ms: u64,
+    ) -> Result<(), String> {
+        let timeout_ms = if wait_for_idle {
+            if idle_timeout_ms > 0 {
+                idle_timeout_ms.min(10_000)
+            } else {
+                10_000
+            }
+        } else {
+            1_000
+        };
+        let idle = self
+            .send_agent_command_with_timeout(
+                &AgentCommand::WaitForIdle {
+                    timeout_ms: Some(timeout_ms),
+                },
+                timeout_ms,
+            )
+            .await
+            .map_err(|status| status.message().to_string())?;
+        if !idle.success {
+            return Err(idle
+                .error
+                .unwrap_or_else(|| "iOS agent probe failed after relaunch".to_string()));
+        }
+
+        Ok(())
+    }
+
+    async fn relaunch_ios_app_via_simctl(
+        &self,
+        serial: &str,
+        package_name: &str,
+        wait_for_idle: bool,
+        idle_timeout_ms: u64,
+    ) -> Result<(), String> {
+        let _ = ios::device::terminate_app(serial, package_name).await;
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        ios::device::launch_app(serial, package_name)
+            .await
+            .map_err(|e| e.to_string())?;
+        let relaunch = self
+            .send_agent_command_with_timeout(
+                &AgentCommand::LaunchApp {
+                    package: package_name.to_string(),
+                },
+                4_000,
+            )
+            .await
+            .map_err(|status| status.message().to_string())?;
+        if !relaunch.success {
+            return Err(relaunch
+                .error
+                .unwrap_or_else(|| "iOS app activate failed after simctl relaunch".to_string()));
+        }
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+        loop {
+            let err = match self
+                .probe_ios_agent_session(wait_for_idle, idle_timeout_ms)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(err) => err,
+            };
+            if tokio::time::Instant::now() >= deadline {
+                return Err(err);
+            }
+            tokio::time::sleep(Duration::from_millis(400)).await;
+        }
+    }
+
+    async fn relaunch_ios_app_via_agent(
+        &self,
+        package_name: &str,
+        wait_for_idle: bool,
+        idle_timeout_ms: u64,
+    ) -> Result<(), String> {
+        let _ = self
+            .send_agent_command_with_timeout(
+                &AgentCommand::TerminateApp {
+                    package: package_name.to_string(),
+                },
+                4_000,
+            )
+            .await;
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        let launch = self
+            .send_agent_command_with_timeout(
+                &AgentCommand::LaunchApp {
+                    package: package_name.to_string(),
+                },
+                4_000,
+            )
+            .await
+            .map_err(|status| status.message().to_string())?;
+        if !launch.success {
+            return Err(launch
+                .error
+                .unwrap_or_else(|| "iOS agent launch failed".to_string()));
+        }
+
+        self.probe_ios_agent_session(wait_for_idle, idle_timeout_ms)
+            .await
+    }
+
+    async fn restart_ios_agent_for_app(
+        &self,
+        serial: &str,
+        package_name: &str,
+        wait_for_idle: bool,
+        idle_timeout_ms: u64,
+    ) -> Result<(), String> {
+        let config = self
+            .ios_agent_config
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| "iOS agent is not configured".to_string())?;
+
+        ios::agent_launch::kill_existing_agents_on(serial).await;
+        let _ = ios::device::terminate_app(serial, package_name).await;
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        ios::device::launch_app(serial, package_name)
+            .await
+            .map_err(|e| format!("Failed to relaunch app via simctl before agent restart: {e}"))?;
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        ios::agent_launch::start_agent_fresh(
+            serial,
+            &config.xctestrun_path,
+            &config.target_package,
+        )
+        .await
+        .map_err(|e| format!("Failed to restart iOS agent: {e}"))?;
+
+        self.agent
+            .write()
+            .await
+            .connect_ios(serial)
+            .await
+            .map_err(|e| format!("Failed to reconnect to agent: {e}"))?;
+
+        self.probe_ios_agent_session(wait_for_idle, idle_timeout_ms)
+            .await
+    }
+
+    async fn reset_ios_app(
+        &self,
+        serial: &str,
+        package_name: &str,
+        wait_for_idle: bool,
+        idle_timeout_ms: u64,
+    ) -> Result<(), String> {
+        match self
+            .relaunch_ios_app_via_agent(package_name, wait_for_idle, idle_timeout_ms)
+            .await
+        {
+            Ok(()) => {
+                info!(
+                    package_name,
+                    "iOS app reset completed via in-runner relaunch"
+                );
+                return Ok(());
+            }
+            Err(err) => {
+                warn!(package_name, error = %err, "in-runner iOS relaunch failed; trying simctl relaunch");
+            }
+        }
+
+        match self
+            .relaunch_ios_app_via_simctl(serial, package_name, wait_for_idle, idle_timeout_ms)
+            .await
+        {
+            Ok(()) => {
+                info!(package_name, "iOS app reset completed via simctl relaunch");
+                Ok(())
+            }
+            Err(err) => {
+                warn!(package_name, error = %err, "simctl relaunch lost the iOS accessibility session; falling back to agent restart");
+                self.restart_ios_agent_for_app(serial, package_name, wait_for_idle, idle_timeout_ms)
+                    .await
+            }
+        }
+    }
+
     /// Get the platform of the active device.
     async fn active_platform(&self) -> Platform {
         self.device_manager
@@ -1427,9 +1617,12 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
 
         match platform {
             Platform::Ios => {
-                // iOS: restart the XCUITest agent to get a fresh app.
-                // On iOS, terminating the target app kills the XCUITest
-                // runner, so we must restart the entire agent session.
+                let idle_timeout_ms = if req.idle_timeout_ms > 0 {
+                    req.idle_timeout_ms
+                } else {
+                    10000
+                };
+
                 if req.clear_data {
                     // Clear the data container (AsyncStorage, caches, etc.)
                     // without uninstalling the app.
@@ -1445,71 +1638,18 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
                     }
                 }
 
-                // Restart the XCUITest agent (which also restarts the app)
-                let config = self.ios_agent_config.read().await.clone();
-                if let Some(config) = config {
-                    // Kill old agent, terminate app, start fresh agent.
-                    // The runner's app.activate() handles relaunching the target app.
-                    info!("Restarting iOS agent for launchApp");
-                    ios::agent_launch::kill_existing_agents_on(&serial).await;
-                    let _ = ios::device::terminate_app(&serial, &req.package_name).await;
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                    if let Err(e) = ios::agent_launch::start_agent_fresh(
+                if let Err(error_message) = self
+                    .reset_ios_app(
                         &serial,
-                        &config.xctestrun_path,
-                        &config.target_package,
+                        &req.package_name,
+                        req.wait_for_idle,
+                        idle_timeout_ms,
                     )
                     .await
-                    {
-                        let screenshot = self.error_screenshot().await;
-                        return Ok(Response::new(proto::ActionResponse {
-                            request_id,
-                            success: false,
-                            error_type: "LAUNCH_FAILED".to_string(),
-                            error_message: format!("Failed to restart iOS agent: {e}"),
-                            screenshot,
-                        }));
-                    }
-                    // Reconnect to the new agent
-                    let mut agent = self.agent.write().await;
-                    if let Err(e) = agent.connect_ios(&serial).await {
-                        let screenshot = self.error_screenshot().await;
-                        return Ok(Response::new(proto::ActionResponse {
-                            request_id,
-                            success: false,
-                            error_type: "AGENT_CONNECTION_FAILED".to_string(),
-                            error_message: format!("Failed to reconnect to agent: {e}"),
-                            screenshot,
-                        }));
-                    }
-                } else {
-                    // No stored config — just try simctl launch
-                    if let Err(e) = ios::device::launch_app(&serial, &req.package_name).await {
-                        let screenshot = self.error_screenshot().await;
-                        return Ok(Response::new(proto::ActionResponse {
-                            request_id,
-                            success: false,
-                            error_type: "LAUNCH_FAILED".to_string(),
-                            error_message: e.to_string(),
-                            screenshot,
-                        }));
-                    }
-                }
-
-                if req.wait_for_idle {
-                    let timeout_ms = if req.idle_timeout_ms > 0 {
-                        req.idle_timeout_ms
-                    } else {
-                        10000
-                    };
-                    let _ = self
-                        .send_agent_command_with_timeout(
-                            &AgentCommand::WaitForIdle {
-                                timeout_ms: Some(timeout_ms),
-                            },
-                            timeout_ms,
-                        )
-                        .await;
+                {
+                    return Ok(self
+                        .action_error(request_id, "LAUNCH_FAILED", error_message)
+                        .await);
                 }
 
                 Ok(Response::new(proto::ActionResponse {
@@ -1683,74 +1823,24 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         let platform = self.active_platform().await;
         match platform {
             Platform::Ios => {
-                // Full agent restart: terminate app, kill the XCUITest
-                // runner, relaunch app, start a fresh agent and reconnect.
-                // This is the only reliable approach on iOS — the XCUITest
-                // runner loses its accessibility bridge when the target app
-                // is terminated, so a fresh runner is needed.
-                let config = self.ios_agent_config.read().await.clone();
-                if let Some(config) = config {
-                    ios::agent_launch::kill_existing_agents_on(&serial).await;
-                    let _ = ios::device::terminate_app(&serial, &req.package_name).await;
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                    // Don't simctl launch here — the runner's app.activate()
-                    // handles launching the app fresh. Using both causes the
-                    // runner to fight with simctl over app lifecycle.
-                    if let Err(e) = ios::agent_launch::start_agent_fresh(
+                let idle_timeout_ms = if req.idle_timeout_ms > 0 {
+                    req.idle_timeout_ms
+                } else {
+                    10000
+                };
+
+                if let Err(error_message) = self
+                    .reset_ios_app(
                         &serial,
-                        &config.xctestrun_path,
-                        &config.target_package,
+                        &req.package_name,
+                        req.wait_for_idle,
+                        idle_timeout_ms,
                     )
                     .await
-                    {
-                        let screenshot = self.error_screenshot().await;
-                        return Ok(Response::new(proto::ActionResponse {
-                            request_id,
-                            success: false,
-                            error_type: "LAUNCH_FAILED".to_string(),
-                            error_message: format!("Failed to restart iOS agent: {e}"),
-                            screenshot,
-                        }));
-                    }
-                    let mut agent = self.agent.write().await;
-                    if let Err(e) = agent.connect_ios(&serial).await {
-                        let screenshot = self.error_screenshot().await;
-                        return Ok(Response::new(proto::ActionResponse {
-                            request_id,
-                            success: false,
-                            error_type: "AGENT_CONNECTION_FAILED".to_string(),
-                            error_message: format!("Failed to reconnect to agent: {e}"),
-                            screenshot,
-                        }));
-                    }
-                } else {
-                    let _ = ios::device::terminate_app(&serial, &req.package_name).await;
-                    if let Err(e) = ios::device::launch_app(&serial, &req.package_name).await {
-                        let screenshot = self.error_screenshot().await;
-                        return Ok(Response::new(proto::ActionResponse {
-                            request_id,
-                            success: false,
-                            error_type: "LAUNCH_FAILED".to_string(),
-                            error_message: e.to_string(),
-                            screenshot,
-                        }));
-                    }
-                }
-
-                if req.wait_for_idle {
-                    let timeout_ms = if req.idle_timeout_ms > 0 {
-                        req.idle_timeout_ms
-                    } else {
-                        10000
-                    };
-                    let _ = self
-                        .send_agent_command_with_timeout(
-                            &AgentCommand::WaitForIdle {
-                                timeout_ms: Some(timeout_ms),
-                            },
-                            timeout_ms,
-                        )
-                        .await;
+                {
+                    return Ok(self
+                        .action_error(request_id, "LAUNCH_FAILED", error_message)
+                        .await);
                 }
 
                 Ok(Self::success_action_response(request_id))

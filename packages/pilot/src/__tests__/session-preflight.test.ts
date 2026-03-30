@@ -6,6 +6,7 @@ function makeContext(overrides: Partial<Parameters<typeof ensureSessionReady>[0]
     startAgent: vi.fn(async () => undefined),
     terminateApp: vi.fn(async () => undefined),
     launchApp: vi.fn(async () => undefined),
+    openDeepLink: vi.fn(async () => undefined),
     waitForIdle: vi.fn(async () => undefined),
     currentPackage: vi.fn(async () => 'com.example.app'),
     tap: vi.fn(async () => undefined),
@@ -85,6 +86,27 @@ describe('session-preflight', () => {
 
     await expect(launchConfiguredApp(ctx, 'startup')).resolves.toBeUndefined();
     expect(ctx.device.launchApp).not.toHaveBeenCalled();
+  });
+
+  it('uses iOS soft reset when configured', async () => {
+    const ctx = makeContext({
+      config: {
+        package: 'com.example.app',
+        activity: undefined,
+        platform: 'ios',
+        resetAppDeepLink: 'example:///__reset',
+        resetAppWaitMs: 321,
+      },
+    });
+
+    await expect(launchConfiguredApp(ctx, 'file reset')).resolves.toBeUndefined();
+
+    expect(ctx.device.openDeepLink).toHaveBeenNthCalledWith(1, 'example:///__reset');
+    expect(ctx.device.openDeepLink).toHaveBeenNthCalledWith(2, 'example:///');
+    expect(ctx.device.waitForIdle).toHaveBeenNthCalledWith(1, 321);
+    expect(ctx.device.waitForIdle).toHaveBeenNthCalledWith(2, 321);
+    expect(ctx.device.restartApp).not.toHaveBeenCalled();
+    expect(ctx.device.clearAppData).not.toHaveBeenCalled();
   });
 
   it('dismisses system overlay via pressBack when app is underneath', async () => {

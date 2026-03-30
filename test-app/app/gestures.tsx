@@ -100,6 +100,7 @@ export default function GesturesScreen() {
         <Animated.View
           style={[styles.draggable, { transform: [{ translateX: pan.x }, { translateY: pan.y }] }]}
           {...panResponder.panHandlers}
+          onTouchEnd={() => setLastGesture("Drag")}
           accessibilityRole="adjustable"
           accessibilityLabel="Draggable item"
           testID="draggable"

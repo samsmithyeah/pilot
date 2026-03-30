@@ -1,4 +1,5 @@
-import { Link } from "expo-router"
+import { useFocusEffect, useRouter } from "expo-router"
+import { useCallback, useRef } from "react"
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native"
 
 const screens = [
@@ -31,21 +32,32 @@ const screens = [
 ] as const
 
 export default function HomeScreen() {
+  const router = useRouter()
+  const scrollViewRef = useRef<ScrollView>(null)
+
+  useFocusEffect(useCallback(() => {
+    scrollViewRef.current?.scrollTo({ x: 0, y: 0, animated: false })
+  }, []))
+
   return (
-    <ScrollView style={styles.container}>
+    <ScrollView ref={scrollViewRef} style={styles.container}>
       <Text style={styles.heading} accessibilityRole="header">
         Test Screens
       </Text>
       {screens.map((screen) => (
-        <Link key={screen.href} href={screen.href} asChild>
-          <Pressable
-            style={styles.card}
-            accessibilityRole="button"
-          >
-            <Text style={styles.cardTitle}>{screen.label}</Text>
-            <Text style={styles.cardDescription}>{screen.description}</Text>
-          </Pressable>
-        </Link>
+        <Pressable
+          key={screen.href}
+          style={styles.card}
+          onPress={() => {
+            router.push(screen.href)
+          }}
+          accessibilityRole="button"
+          accessible
+          testID={`home-card-${screen.href.slice(1)}`}
+        >
+          <Text style={styles.cardTitle}>{screen.label}</Text>
+          <Text style={styles.cardDescription}>{screen.description}</Text>
+        </Pressable>
       ))}
       <View style={styles.spacer} />
     </ScrollView>

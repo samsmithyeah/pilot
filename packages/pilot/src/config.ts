@@ -89,6 +89,19 @@ export interface PilotConfig {
   iosXctestrun?: string;
 
   /**
+   * Optional deep link used to soft-reset the app between files on platforms
+   * where hard restarts are slow or unstable. Intended for app-specific test
+   * hooks such as a reset route in a first-party test app.
+   */
+  resetAppDeepLink?: string;
+
+  /**
+   * How long to wait after opening `resetAppDeepLink` before continuing.
+   * Defaults to 750ms when the deep link is configured.
+   */
+  resetAppWaitMs?: number;
+
+  /**
    * iOS simulator name or UDID. Analogous to `avd` for Android.
    * Run `xcrun simctl list devices` to see available simulators.
    */

@@ -64,6 +64,8 @@ function configFromSerialized(s: SerializedConfig, daemonAddress: string): Pilot
     app: s.app,
     iosXctestrun: s.iosXctestrun,
     simulator: s.simulator,
+    resetAppDeepLink: s.resetAppDeepLink,
+    resetAppWaitMs: s.resetAppWaitMs,
   };
 }
 
@@ -307,7 +309,11 @@ async function recoverFileSession(filePath: string, err: unknown): Promise<void>
   );
 
   if (config?.package) {
-    await launchConfiguredApp(sessionContext(undefined), `recovery for ${path.basename(filePath)}`);
+    await launchConfiguredApp(
+      sessionContext(undefined),
+      `recovery for ${path.basename(filePath)}`,
+      { allowSoftReset: false },
+    );
   } else {
     await ensureSessionReady(sessionContext(undefined), `recovery for ${path.basename(filePath)}`);
   }

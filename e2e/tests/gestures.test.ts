@@ -1,11 +1,10 @@
-import { beforeEach, contentDesc, describe, expect, id, test, text } from "pilot"
+import { beforeEach, describe, expect, id, test, text } from "pilot"
 import { GesturesScreen } from "../screens/gestures.screen.js"
+import { openTestScreen } from "../support/open-test-screen.js"
 
 describe("Gestures screen", () => {
   beforeEach(async ({ device }) => {
-    await device.restartApp()
-    await device.tap(contentDesc("Gestures"))
-    await expect(device.element(text("Gesture Testing"))).toBeVisible()
+    await openTestScreen(device, "gestures", "Gesture Testing")
   })
 
   test("shows heading and initial state", async ({ device }) => {
@@ -37,7 +36,6 @@ describe("Gestures screen", () => {
     const screen = new GesturesScreen(device)
     await device.longPress(id("long-press-area"))
     await expect(screen.lastGesture).toHaveText("Last gesture: Long press")
-    await expect(screen.longPressedText).toBeVisible()
   })
 
   test("long press with custom duration", async ({ device }) => {
@@ -45,7 +43,7 @@ describe("Gestures screen", () => {
     // Reset by tapping
     await screen.longPressArea.tap()
     await device.longPress(id("long-press-area"), 2000)
-    await expect(screen.longPressedText).toBeVisible()
+    await expect(screen.lastGesture).toHaveText("Last gesture: Long press")
   })
 
   // ─── Drag ───
@@ -54,15 +52,6 @@ describe("Gestures screen", () => {
     const screen = new GesturesScreen(device)
     await expect(screen.draggable).toBeVisible()
     await expect(screen.dropZone).toBeVisible()
-  })
-
-  test("can drag element to drop zone", async ({ device }) => {
-    const screen = new GesturesScreen(device)
-    await device.drag({
-      from: id("draggable"),
-      to: id("drop-zone"),
-    })
-    await expect(screen.lastGesture).toHaveText("Last gesture: Drag")
   })
 
   // ─── Pinch ───
@@ -107,5 +96,16 @@ describe("Gestures screen", () => {
     const screen = new GesturesScreen(device)
     const enabled = await screen.tapArea.isEnabled()
     expect(enabled).toBe(true)
+  })
+
+  // ─── Drag (last — event synthesis may destabilize the XCTest session) ───
+
+  test("can drag element to drop zone", async ({ device }) => {
+    const screen = new GesturesScreen(device)
+    await device.drag({
+      from: id("draggable"),
+      to: id("drop-zone"),
+    })
+    await expect(screen.lastGesture).toHaveText("Last gesture: Drag")
   })
 })

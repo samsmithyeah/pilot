@@ -833,10 +833,20 @@ async function main(): Promise<void> {
       // XCUITest can establish its accessibility bridge to the target app.
       if (config.app && config.device) {
         try {
-          const { installApp } = await import('./ios-simulator.js');
+          const { installApp, isAppInstalled } = await import('./ios-simulator.js');
           const resolvedApp = path.resolve(config.rootDir, config.app);
-          installApp(config.device, resolvedApp);
-          console.log(dim(`Installed ${path.basename(resolvedApp)} on iOS simulator.`));
+          const alreadyInstalled = config.package
+            && isAppInstalled(config.device, config.package);
+
+          if (alreadyInstalled && !args.forceInstall) {
+            console.log(dim(`App ${config.package} already installed, skipping iOS app install. Use --force-install to reinstall.`));
+          } else {
+            if (alreadyInstalled) {
+              console.log(dim(`Reinstalling iOS app: ${path.basename(resolvedApp)}`));
+            }
+            installApp(config.device, resolvedApp);
+            console.log(dim(`Installed ${path.basename(resolvedApp)} on iOS simulator.`));
+          }
         } catch (err) {
           console.error(red(`Failed to install iOS app: ${err}`));
           sequentialExitCode = 1;

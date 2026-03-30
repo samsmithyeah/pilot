@@ -60,10 +60,12 @@ class ElementFinder {
         // Apply additional attribute filters
         let filtered = xcElements.filter { elem in
             if let wantEnabled = selector.enabled, elem.isEnabled != wantEnabled { return false }
-            // XCUIElement doesn't directly expose "checked" — use value for switches/checkboxes
             if let wantChecked = selector.checked {
-                let val = (elem.value as? String) ?? ""
-                let isChecked = val == "1" || val == "true"
+                let isChecked = checkedState(
+                    for: elem.elementType,
+                    value: elem.value as? String,
+                    selected: elem.isSelected
+                )
                 if isChecked != wantChecked { return false }
             }
             if let wantFocused = selector.focused, elem.hasFocus != wantFocused { return false }
@@ -222,6 +224,14 @@ class ElementFinder {
 
         let className = RoleMapping.typeName(for: elType)
         let role = RoleMapping.resolveRole(for: elType)
+        let isSelected = element.isSelected
+        let isChecked = checkedState(
+            for: elType,
+            value: element.value as? String,
+            selected: isSelected
+        )
+
+        let viewportRatio = computeViewportRatio(bounds)
 
         return ElementInfo(
             elementId: elementId,
@@ -232,18 +242,18 @@ class ElementFinder {
             hint: nil,  // Skip placeholderValue IPC unless needed
             bounds: bounds,
             isEnabled: element.isEnabled,
-            isChecked: false,
-            isFocused: false,
+            isChecked: isChecked,
+            isFocused: element.hasFocus,
             isClickable: frame.width > 0 && frame.height > 0,
             isFocusable: true,
             isScrollable: elType == .scrollView
                 || elType == .table
                 || elType == .collectionView,
-            isVisible: frame.width > 0 && frame.height > 0,
-            isSelected: false,
+            isVisible: viewportRatio > 0,
+            isSelected: isSelected,
             childCount: 0,  // Skip children().count — very expensive IPC
             role: role,
-            viewportRatio: computeViewportRatio(bounds)
+            viewportRatio: viewportRatio
         )
     }
 
@@ -348,5 +358,29 @@ class ElementFinder {
         if let v = selector.id { parts.append("id=\(v)") }
         if let v = selector.xpath { parts.append("xpath=\(v)") }
         return parts.joined(separator: ", ")
+    }
+
+    private func checkedState(
+        for elementType: XCUIElement.ElementType,
+        value: String?,
+        selected: Bool
+    ) -> Bool {
+        let normalized = value?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? ""
+
+        switch normalized {
+        case "1", "true", "on", "yes", "selected", "checked":
+            return true
+        case "0", "false", "off", "no", "not selected", "unchecked":
+            return false
+        default:
+            switch elementType {
+            case .switch, .toggle, .checkBox, .radioButton:
+                return selected
+            default:
+                return false
+            }
+        }
     }
 }

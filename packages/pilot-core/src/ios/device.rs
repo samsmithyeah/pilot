@@ -381,8 +381,8 @@ pub async fn get_app_container(udid: &str, bundle_id: &str) -> Result<String> {
 }
 
 /// Clear an app's data container by removing user data.
-/// Clears Documents, tmp, and Library (except Preferences) so that
-/// databases like AsyncStorage are recreated fresh on next use.
+/// Clears Documents, tmp, and all of Library so that app-managed
+/// persisted state is recreated fresh on next use.
 /// Preserves the container structure itself.
 #[instrument]
 pub async fn clear_container(container_path: &str) -> Result<()> {
@@ -393,15 +393,15 @@ pub async fn clear_container(container_path: &str) -> Result<()> {
         return Ok(());
     }
 
-    // Clear all contents except Library/Preferences (system config like i18n).
-    // This clears: Documents, tmp, Library/Caches, Library/Application Support,
-    // Library/Saved Application State (iOS state restoration), Library/WebKit, etc.
+    // Clear all contents outside Library first, then clear all of Library.
+    // This includes Documents, tmp, Library/Caches, Library/Application Support,
+    // Library/Saved Application State, Library/WebKit, and Library/Preferences.
     let mut entries = tokio::fs::read_dir(container).await?;
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
-        // Skip Library — we handle it separately to preserve Preferences
+        // Skip Library — we handle it separately below.
         if name_str == "Library" {
             continue;
         }
@@ -412,15 +412,11 @@ pub async fn clear_container(container_path: &str) -> Result<()> {
             let _ = tokio::fs::remove_file(&path).await;
         }
     }
-    // Clear Library subdirectories except Preferences
+    // Clear all Library contents, including Preferences.
     let library = container.join("Library");
     if library.exists() {
         let mut lib_entries = tokio::fs::read_dir(&library).await?;
         while let Some(entry) = lib_entries.next_entry().await? {
-            let name = entry.file_name();
-            if name.to_string_lossy() == "Preferences" {
-                continue; // Keep system preferences
-            }
             let path = entry.path();
             if path.is_dir() {
                 let _ = tokio::fs::remove_dir_all(&path).await;

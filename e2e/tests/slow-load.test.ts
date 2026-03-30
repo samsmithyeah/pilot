@@ -1,10 +1,10 @@
-import { beforeAll, contentDesc, describe, expect, test, text } from "pilot"
+import { beforeEach, describe, expect, test, text } from "pilot"
 import { SlowLoadScreen } from "../screens/slow-load.screen.js"
+import { openTestScreen } from "../support/open-test-screen.js"
 
 describe("Slow load screen", () => {
-  beforeAll(async ({ device }) => {
-    await device.element(contentDesc("Slow Load")).scrollIntoView()
-    await device.tap(contentDesc("Slow Load"))
+  beforeEach(async ({ device }) => {
+    await openTestScreen(device, "slow-load", "Slow Loading")
   })
 
   test("shows heading and description", async ({ device }) => {
@@ -30,7 +30,8 @@ describe("Slow load screen", () => {
 
   test("data rows show correct content", async ({ device }) => {
     const screen = new SlowLoadScreen(device)
-    await expect(screen.profileHeading).toBeVisible()
+    await screen.load2sButton.tap()
+    await expect(screen.profileHeading).toBeVisible({ timeout: 10000 })
     await expect(screen.emailLabel).toBeVisible()
     await expect(screen.emailValue).toBeVisible()
   })

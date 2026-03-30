@@ -263,6 +263,8 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
       app: config.app,
       iosXctestrun: config.iosXctestrun,
       simulator: config.simulator,
+      resetAppDeepLink: config.resetAppDeepLink,
+      resetAppWaitMs: config.resetAppWaitMs,
     };
 
     const launchedSerials = new Set(launchedEmulators.map((emu) => emu.serial));
