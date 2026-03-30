@@ -440,13 +440,21 @@ class CommandHandler {
             // If the app was terminated, this launches a fresh process.
             // If running in background, this brings it to foreground.
             let targetApp = rebindApp(bundleId: targetBundleId(fallback: params))
-            let t0 = CFAbsoluteTimeGetCurrent()
             targetApp.activate()
-            let activateTime = CFAbsoluteTimeGetCurrent() - t0
-            // Wait longer to give the app time to fully launch after termination.
-            // activate() returns before the app is ready if restarting from terminated.
+            // Wait for the app to fully launch after activation.
             Thread.sleep(forTimeInterval: 1.0)
-            NSLog("[PilotCommand] launchApp: activate() took %.3fs, state=%d", activateTime, targetApp.state.rawValue)
+            // Dismiss any system dialogs (e.g., "Open in 'App'?" after clearAppData).
+            // The interruption monitor only fires on UI interactions, so we need
+            // to explicitly check for and dismiss springboard alerts.
+            let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+            for buttonLabel in ["Open", "Allow", "OK", "Continue"] {
+                let button = springboard.buttons[buttonLabel]
+                if button.waitForExistence(timeout: 0.5) {
+                    button.tap()
+                    Thread.sleep(forTimeInterval: 0.3)
+                    break
+                }
+            }
             return ["success": true]
 
         case "terminateApp":

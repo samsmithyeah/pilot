@@ -258,6 +258,7 @@ impl PilotServiceImpl {
         wait_for_idle: bool,
         idle_timeout_ms: u64,
     ) -> Result<(), String> {
+        let t0 = std::time::Instant::now();
         match self
             .relaunch_ios_app_via_agent(package_name, wait_for_idle, idle_timeout_ms)
             .await
@@ -265,25 +266,41 @@ impl PilotServiceImpl {
             Ok(()) => {
                 info!(
                     package_name,
+                    elapsed_ms = t0.elapsed().as_millis() as u64,
                     "iOS app reset completed via in-runner relaunch"
                 );
                 return Ok(());
             }
             Err(err) => {
-                warn!(package_name, error = %err, "in-runner iOS relaunch failed; trying simctl relaunch");
+                warn!(
+                    package_name,
+                    error = %err,
+                    elapsed_ms = t0.elapsed().as_millis() as u64,
+                    "in-runner iOS relaunch failed; trying simctl relaunch"
+                );
             }
         }
 
+        let t1 = std::time::Instant::now();
         match self
             .relaunch_ios_app_via_simctl(serial, package_name, wait_for_idle, idle_timeout_ms)
             .await
         {
             Ok(()) => {
-                info!(package_name, "iOS app reset completed via simctl relaunch");
+                info!(
+                    package_name,
+                    elapsed_ms = t1.elapsed().as_millis() as u64,
+                    "iOS app reset completed via simctl relaunch"
+                );
                 Ok(())
             }
             Err(err) => {
-                warn!(package_name, error = %err, "simctl relaunch lost the iOS accessibility session; falling back to agent restart");
+                warn!(
+                    package_name,
+                    error = %err,
+                    elapsed_ms = t1.elapsed().as_millis() as u64,
+                    "simctl relaunch lost the iOS accessibility session; falling back to agent restart"
+                );
                 self.restart_ios_agent_for_app(serial, package_name, wait_for_idle, idle_timeout_ms)
                     .await
             }
