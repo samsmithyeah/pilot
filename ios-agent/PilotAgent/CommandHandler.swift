@@ -49,6 +49,10 @@ class CommandHandler {
         let refreshedApp = resolvedBundleId.isEmpty
             ? XCUIApplication()
             : XCUIApplication(bundleIdentifier: resolvedBundleId)
+        // Re-apply instance-level quiescence disable on the new app object.
+        // Class-level swizzling persists, but setWaitForQuiescence:false
+        // is per-process-instance and needs to be set on each new XCUIApplication.
+        QuiescenceDisabler.disable(for: refreshedApp)
         app = refreshedApp
         elementFinder = ElementFinder(app: refreshedApp)
         snapshotFinder = SnapshotElementFinder(app: refreshedApp)
@@ -435,11 +439,14 @@ class CommandHandler {
             // Reactivate the app via XCUIApplication.activate().
             // If the app was terminated, this launches a fresh process.
             // If running in background, this brings it to foreground.
-            // Unlike launch(), activate() doesn't trigger a full
-            // quiescence wait on the launch sequence.
             let targetApp = rebindApp(bundleId: targetBundleId(fallback: params))
+            let t0 = CFAbsoluteTimeGetCurrent()
             targetApp.activate()
-            Thread.sleep(forTimeInterval: 0.3)
+            let activateTime = CFAbsoluteTimeGetCurrent() - t0
+            // Wait longer to give the app time to fully launch after termination.
+            // activate() returns before the app is ready if restarting from terminated.
+            Thread.sleep(forTimeInterval: 1.0)
+            NSLog("[PilotCommand] launchApp: activate() took %.3fs, state=%d", activateTime, targetApp.state.rawValue)
             return ["success": true]
 
         case "terminateApp":
