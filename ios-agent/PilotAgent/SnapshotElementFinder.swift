@@ -488,7 +488,7 @@ class SnapshotElementFinder {
 
     // MARK: - Helpers
 
-    private lazy var screenSize: CGSize = {
+    lazy var screenSize: CGSize = {
         // Get actual screen size from the app's main window frame.
         // On iOS the main window is always full-screen.
         let frame = app.windows.firstMatch.frame

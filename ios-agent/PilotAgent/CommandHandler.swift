@@ -91,10 +91,20 @@ class CommandHandler {
 
     /// Get the center point of an element from the snapshot bounds cache.
     /// This avoids XCUIElement queries which trigger slow quiescence on Xcode 26.
+    /// Returns nil if bounds are off-screen (e.g., scroll view children with
+    /// stale snapshot coordinates), falling through to the XCUIElement path.
     private func snapshotCenter(for elementId: String) -> CGPoint? {
         guard let bounds = snapshotFinder.getBounds(elementId) else { return nil }
         guard bounds.width > 0 && bounds.height > 0 else { return nil }
-        return CGPoint(x: bounds.midX, y: bounds.midY)
+        let center = CGPoint(x: bounds.midX, y: bounds.midY)
+        // Reject off-screen coordinates — snapshot frames for scroll view
+        // children can be stale/parent-relative, causing taps to miss.
+        let screen = snapshotFinder.screenSize
+        guard center.x >= 0 && center.y >= 0
+                && center.x <= screen.width && center.y <= screen.height else {
+            return nil
+        }
+        return center
     }
 
     // MARK: - Element Resolution
