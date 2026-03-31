@@ -67,13 +67,10 @@ export async function launchConfiguredApp(
       return;
     }
 
-    // On iOS, terminate and relaunch for isolation between test files.
-    // This ensures the app starts fresh on the home screen.
-    try {
-      await ctx.device.terminateApp(ctx.config.package);
-    } catch {
-      // App may not be running yet
-    }
+    // On iOS, clear data and relaunch for isolation between test files.
+    // clearAppData removes AsyncStorage (including React Navigation state),
+    // caches, and UserDefaults so the app starts fresh on the home screen.
+    await ctx.device.clearAppData(ctx.config.package);
     await ctx.device.launchApp(ctx.config.package);
     await ensureSessionReady(ctx, phase);
     return;
