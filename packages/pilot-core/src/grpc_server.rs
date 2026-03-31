@@ -308,24 +308,33 @@ impl PilotServiceImpl {
     }
 
     /// Get the platform of the active device.
-    async fn active_platform(&self) -> Platform {
+    /// Returns None when no device has been selected yet — callers must
+    /// not assume a default platform.
+    async fn active_platform(&self) -> Option<Platform> {
         self.device_manager
             .read()
             .await
             .active_device()
             .map(|d| d.platform)
-            .unwrap_or(Platform::Android)
+    }
+
+    /// Require the active device's platform, returning a gRPC error if
+    /// no device has been selected.
+    async fn require_platform(&self) -> Result<Platform, Status> {
+        self.active_platform()
+            .await
+            .ok_or_else(|| Status::failed_precondition("No device selected. Call SetDevice first."))
     }
 
     async fn error_screenshot(&self) -> Vec<u8> {
         let dm = self.device_manager.read().await;
         let serial = dm.active_serial().map(String::from);
-        let platform = dm
-            .active_device()
-            .map(|d| d.platform)
-            .unwrap_or(Platform::Android);
+        let platform = dm.active_device().map(|d| d.platform);
         drop(dm);
-        screenshot::capture_for_error(serial.as_deref(), platform).await
+        match (serial.as_deref(), platform) {
+            (Some(s), Some(p)) => screenshot::capture_for_error(Some(s), p).await,
+            _ => Vec::new(), // No device selected — can't capture
+        }
     }
 
     async fn action_error(
@@ -1028,7 +1037,7 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         let req = request.into_inner();
         let request_id = Self::request_id(&req.request_id);
 
-        let platform = self.active_platform().await;
+        let platform = self.require_platform().await?;
 
         // On iOS, route through the agent (XCUIScreen.main.screenshot()) which
         // is much faster than spawning `xcrun simctl io screenshot` per call.
@@ -1252,7 +1261,7 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         let request_id = Self::request_id(&req.request_id);
 
         let serial = self.active_serial().await?;
-        let platform = self.active_platform().await;
+        let platform = self.require_platform().await?;
 
         info!(serial = %serial, %platform, "Starting agent connection");
 
@@ -1382,7 +1391,7 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
             })),
             Err(e) => {
                 error!(error = %e, "Failed to connect to agent");
-                let platform = self.active_platform().await;
+                let platform = self.require_platform().await?;
                 let screenshot = screenshot::capture_for_error(Some(&serial), platform).await;
                 Ok(Response::new(proto::ActionResponse {
                     request_id,
@@ -1670,7 +1679,7 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         let req = request.into_inner();
         let request_id = Self::request_id(&req.request_id);
         let serial = self.active_serial().await?;
-        let platform = self.active_platform().await;
+        let platform = self.require_platform().await?;
 
         Self::validate_package_name(&req.package_name)?;
 
@@ -1792,7 +1801,7 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
             return Err(Status::invalid_argument("uri is required"));
         }
 
-        let platform = self.active_platform().await;
+        let platform = self.require_platform().await?;
         match platform {
             Platform::Ios => {
                 let serial = self.active_serial().await?;
@@ -1829,7 +1838,7 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         let req = request.into_inner();
         let request_id = Self::request_id(&req.request_id);
 
-        let platform = self.active_platform().await;
+        let platform = self.require_platform().await?;
         let package_name = match platform {
             Platform::Ios => {
                 // On iOS, return the target package from agent config
@@ -1861,7 +1870,7 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         let req = request.into_inner();
         let request_id = Self::request_id(&req.request_id);
 
-        let platform = self.active_platform().await;
+        let platform = self.require_platform().await?;
         let activity = match platform {
             Platform::Ios => {
                 // Android-only concept — iOS doesn't have activities
@@ -1891,7 +1900,7 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
 
         Self::validate_package_name(&req.package_name)?;
 
-        let platform = self.active_platform().await;
+        let platform = self.require_platform().await?;
         match platform {
             Platform::Ios => {
                 let idle_timeout_ms = if req.idle_timeout_ms > 0 {
@@ -1954,7 +1963,7 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
 
         Self::validate_package_name(&req.package_name)?;
 
-        let platform = self.active_platform().await;
+        let platform = self.require_platform().await?;
         match platform {
             Platform::Ios => {
                 let serial = self.active_serial().await?;
@@ -1988,7 +1997,7 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
 
         Self::validate_package_name(&req.package_name)?;
 
-        let platform = self.active_platform().await;
+        let platform = self.require_platform().await?;
         match platform {
             Platform::Ios => {
                 // Route through the XCUITest agent which can query app state
@@ -2067,7 +2076,7 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
 
         Self::validate_package_name(&req.package_name)?;
 
-        let platform = self.active_platform().await;
+        let platform = self.require_platform().await?;
         match platform {
             Platform::Ios => {
                 let serial = self.active_serial().await?;
@@ -2111,7 +2120,7 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
 
         Self::validate_package_name(&req.package_name)?;
 
-        let platform = self.active_platform().await;
+        let platform = self.require_platform().await?;
         match platform {
             Platform::Ios => {
                 let serial = self.active_serial().await?;
@@ -2149,7 +2158,7 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
 
         Self::validate_package_name(&req.package_name)?;
 
-        let platform = self.active_platform().await;
+        let platform = self.require_platform().await?;
         match platform {
             Platform::Ios => {
                 let serial = self.active_serial().await?;
@@ -2227,7 +2236,7 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         let req = request.into_inner();
         let request_id = Self::request_id(&req.request_id);
 
-        let platform = self.active_platform().await;
+        let platform = self.require_platform().await?;
         match platform {
             Platform::Ios => {
                 let command = AgentCommand::SetOrientation {
@@ -2266,7 +2275,7 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         let req = request.into_inner();
         let request_id = Self::request_id(&req.request_id);
 
-        let platform = self.active_platform().await;
+        let platform = self.require_platform().await?;
         match platform {
             Platform::Ios => {
                 let command = AgentCommand::GetOrientation {};
@@ -2307,7 +2316,7 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         let req = request.into_inner();
         let request_id = Self::request_id(&req.request_id);
 
-        let platform = self.active_platform().await;
+        let platform = self.require_platform().await?;
         match platform {
             Platform::Ios => {
                 let command = AgentCommand::IsKeyboardShown {};
@@ -2344,7 +2353,7 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         let req = request.into_inner();
         let request_id = Self::request_id(&req.request_id);
 
-        let platform = self.active_platform().await;
+        let platform = self.require_platform().await?;
         match platform {
             Platform::Ios => {
                 let command = AgentCommand::HideKeyboard {};
@@ -2366,7 +2375,7 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         let req = request.into_inner();
         let request_id = Self::request_id(&req.request_id);
 
-        let platform = self.active_platform().await;
+        let platform = self.require_platform().await?;
         match platform {
             // iOS has no notification shade — success no-op
             Platform::Ios => Ok(Self::success_action_response(request_id)),
@@ -2385,7 +2394,7 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         let req = request.into_inner();
         let request_id = Self::request_id(&req.request_id);
 
-        let platform = self.active_platform().await;
+        let platform = self.require_platform().await?;
         match platform {
             // iOS has no quick settings — success no-op
             Platform::Ios => Ok(Self::success_action_response(request_id)),
@@ -2404,7 +2413,7 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         let req = request.into_inner();
         let request_id = Self::request_id(&req.request_id);
 
-        let platform = self.active_platform().await;
+        let platform = self.require_platform().await?;
         match platform {
             Platform::Ios => {
                 let serial = self.active_serial().await?;
@@ -2447,7 +2456,7 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         let req = request.into_inner();
         let request_id = Self::request_id(&req.request_id);
 
-        let platform = self.active_platform().await;
+        let platform = self.require_platform().await?;
         match platform {
             Platform::Ios => {
                 // Route through agent — it can read UITraitCollection.current
@@ -2490,7 +2499,7 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         let req = request.into_inner();
         let request_id = Self::request_id(&req.request_id);
 
-        let platform = self.active_platform().await;
+        let platform = self.require_platform().await?;
         match platform {
             // iOS simulator is always awake
             Platform::Ios => Ok(Self::success_action_response(request_id)),
@@ -2509,7 +2518,7 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         let req = request.into_inner();
         let request_id = Self::request_id(&req.request_id);
 
-        let platform = self.active_platform().await;
+        let platform = self.require_platform().await?;
         match platform {
             // iOS simulator has no lock screen
             Platform::Ios => Ok(Self::success_action_response(request_id)),
@@ -2787,7 +2796,7 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         let pkg = &req.package_name;
         let local_path = &req.path;
 
-        let platform = self.active_platform().await;
+        let platform = self.require_platform().await?;
         match platform {
             Platform::Ios => {
                 // iOS simulator: app container is on the host filesystem.
@@ -2928,7 +2937,7 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
             )));
         }
 
-        let platform = self.active_platform().await;
+        let platform = self.require_platform().await?;
         match platform {
             Platform::Ios => {
                 // iOS simulator: extract archive directly into the app container
