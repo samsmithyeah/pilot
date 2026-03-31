@@ -112,6 +112,7 @@ async function verifySession(ctx: SessionPreflightContext): Promise<void> {
     // On iOS, verify the app is responsive after launch by polling for a
     // non-empty accessibility hierarchy. Without this, the next test file's
     // beforeAll can race with app startup (React Native JS bundle loading).
+    // Throw on failure so ensureSessionReady triggers recovery.
     const iosDeadline = Date.now() + DEFAULT_READY_TIMEOUT_MS;
     while (Date.now() < iosDeadline) {
       try {
@@ -122,7 +123,7 @@ async function verifySession(ctx: SessionPreflightContext): Promise<void> {
       }
       await new Promise(resolve => setTimeout(resolve, HIERARCHY_POLL_INTERVAL_MS));
     }
-    return;
+    throw new Error('iOS app not ready: accessibility hierarchy is empty after launch');
   }
 
   await ctx.device.waitForIdle(DEFAULT_READY_TIMEOUT_MS);
