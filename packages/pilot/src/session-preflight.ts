@@ -67,17 +67,14 @@ export async function launchConfiguredApp(
       return;
     }
 
-    // On iOS, terminate → clear data → relaunch for isolation between test
-    // files. The terminate is essential: without it, the running app keeps
-    // its in-memory navigation state despite cleared storage, causing the
-    // next file to start on the wrong screen.
-    try {
-      await ctx.device.terminateApp(ctx.config.package);
-    } catch {
-      // App may not be running yet
-    }
+    // On iOS, clear data then restart for isolation between test files.
+    // clearAppData removes AsyncStorage (including React Navigation state).
+    // restartApp handles terminate → relaunch atomically through the daemon
+    // with fallback mechanisms (in-runner relaunch → simctl relaunch →
+    // full agent restart), avoiding the race condition where a separate
+    // terminateApp + launchApp sequence can reconnect to a dying process.
     await ctx.device.clearAppData(ctx.config.package);
-    await ctx.device.launchApp(ctx.config.package);
+    await ctx.device.restartApp(ctx.config.package);
     await ensureSessionReady(ctx, phase);
     return;
   }
