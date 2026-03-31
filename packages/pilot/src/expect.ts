@@ -269,7 +269,7 @@ function wrapAssertionWithTrace(
     // Assertions are read-only — the screen state hasn't changed since the
     // previous capture, so the before-screenshot would be redundant.  This
     // eliminates the ~300ms blocking overhead per assertion on iOS.
-    const { actionIndex } = await trace.collector.captureBeforeAction(
+    await trace.collector.captureBeforeAction(
       async () => undefined,
       async () => undefined,
     );
@@ -323,7 +323,8 @@ function wrapAssertionWithTrace(
     const attempts = Math.max(1, Math.round(duration / POLL_INTERVAL_MS));
 
     // Emit event immediately so _actionIndex increments before the runner
-    // emits group-end boundaries.
+    // emits group-end boundaries.  No after-capture — the trace viewer uses
+    // the next action's before-screenshot as the "after" view.
     trace.collector.addAssertionEvent({
       assertion: (negated ? "not." : "") + name,
       selector: selectorStr,
@@ -335,19 +336,10 @@ function wrapAssertionWithTrace(
       error,
       sourceLocation,
       hasScreenshotBefore: false,
-      hasScreenshotAfter: trace.collector.config.screenshots,
+      hasScreenshotAfter: false,
       hasHierarchyBefore: false,
-      hasHierarchyAfter: trace.collector.config.snapshots,
+      hasHierarchyAfter: false,
     } as Parameters<typeof trace.collector.addAssertionEvent>[0]);
-
-    // Fire-and-forget the after-capture — only writes files, event
-    // already emitted above.
-    const afterCapturePromise = trace.collector.captureAfterAction(
-      actionIndex,
-      trace.takeScreenshot,
-      trace.captureHierarchy,
-    ).then(() => {}, () => { /* best-effort */ });
-    trace.collector.trackPendingCapture(afterCapturePromise);
 
     if (caughtErr !== undefined) {
       throw caughtErr;

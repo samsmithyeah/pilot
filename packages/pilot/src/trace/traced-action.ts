@@ -78,7 +78,7 @@ export async function tracedAction(
       })()
     : Promise.resolve();
 
-  const [, { actionIndex, captures: beforeCaptures }] = await Promise.all([
+  const [, { captures: beforeCaptures }] = await Promise.all([
     boundsPromise,
     ctx.collector.captureBeforeAction(ctx.takeScreenshot, ctx.captureHierarchy),
   ]);
@@ -141,25 +141,19 @@ export async function tracedAction(
   const duration = Date.now() - start;
 
   // Emit event immediately so _actionIndex increments before the runner
-  // emits group-end boundaries.  The after-capture writes screenshot files
-  // in the background and is flushed before trace packaging.
+  // emits group-end boundaries.  No after-capture — the trace viewer uses
+  // the next action's before-screenshot as the "after" view (like Playwright).
+  // This halves the screenshot overhead and avoids fire-and-forget reliability issues.
   ctx.collector.addActionEvent({
     category, action, selector: selectorStr, inputValue: extra?.inputValue,
     duration, success, error, errorStack,
     bounds, point, log,
     hasScreenshotBefore: !!beforeCaptures.screenshotBefore,
-    hasScreenshotAfter: ctx.collector.config.screenshots,
+    hasScreenshotAfter: false,
     hasHierarchyBefore: !!beforeCaptures.hierarchyBefore,
-    hasHierarchyAfter: ctx.collector.config.snapshots,
+    hasHierarchyAfter: false,
     sourceLocation,
   });
-
-  // Fire-and-forget the after-action capture — only writes files, event
-  // already emitted above.
-  const afterCapturePromise = ctx.collector.captureAfterAction(
-    actionIndex, ctx.takeScreenshot, ctx.captureHierarchy,
-  ).then(() => {}, () => { /* best-effort */ });
-  ctx.collector.trackPendingCapture(afterCapturePromise);
 
   if (caughtErr !== undefined) {
     throw caughtErr instanceof Error ? caughtErr : new Error(String(caughtErr));

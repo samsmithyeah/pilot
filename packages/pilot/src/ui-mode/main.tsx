@@ -293,27 +293,12 @@ function App() {
               eventToStore = { ...ev, bounds: prevWithBounds.bounds };
             }
           }
-          const events = [...data.events, eventToStore];
-          const actionEvents = (eventToStore.type === 'action' || eventToStore.type === 'assertion')
+          // Skip internal marker events from the visible event lists
+          const isInternal = ev.type === 'action' && (ev as ActionTraceEvent).action === '__final_screenshot';
+          const events = isInternal ? data.events : [...data.events, eventToStore];
+          const actionEvents = (!isInternal && (eventToStore.type === 'action' || eventToStore.type === 'assertion'))
             ? [...data.actionEvents, eventToStore as ActionTraceEvent | AssertionTraceEvent]
             : data.actionEvents;
-
-          // Handle supplemental capture-update events (deferred after-screenshots)
-          if (ev.type === 'capture-update') {
-            const screenshots = new Map(data.screenshots);
-            const hierarchies = new Map(data.hierarchies);
-            const pad = String(ev.actionIndex).padStart(3, '0');
-            if (msg.screenshotAfter) {
-              const key = `screenshots/action-${pad}-after.png`;
-              const old = screenshots.get(key);
-              if (old) try { URL.revokeObjectURL(old); } catch { /* already revoked */ }
-              screenshots.set(key, base64ToBlobUrl(msg.screenshotAfter));
-            }
-            if (msg.hierarchyAfter) {
-              hierarchies.set(`hierarchy/action-${pad}-after.xml`, msg.hierarchyAfter);
-            }
-            return map.set(testName, { ...data, screenshots, hierarchies });
-          }
 
           // Store screenshots/hierarchies
           const screenshots = new Map(data.screenshots);

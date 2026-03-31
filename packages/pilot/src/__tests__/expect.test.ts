@@ -1795,7 +1795,7 @@ describe("wrapAssertionWithTrace", () => {
     vitestExpect(event.passed).toBe(true);
   });
 
-  it("captures before and after screenshots", async () => {
+  it("captures before screenshot (no after — viewer uses next action's before)", async () => {
     const collector = makeMockCollector();
     const client = makeMockClient(async () => ({
       requestId: "1",
@@ -1808,6 +1808,6 @@ describe("wrapAssertionWithTrace", () => {
     await pilotExpect(handle).toBeVisible({ timeout: 50 });
 
     vitestExpect(collector.captureBeforeAction).toHaveBeenCalledTimes(1);
-    vitestExpect(collector.captureAfterAction).toHaveBeenCalledTimes(1);
+    vitestExpect(collector.captureAfterAction).not.toHaveBeenCalled();
   });
 });

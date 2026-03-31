@@ -727,6 +727,20 @@ async function runSuiteContext(
         }
       }
 
+      // Capture a final screenshot so the last action has an "after" view.
+      // The trace viewer uses the next action's before-screenshot as "after",
+      // so this provides the terminal state.
+      if (traceCollector.config.screenshots) {
+        const tracing = opts.device!.tracing;
+        const { actionIndex: finalIdx } = await traceCollector.captureBeforeAction(
+          tracing['_getScreenshot'],
+          tracing['_getHierarchy'],
+        );
+        // Flush to UI mode live stream — emit a lightweight event so the
+        // screenshot buffer reaches the frontend.
+        traceCollector.emitPendingCaptures(finalIdx);
+      }
+
       const collector = opts.device.tracing._stopManaged();
       setActiveTraceCollector(null);
 

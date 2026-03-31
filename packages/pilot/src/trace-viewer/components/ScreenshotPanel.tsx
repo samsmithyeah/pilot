@@ -86,7 +86,11 @@ export function ScreenshotPanel({ event, screenshots, highlightBounds, onScreens
 
   const pad = String(event.actionIndex).padStart(3, '0');
   const beforeUrl = screenshots.get(`screenshots/action-${pad}-before.png`);
-  const afterUrl = screenshots.get(`screenshots/action-${pad}-after.png`);
+  // "After" = the next action's before-screenshot (screen state after this action).
+  // This avoids capturing 2 screenshots per action through the agent.
+  const nextPad = String(event.actionIndex + 1).padStart(3, '0');
+  const afterUrl = screenshots.get(`screenshots/action-${nextPad}-before.png`)
+    ?? screenshots.get(`screenshots/action-${pad}-after.png`); // fallback for legacy traces
 
   const hasBefore = !!beforeUrl;
   const hasAfter = !!afterUrl;

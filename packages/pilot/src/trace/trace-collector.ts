@@ -403,22 +403,6 @@ export class TraceCollector {
     }
 
     await Promise.all(tasks);
-
-    // Emit supplemental capture data for UI mode live streaming.
-    // The action event was already emitted (for correct index ordering),
-    // so we re-fire _onEvent with a lightweight update carrying the
-    // after-capture buffers.
-    if (this._onEvent) {
-      const pending = this._pendingCaptures.get(actionIndex);
-      if (pending && (pending.after || pending.hierarchyAfter)) {
-        this._pendingCaptures.delete(actionIndex);
-        this._onEvent(
-          { type: 'capture-update', actionIndex, timestamp: Date.now() } as AnyTraceEvent,
-          pending,
-        );
-      }
-    }
-
     return captures;
   }
 
@@ -437,6 +421,38 @@ export class TraceCollector {
   async flushPendingCaptures(): Promise<void> {
     await Promise.allSettled(this._pendingAfterCaptures);
     this._pendingAfterCaptures = [];
+  }
+
+  /**
+   * Flush buffered screenshot/hierarchy data for a given action index via
+   * the live event callback.  Used to stream the final end-of-test screenshot
+   * to UI mode without emitting a visible action event.
+   */
+  emitPendingCaptures(actionIndex: number): void {
+    if (!this._onEvent) return;
+    const pending = this._pendingCaptures.get(actionIndex);
+    if (pending) {
+      this._pendingCaptures.delete(actionIndex);
+      // Emit as an action event with the screenshot data so the frontend
+      // stores it in the screenshots map at the correct key.
+      this._onEvent(
+        {
+          type: 'action',
+          actionIndex,
+          timestamp: Date.now(),
+          category: 'other',
+          action: '__final_screenshot',
+          duration: 0,
+          success: true,
+          log: [],
+          hasScreenshotBefore: !!pending.before,
+          hasScreenshotAfter: false,
+          hasHierarchyBefore: !!pending.hierarchyBefore,
+          hasHierarchyAfter: false,
+        } as ActionTraceEvent,
+        pending,
+      );
+    }
   }
 
   /**
