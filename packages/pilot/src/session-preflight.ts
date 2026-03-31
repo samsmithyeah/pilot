@@ -67,11 +67,15 @@ export async function launchConfiguredApp(
       return;
     }
 
-    // On iOS, clear data for isolation then restart the app.
-    // clearAppData removes AsyncStorage, caches, etc. without uninstalling.
-    // restartApp does a full agent restart — terminate, kill runner, relaunch.
-    await ctx.device.clearAppData(ctx.config.package);
-    await ctx.device.restartApp(ctx.config.package);
+    // On iOS, terminate and relaunch for isolation between test files.
+    // This ensures the app starts fresh on the home screen.
+    try {
+      await ctx.device.terminateApp(ctx.config.package);
+    } catch {
+      // App may not be running yet
+    }
+    await ctx.device.launchApp(ctx.config.package);
+    await ensureSessionReady(ctx, phase);
     return;
   }
 
