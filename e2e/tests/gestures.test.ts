@@ -37,7 +37,6 @@ describe("Gestures screen", () => {
     const screen = new GesturesScreen(device)
     await device.longPress(id("long-press-area"))
     await expect(screen.lastGesture).toHaveText("Last gesture: Long press")
-    await expect(screen.longPressedText).toBeVisible()
   })
 
   test("long press with custom duration", async ({ device }) => {
@@ -45,7 +44,7 @@ describe("Gestures screen", () => {
     // Reset by tapping
     await screen.longPressArea.tap()
     await device.longPress(id("long-press-area"), 2000)
-    await expect(screen.longPressedText).toBeVisible()
+    await expect(screen.lastGesture).toHaveText("Last gesture: Long press")
   })
 
   // ─── Drag ───

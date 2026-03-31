@@ -12,5 +12,4 @@ export class GesturesScreen {
   get pinchArea() { return this.device.element(id("pinch-area")) }
   get swipeArea() { return this.device.element(id("swipe-area")) }
   get noGestureText() { return this.device.element(text("Last gesture: None")) }
-  get longPressedText() { return this.device.element(text("Long pressed!")) }
 }

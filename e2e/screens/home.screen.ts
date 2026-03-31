@@ -14,8 +14,4 @@ export class HomeScreen {
   get dialogsCard() { return this.device.element(text("Dialogs")) }
   get slowLoadCard() { return this.device.element(text("Slow Load")) }
   get scrollCard() { return this.device.element(text("Scroll")) }
-
-  // Card descriptions
-  get loginDescription() { return this.device.element(text("Text inputs, buttons, focus/blur, keyboard")) }
-  get listDescription() { return this.device.element(text("Scrollable list, filtering, counting items")) }
 }

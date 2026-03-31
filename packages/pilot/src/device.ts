@@ -172,6 +172,7 @@ export class Device {
       () => this._client.pressKey(key), 'Press key failed');
   }
 
+  /** Press the hardware back button. @platform android */
   async pressBack(): Promise<void> {
     return this.pressKey('BACK');
   }
@@ -303,6 +304,7 @@ export class Device {
     return res.packageName;
   }
 
+  /** Return the current foreground activity name (e.g. `.MainActivity`). @platform android */
   async currentActivity(): Promise<string> {
     const res = await this._client.getCurrentActivity();
     return res.activity;
@@ -319,6 +321,7 @@ export class Device {
     return res.state as AppState;
   }
 
+  /** Send the app to the background by pressing the home key. @platform android */
   async sendToBackground(): Promise<void> {
     return this.pressKey('HOME');
   }
@@ -339,18 +342,21 @@ export class Device {
       'Restore app state failed');
   }
 
+  /** Clear app data and stop the app. @platform android */
   async clearAppData(packageName: string): Promise<void> {
     return this._tracedAction('clearAppData', 'device', undefined,
       () => this._client.clearAppData(packageName),
       'Clear app data failed');
   }
 
+  /** Programmatically grant a runtime permission. @platform android */
   async grantPermission(packageName: string, permission: string): Promise<void> {
     return this._tracedAction('grantPermission', 'device', undefined,
       () => this._client.grantPermission(packageName, permission),
       'Grant permission failed');
   }
 
+  /** Revoke a previously granted runtime permission. @platform android */
   async revokePermission(packageName: string, permission: string): Promise<void> {
     return this._tracedAction('revokePermission', 'device', undefined,
       () => this._client.revokePermission(packageName, permission),
@@ -402,26 +408,31 @@ export class Device {
       'Unlock device failed');
   }
 
+  /** Press the home button. @platform android */
   async pressHome(): Promise<void> {
     return this.pressKey('HOME');
   }
 
+  /** Open the notification shade. @platform android */
   async openNotifications(): Promise<void> {
     return this._tracedAction('openNotifications', 'device', undefined,
       () => this._client.openNotifications(),
       'Open notifications failed');
   }
 
+  /** Open the quick settings panel. @platform android */
   async openQuickSettings(): Promise<void> {
     return this._tracedAction('openQuickSettings', 'device', undefined,
       () => this._client.openQuickSettings(),
       'Open quick settings failed');
   }
 
+  /** Open the recent apps screen. @platform android */
   async pressRecentApps(): Promise<void> {
     return this.pressKey('APP_SWITCH');
   }
 
+  /** Set the device color scheme (dark/light). @platform android */
   async setColorScheme(scheme: ColorScheme): Promise<void> {
     return this._tracedAction('setColorScheme', 'device', undefined,
       () => this._client.setColorScheme(scheme),

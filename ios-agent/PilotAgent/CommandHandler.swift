@@ -556,17 +556,28 @@ class CommandHandler {
             return ["shown": shown]
 
         case "hideKeyboard":
+            // Check if keyboard is actually shown before attempting dismissal.
+            // Without this, app.windows.firstMatch.frame.size below triggers a
+            // quiescence wait (~30s hang) when no keyboard is present.
+            let kbSnapshot = try? app.snapshot()
+            let kbDict = kbSnapshot.map { $0.dictionaryRepresentation } ?? [:]
+            guard hasKeyboardInSnapshot(kbDict) else {
+                return ["success": true]
+            }
+
             // Dismiss the keyboard using a tiny swipe gesture (Maestro's approach).
             // A small vertical swipe triggers keyboard dismissal via the scroll
             // interaction, bypassing keyboardShouldPersistTaps.
             Thread.sleep(forTimeInterval: 0.3) // Let keyboard fully appear/settle
-            let screenSize = app.windows.firstMatch.frame.size
-            let midX = CGFloat(screenSize.width / 2)
-            let midY = CGFloat(screenSize.height / 2)
+            // Use cached screen size to avoid app.windows.firstMatch.frame.size
+            // which triggers quiescence on Xcode 26.
+            let kbScreenSize = snapshotFinder.screenSize
+            let midX = CGFloat(kbScreenSize.width / 2)
+            let midY = CGFloat(kbScreenSize.height / 2)
             // Try vertical swipe first
             if !EventSynthesizer.swipe(
                 from: CGPoint(x: midX, y: midY),
-                to: CGPoint(x: midX, y: midY - screenSize.height * 0.03),
+                to: CGPoint(x: midX, y: midY - kbScreenSize.height * 0.03),
                 duration: 0.05
             ) {
                 // Fallback: tap above keyboard area
@@ -576,7 +587,7 @@ class CommandHandler {
             // If keyboard is still showing, try horizontal swipe
             _ = EventSynthesizer.swipe(
                 from: CGPoint(x: midX, y: midY),
-                to: CGPoint(x: midX - screenSize.width * 0.03, y: midY),
+                to: CGPoint(x: midX - kbScreenSize.width * 0.03, y: midY),
                 duration: 0.05
             )
             Thread.sleep(forTimeInterval: 0.3)
