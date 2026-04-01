@@ -41,6 +41,7 @@ import {
   preserveSimulatorsForReuse,
   forceCleanupSimulators,
   filterHealthySimulators,
+  listCompatibleBootedSimulators,
   type ClonedSimulator,
 } from './ios-simulator.js';
 
@@ -172,8 +173,17 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
 
   if (isIos) {
     // ─── iOS device discovery & provisioning ───
+    // The daemon reports ALL booted iOS simulators. Filter to only those
+    // compatible with the primary — different runtimes cause xcodebuild
+    // test-without-building to fail since the xctestrun is OS-version-specific.
     const iosDevices = onlineDevices.filter((d) => d.platform === 'ios');
-    const iosHealthy = filterHealthySimulators(iosDevices.map((d) => d.serial));
+    let candidateUdids = iosDevices.map((d) => d.serial);
+    if (candidateUdids.length > 0) {
+      const compatible = listCompatibleBootedSimulators(candidateUdids[0]);
+      const compatibleSet = new Set(compatible.map((s) => s.udid));
+      candidateUdids = candidateUdids.filter((u) => compatibleSet.has(u));
+    }
+    const iosHealthy = filterHealthySimulators(candidateUdids);
     for (const unhealthy of iosHealthy.unhealthySimulators) {
       process.stderr.write(
         `${YELLOW}Skipping unhealthy simulator ${unhealthy.udid}: ${unhealthy.reason}.${RESET}\n`,
@@ -346,10 +356,6 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
 
     const launchedSerials = new Set(launchedEmulators.map((emu) => emu.serial));
 
-    // Initialize all workers in parallel — each has its own daemon, device,
-    // and agent so there are no shared resources during init.
-    const initPromises: Promise<WorkerHandle>[] = [];
-
     // Pre-check port availability to avoid wasting time on occupied ports.
     // Ports are baseDaemonPort+1+workerId; skip workers whose port is taken.
     const availableWorkerSlots: Array<{ workerId: number; daemonPort: number; agentPort: number }> = [];
@@ -364,6 +370,10 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
         );
       }
     }
+
+    // Initialize all workers in parallel — each has its own daemon, device,
+    // and agent so there are no shared resources during init.
+    const initPromises: Promise<WorkerHandle>[] = [];
 
     for (const slot of availableWorkerSlots) {
       const candidateSerial = deviceSerials[slot.workerId];

@@ -1001,14 +1001,16 @@ async function main(): Promise<void> {
       let uiDeviceSerials: string[] | undefined;
       if (config.workers > 1) {
         if (config.platform === 'ios') {
-          const { listBootedSimulators, provisionSimulators, cleanupStaleSimulators } = await import('./ios-simulator.js');
+          const { listCompatibleBootedSimulators, provisionSimulators, cleanupStaleSimulators } = await import('./ios-simulator.js');
           let reusableUdids: string[] = [];
           if (config.simulator) {
             const staleResult = cleanupStaleSimulators(config.simulator);
             reusableUdids = staleResult.reusable;
           }
-          const booted = listBootedSimulators();
-          const others = booted.filter((s) => s.udid !== config.device).map((s) => s.udid);
+          // Only reuse simulators on the same runtime as the primary — mismatched
+          // OS versions cause xcodebuild test-without-building to fail.
+          const compatible = listCompatibleBootedSimulators(config.device!);
+          const others = compatible.filter((s) => s.udid !== config.device).map((s) => s.udid);
           uiDeviceSerials = [config.device!, ...others].filter(Boolean);
 
           if (uiDeviceSerials.length < config.workers && config.simulator) {
@@ -1086,14 +1088,14 @@ async function main(): Promise<void> {
       let watchDeviceSerials: string[] | undefined;
       if (config.workers > 1) {
         if (config.platform === 'ios') {
-          const { listBootedSimulators, provisionSimulators, cleanupStaleSimulators } = await import('./ios-simulator.js');
+          const { listCompatibleBootedSimulators, provisionSimulators, cleanupStaleSimulators } = await import('./ios-simulator.js');
           let reusableUdids: string[] = [];
           if (config.simulator) {
             const staleResult = cleanupStaleSimulators(config.simulator);
             reusableUdids = staleResult.reusable;
           }
-          const booted = listBootedSimulators();
-          const others = booted.filter((s) => s.udid !== config.device).map((s) => s.udid);
+          const compatible = listCompatibleBootedSimulators(config.device!);
+          const others = compatible.filter((s) => s.udid !== config.device).map((s) => s.udid);
           watchDeviceSerials = [config.device!, ...others].filter(Boolean);
 
           if (watchDeviceSerials.length < config.workers && config.simulator) {

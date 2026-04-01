@@ -67,6 +67,20 @@ export function listBootedSimulators(): SimulatorInfo[] {
 }
 
 /**
+ * List booted simulators compatible with a primary device for multi-worker use.
+ *
+ * Only returns simulators that share the same iOS runtime as the primary device.
+ * This prevents xcodebuild test-without-building failures from runtime mismatches
+ * (e.g. an xctestrun built for iOS 26.4 won't work on a simulator running 26.1).
+ */
+export function listCompatibleBootedSimulators(primaryUdid: string): SimulatorInfo[] {
+  const booted = listBootedSimulators();
+  const primary = booted.find((s) => s.udid === primaryUdid);
+  if (!primary) return [];
+  return booted.filter((s) => s.runtime === primary.runtime);
+}
+
+/**
  * Boot a simulator by UDID.
  */
 export function bootSimulator(udid: string): void {

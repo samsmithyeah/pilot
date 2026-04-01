@@ -99,10 +99,18 @@ async fn start_agent_impl(
         .spawn()
         .context("Failed to spawn xcodebuild for iOS agent")?;
 
-    // Spawn a task to drain stdout/stderr and log it
+    // Spawn tasks to drain stdout/stderr, collecting the last N lines for
+    // error reporting if xcodebuild exits before the agent comes up.
     let mut child = child;
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
+
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    let stderr_tail: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let stderr_tail_writer = stderr_tail.clone();
+
     tokio::spawn(async move {
         use tokio::io::{AsyncBufReadExt, BufReader};
         if let Some(stdout) = stdout {
@@ -118,7 +126,21 @@ async fn start_agent_impl(
             let mut reader = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = reader.next_line().await {
                 info!(target: "xcodebuild::stderr", "{}", line);
+                let mut tail = stderr_tail_writer.lock().await;
+                tail.push(line);
+                if tail.len() > 20 {
+                    tail.remove(0);
+                }
             }
+        }
+    });
+
+    // Track xcodebuild exit so we can fail fast instead of polling for 150s.
+    let exit_status: Arc<Mutex<Option<std::process::ExitStatus>>> = Arc::new(Mutex::new(None));
+    let exit_writer = exit_status.clone();
+    tokio::spawn(async move {
+        if let Ok(status) = child.wait().await {
+            *exit_writer.lock().await = Some(status);
         }
     });
 
@@ -132,6 +154,16 @@ async fn start_agent_impl(
             bail!(
                 "Timed out waiting for iOS agent to start on simulator {udid}. \
                  Check that the XCUITest bundle is built correctly."
+            );
+        }
+
+        // If xcodebuild exited, the agent won't come up — fail immediately.
+        if let Some(status) = *exit_status.lock().await {
+            let tail = stderr_tail.lock().await;
+            let last_lines = tail.join("\n");
+            bail!(
+                "xcodebuild exited with {status} before the iOS agent became \
+                 ready on simulator {udid}.\nxcodebuild stderr (last lines):\n{last_lines}"
             );
         }
 

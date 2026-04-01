@@ -163,7 +163,6 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
       const deviceSerial = ctx.deviceSerials[i];
       const daemonPort = baseDaemonPort + 100 + i;
       const agentPort = baseAgentPort + 100 + i;
-
       try {
         const worker = await initOneWatchWorker(i, deviceSerial, daemonPort, agentPort, daemonBin);
         watchWorkers.push(worker);
