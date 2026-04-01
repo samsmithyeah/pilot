@@ -6,6 +6,9 @@
  */
 
 import { execFileSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
 export interface SimulatorInfo {
   udid: string
@@ -226,6 +229,233 @@ export function deleteSimulator(udid: string): void {
   }
 }
 
+// ─── Simulator manifest ───
+//
+// Tracks which simulators Pilot cloned so they can be reused across runs
+// (or cleaned up if the previous process died without cleanup).
+
+interface SimulatorManifestEntry {
+  udid: string
+  name: string
+  sourceName: string
+  createdAt: string
+}
+
+function simulatorManifestPath(): string {
+  return path.join(os.tmpdir(), 'pilot-simulators.json');
+}
+
+// Note: read/write is not atomic. Concurrent Pilot runs may race on this file.
+// In practice this is rare and the worst case is a stale entry cleaned up next run.
+function readSimulatorManifest(): SimulatorManifestEntry[] {
+  try {
+    const raw = fs.readFileSync(simulatorManifestPath(), 'utf-8');
+    const entries = JSON.parse(raw);
+    return Array.isArray(entries) ? entries : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeSimulatorManifest(entries: SimulatorManifestEntry[]): void {
+  try {
+    fs.writeFileSync(simulatorManifestPath(), JSON.stringify(entries, null, 2));
+  } catch {
+    // Best effort — tmp dir might be read-only in exotic setups
+  }
+}
+
+/**
+ * Record cloned simulators in the manifest so a future run can reuse them.
+ */
+export function recordClonedSimulators(
+  clones: ClonedSimulator[],
+  sourceName: string,
+): void {
+  const existing = readSimulatorManifest();
+  const existingUdids = new Set(existing.map((e) => e.udid));
+  const newEntries: SimulatorManifestEntry[] = clones
+    .filter((c) => !existingUdids.has(c.udid))
+    .map((c) => ({
+      udid: c.udid,
+      name: c.name,
+      sourceName,
+      createdAt: new Date().toISOString(),
+    }));
+  writeSimulatorManifest([...existing, ...newEntries]);
+}
+
+/**
+ * Remove simulators from the manifest (called during force-cleanup).
+ */
+export function unrecordSimulators(udids: string[]): void {
+  const toRemove = new Set(udids);
+  const existing = readSimulatorManifest();
+  writeSimulatorManifest(existing.filter((e) => !toRemove.has(e.udid)));
+}
+
+// ─── Health checks ───
+
+export interface SimulatorHealthResult {
+  udid: string
+  healthy: boolean
+  reason?: string
+}
+
+/**
+ * Probe whether a simulator is healthy and usable for testing.
+ *
+ * Checks: exists in simctl list, is booted, launchd is responsive.
+ */
+export function probeSimulatorHealth(udid: string): SimulatorHealthResult {
+  // Check 1: exists and is booted
+  const sims = listSimulators();
+  const sim = sims.find((s) => s.udid === udid);
+  if (!sim) {
+    return { udid, healthy: false, reason: 'simulator no longer exists' };
+  }
+  if (sim.state !== 'Booted') {
+    return { udid, healthy: false, reason: `simulator is ${sim.state}, not Booted` };
+  }
+
+  // Check 2: launchd is responsive (proves the sim's system services are running)
+  try {
+    execFileSync('xcrun', ['simctl', 'spawn', udid, 'launchctl', 'print', 'system'], {
+      timeout: 5_000,
+      stdio: 'ignore',
+    });
+  } catch {
+    return { udid, healthy: false, reason: 'simulator launchd is unresponsive' };
+  }
+
+  return { udid, healthy: true };
+}
+
+/**
+ * Batch health-check a list of simulator UDIDs.
+ */
+export function filterHealthySimulators(
+  udids: string[],
+): { healthyUdids: string[]; unhealthySimulators: SimulatorHealthResult[] } {
+  const healthyUdids: string[] = [];
+  const unhealthySimulators: SimulatorHealthResult[] = [];
+
+  for (const udid of udids) {
+    const result = probeSimulatorHealth(udid);
+    if (result.healthy) {
+      healthyUdids.push(udid);
+    } else {
+      unhealthySimulators.push(result);
+    }
+  }
+
+  return { healthyUdids, unhealthySimulators };
+}
+
+// ─── Stale cleanup ───
+
+export interface CleanupStaleSimulatorsResult {
+  /** UDIDs of healthy clones ready for reuse. */
+  reusable: string[]
+  /** UDIDs of deleted clones. */
+  killed: string[]
+}
+
+/**
+ * Clean up stale simulators from previous runs and identify reusable clones.
+ *
+ * Phase 1: Manifest-based — health-check tracked clones, reuse healthy ones, delete unhealthy.
+ * Phase 2: Heuristic — delete orphaned "Pilot Worker" sims not in manifest.
+ * Phase 3: Kill stale xcodebuild processes referencing deleted sims.
+ */
+export function cleanupStaleSimulators(
+  simulatorName: string,
+): CleanupStaleSimulatorsResult {
+  const reusable: string[] = [];
+  const killed: string[] = [];
+  const handledUdids = new Set<string>();
+
+  // Phase 1: manifest-based reclamation
+  const manifest = readSimulatorManifest();
+  const surviving: SimulatorManifestEntry[] = [];
+
+  for (const entry of manifest) {
+    // Only reclaim clones matching the current simulator name
+    if (entry.sourceName !== simulatorName) {
+      surviving.push(entry);
+      handledUdids.add(entry.udid);
+      continue;
+    }
+
+    const health = probeSimulatorHealth(entry.udid);
+    handledUdids.add(entry.udid);
+
+    if (health.healthy) {
+      reusable.push(entry.udid);
+      surviving.push(entry);
+    } else if (health.reason === 'simulator no longer exists') {
+      // Already gone — just drop from manifest
+      killed.push(entry.udid);
+    } else {
+      // Exists but unhealthy — delete it
+      deleteSimulator(entry.udid);
+      killed.push(entry.udid);
+    }
+  }
+
+  writeSimulatorManifest(surviving);
+
+  // Phase 2: heuristic cleanup — delete orphaned "Pilot Worker" sims
+  const allSims = listSimulators();
+  const pilotWorkerPattern = /\(Pilot Worker \d+\)$/;
+
+  for (const sim of allSims) {
+    if (handledUdids.has(sim.udid)) continue;
+    if (!pilotWorkerPattern.test(sim.name)) continue;
+
+    deleteSimulator(sim.udid);
+    killed.push(sim.udid);
+  }
+
+  // Phase 3: kill stale xcodebuild processes for deleted sims
+  for (const udid of killed) {
+    try {
+      execFileSync('pkill', ['-f', `xcodebuild.*test-without-building.*id=${udid}`], {
+        timeout: 5_000,
+        stdio: 'ignore',
+      });
+    } catch {
+      // No matching process — fine
+    }
+  }
+
+  return { reusable, killed };
+}
+
+// ─── Reuse helpers ───
+
+/**
+ * Preserve cloned simulators for reuse by the next run.
+ * Intentionally a no-op — clones stay booted and in the manifest.
+ */
+export function preserveSimulatorsForReuse(_cloned: ClonedSimulator[]): void {
+  // No-op. Simulators stay alive and in the manifest so the next run
+  // can reuse them via cleanupStaleSimulators().
+}
+
+/**
+ * Emergency cleanup — delete all cloned simulators and remove from manifest.
+ * Used on SIGINT/SIGTERM or fatal errors.
+ */
+export function forceCleanupSimulators(cloned: ClonedSimulator[]): void {
+  const udids: string[] = [];
+  for (const sim of cloned) {
+    deleteSimulator(sim.udid);
+    udids.push(sim.udid);
+  }
+  unrecordSimulators(udids);
+}
+
 /**
  * Provision multiple iOS simulators for parallel test execution.
  *
@@ -245,8 +475,10 @@ export function provisionSimulators(opts: {
   existingUdids?: string[]
   /** Path to .app bundle — install on freshly booted sims so workers don't have to. */
   appPath?: string
+  /** UDIDs of reusable clones from cleanupStaleSimulators() — use before cloning new ones. */
+  reusableUdids?: string[]
 }): ProvisionSimulatorsResult {
-  const { simulatorName, workers, existingUdids = [] } = opts;
+  const { simulatorName, workers, existingUdids = [], reusableUdids = [] } = opts;
   const existingSet = new Set(existingUdids);
   const allUdids = [...existingUdids];
   const clonedSimulators: ClonedSimulator[] = [];
@@ -256,10 +488,36 @@ export function provisionSimulators(opts: {
     return { allUdids: allUdids.slice(0, workers), clonedSimulators, freshUdids };
   }
 
-  const all = listSimulators();
-  const matching = all.filter((s) => s.name === simulatorName && !existingSet.has(s.udid));
+  // Phase 0a: reuse healthy clones from previous runs (already booted)
+  for (const udid of reusableUdids) {
+    if (allUdids.length >= workers) break;
+    if (existingSet.has(udid)) continue;
+    allUdids.push(udid);
+    // Track as cloned so callers know to manage them
+    const sims = listSimulators();
+    const sim = sims.find((s) => s.udid === udid);
+    if (sim) {
+      clonedSimulators.push({ udid, name: sim.name, cloned: true });
+    }
+  }
 
-  // Phase 0: collect already-booted simulators not yet assigned
+  // Prune excess reusable clones beyond what we need
+  const unusedReusable = reusableUdids.filter((u) => !allUdids.includes(u));
+  if (unusedReusable.length > 0) {
+    for (const udid of unusedReusable) {
+      deleteSimulator(udid);
+    }
+    unrecordSimulators(unusedReusable);
+  }
+
+  if (allUdids.length >= workers) {
+    return { allUdids: allUdids.slice(0, workers), clonedSimulators, freshUdids };
+  }
+
+  const all = listSimulators();
+  const matching = all.filter((s) => s.name === simulatorName && !existingSet.has(s.udid) && !allUdids.includes(s.udid));
+
+  // Phase 0b: collect already-booted simulators not yet assigned
   const alreadyBooted = matching.filter((s) => s.state === 'Booted');
   for (const sim of alreadyBooted) {
     if (allUdids.length >= workers) break;
@@ -331,10 +589,19 @@ export function provisionSimulators(opts: {
       }
     }
   } finally {
-    // Re-boot the source if we shut it down for cloning
+    // Re-boot the source if we shut it down for cloning, and re-add to pool
     if (shutdownForClone) {
       bootSimulator(source.udid);
+      if (!allUdids.includes(source.udid)) {
+        allUdids.unshift(source.udid);
+      }
     }
+  }
+
+  // Record newly cloned sims in the manifest for reuse by future runs
+  const newlyCloned = clonedSimulators.filter((c) => freshUdids.has(c.udid));
+  if (newlyCloned.length > 0) {
+    recordClonedSimulators(newlyCloned, simulatorName);
   }
 
   return { allUdids: allUdids.slice(0, workers), clonedSimulators, freshUdids };

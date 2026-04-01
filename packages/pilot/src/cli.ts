@@ -300,8 +300,16 @@ async function ensureSequentialTargetDevice(
 
   // ─── iOS: use simulator instead of ADB device ───
   if (config.platform === 'ios') {
-    const { listBootedSimulators, provisionSimulator } = await import('./ios-simulator.js');
+    const { listBootedSimulators, provisionSimulator, cleanupStaleSimulators } = await import('./ios-simulator.js');
     const simulatorName = config.simulator ?? 'iPhone 17';
+
+    // Clean up stale clones from previous runs
+    const staleResult = cleanupStaleSimulators(simulatorName);
+    if (staleResult.killed.length > 0) {
+      process.stderr.write(
+        `${DIM}Cleaned up ${staleResult.killed.length} stale simulator(s).${RESET}\n`,
+      );
+    }
 
     // Check for already-booted simulators
     const booted = listBootedSimulators();
@@ -993,7 +1001,12 @@ async function main(): Promise<void> {
       let uiDeviceSerials: string[] | undefined;
       if (config.workers > 1) {
         if (config.platform === 'ios') {
-          const { listBootedSimulators, provisionSimulators } = await import('./ios-simulator.js');
+          const { listBootedSimulators, provisionSimulators, cleanupStaleSimulators } = await import('./ios-simulator.js');
+          let reusableUdids: string[] = [];
+          if (config.simulator) {
+            const staleResult = cleanupStaleSimulators(config.simulator);
+            reusableUdids = staleResult.reusable;
+          }
           const booted = listBootedSimulators();
           const others = booted.filter((s) => s.udid !== config.device).map((s) => s.udid);
           uiDeviceSerials = [config.device!, ...others].filter(Boolean);
@@ -1003,6 +1016,7 @@ async function main(): Promise<void> {
               simulatorName: config.simulator,
               workers: config.workers,
               existingUdids: uiDeviceSerials,
+              reusableUdids,
             });
             uiDeviceSerials = provision.allUdids;
           }
@@ -1072,7 +1086,12 @@ async function main(): Promise<void> {
       let watchDeviceSerials: string[] | undefined;
       if (config.workers > 1) {
         if (config.platform === 'ios') {
-          const { listBootedSimulators, provisionSimulators } = await import('./ios-simulator.js');
+          const { listBootedSimulators, provisionSimulators, cleanupStaleSimulators } = await import('./ios-simulator.js');
+          let reusableUdids: string[] = [];
+          if (config.simulator) {
+            const staleResult = cleanupStaleSimulators(config.simulator);
+            reusableUdids = staleResult.reusable;
+          }
           const booted = listBootedSimulators();
           const others = booted.filter((s) => s.udid !== config.device).map((s) => s.udid);
           watchDeviceSerials = [config.device!, ...others].filter(Boolean);
@@ -1082,6 +1101,7 @@ async function main(): Promise<void> {
               simulatorName: config.simulator,
               workers: config.workers,
               existingUdids: watchDeviceSerials,
+              reusableUdids,
             });
             watchDeviceSerials = provision.allUdids;
           }

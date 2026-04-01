@@ -37,7 +37,10 @@ import {
 } from './emulator.js';
 import {
   provisionSimulators,
-  deleteSimulator,
+  cleanupStaleSimulators,
+  preserveSimulatorsForReuse,
+  forceCleanupSimulators,
+  filterHealthySimulators,
   type ClonedSimulator,
 } from './ios-simulator.js';
 
@@ -86,8 +89,25 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
   const isIos = config.platform === 'ios';
   const deviceStrategy = resolveDeviceStrategy(config);
 
-  // ─── Android-specific pre-discovery cleanup ───
-  if (!isIos) {
+  // ─── Pre-discovery cleanup ───
+  let reusableSimulatorUdids: string[] = [];
+
+  if (isIos) {
+    if (config.simulator) {
+      const staleResult = cleanupStaleSimulators(config.simulator);
+      reusableSimulatorUdids = staleResult.reusable;
+      if (staleResult.killed.length > 0) {
+        process.stderr.write(
+          `${DIM}Cleaned up ${staleResult.killed.length} stale simulator(s).${RESET}\n`,
+        );
+      }
+      if (staleResult.reusable.length > 0) {
+        process.stderr.write(
+          `${DIM}Reusing ${staleResult.reusable.length} simulator(s) from previous run.${RESET}\n`,
+        );
+      }
+    }
+  } else {
     const clearedOfflineEmulators = clearOfflineEmulatorTransports();
     for (const serial of clearedOfflineEmulators) {
       process.stderr.write(
@@ -153,7 +173,13 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
   if (isIos) {
     // ─── iOS device discovery & provisioning ───
     const iosDevices = onlineDevices.filter((d) => d.platform === 'ios');
-    deviceSerials = iosDevices.map((d) => d.serial);
+    const iosHealthy = filterHealthySimulators(iosDevices.map((d) => d.serial));
+    for (const unhealthy of iosHealthy.unhealthySimulators) {
+      process.stderr.write(
+        `${YELLOW}Skipping unhealthy simulator ${unhealthy.udid}: ${unhealthy.reason}.${RESET}\n`,
+      );
+    }
+    deviceSerials = iosHealthy.healthyUdids;
 
     const neededWorkers = Math.min(opts.workers, testFiles.length);
     if (deviceSerials.length < neededWorkers && config.simulator) {
@@ -165,6 +191,7 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
         workers: neededWorkers,
         existingUdids: deviceSerials,
         appPath: config.app ? path.resolve(config.rootDir, config.app) : undefined,
+        reusableUdids: reusableSimulatorUdids,
       });
       clonedSimulators = provision.clonedSimulators;
       freshIosUdids = provision.freshUdids;
@@ -269,8 +296,8 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
     if (launchedEmulators.length > 0) {
       forceCleanupEmulators(launchedEmulators);
     }
-    for (const sim of clonedSimulators) {
-      deleteSimulator(sim.udid);
+    if (clonedSimulators.length > 0) {
+      forceCleanupSimulators(clonedSimulators);
     }
   };
   process.on('SIGINT', emergencyCleanup);
@@ -656,10 +683,9 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
     }
 
     if (isIos) {
-      // 3. Clean up cloned simulators created for this run.
-      for (const sim of clonedSimulators) {
-        deleteSimulator(sim.udid);
-      }
+      // 3. Preserve cloned simulators for reuse by the next run.
+      // They stay booted and in the manifest. Only emergency cleanup deletes them.
+      preserveSimulatorsForReuse(clonedSimulators);
     } else {
       // 3. Clean up ADB port forwards created by worker daemons.
       // Each daemon set up `adb forward tcp:<agentPort> tcp:18700` on its device.
