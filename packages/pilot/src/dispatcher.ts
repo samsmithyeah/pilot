@@ -35,6 +35,11 @@ import {
   type DeviceHealthResult,
   type LaunchedEmulator,
 } from './emulator.js';
+import {
+  provisionSimulators,
+  deleteSimulator,
+  type ClonedSimulator,
+} from './ios-simulator.js';
 
 const DIM = '\x1b[2m';
 const YELLOW = '\x1b[33m';
@@ -78,22 +83,24 @@ const LAUNCHED_EMULATOR_INIT_TIMEOUT_MS = 180_000;
  */
 export async function runParallel(opts: DispatcherOptions): Promise<FullResult> {
   const { config, reporter, testFiles } = opts;
+  const isIos = config.platform === 'ios';
   const deviceStrategy = resolveDeviceStrategy(config);
 
-  const clearedOfflineEmulators = clearOfflineEmulatorTransports();
-  for (const serial of clearedOfflineEmulators) {
-    process.stderr.write(
-      `${YELLOW}Cleared stale offline emulator transport ${serial} before device discovery.${RESET}\n`,
-    );
-  }
+  // ─── Android-specific pre-discovery cleanup ───
+  if (!isIos) {
+    const clearedOfflineEmulators = clearOfflineEmulatorTransports();
+    for (const serial of clearedOfflineEmulators) {
+      process.stderr.write(
+        `${YELLOW}Cleared stale offline emulator transport ${serial} before device discovery.${RESET}\n`,
+      );
+    }
 
-  // Reclaim healthy emulators from previous runs, kill unhealthy ones.
-  // cleanupStaleEmulators logs details about each action internally.
-  const staleResult = cleanupStaleEmulators(config.avd);
-  if (staleResult.killed.length > 0) {
-    process.stderr.write(
-      `${DIM}Cleaned up ${staleResult.killed.length} stale emulator(s).${RESET}\n`,
-    );
+    const staleResult = cleanupStaleEmulators(config.avd);
+    if (staleResult.killed.length > 0) {
+      process.stderr.write(
+        `${DIM}Cleaned up ${staleResult.killed.length} stale emulator(s).${RESET}\n`,
+      );
+    }
   }
 
   // Spawn the first worker daemon early so we can use it for device discovery.
@@ -138,59 +145,96 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
     d.state === 'Discovered' || d.state === 'Active',
   );
 
-  const prefilteredOnline = prefilterDevicesForStrategy(
-    onlineDevices.map((d) => d.serial),
-    deviceStrategy,
-    config.avd,
-  );
-  warnSkippedDevices(prefilteredOnline.skippedDevices);
-  const healthyOnline = filterHealthyDevices(prefilteredOnline.candidateSerials);
-  warnUnhealthyDevices(healthyOnline.unhealthyDevices);
-  const selectedOnline = selectDevicesForStrategy(
-    healthyOnline.healthySerials,
-    deviceStrategy,
-    config.avd,
-  );
-  warnSkippedDevices(
-    selectedOnline.skippedDevices.filter(
-      (device) => !prefilteredOnline.skippedDevices.some((prefiltered) => prefiltered.serial === device.serial),
-    ),
-  );
-
-  // Auto-launch emulators if enabled and we don't have enough devices
   let launchedEmulators: LaunchedEmulator[] = [];
+  let clonedSimulators: ClonedSimulator[] = [];
   let deviceSerials: string[];
 
-  if (
-    config.launchEmulators &&
-    selectedOnline.selectedSerials.length < Math.min(opts.workers, testFiles.length)
-  ) {
-    const provision = await provisionEmulators({
-      existingSerials: selectedOnline.selectedSerials,
-      // Even unhealthy connected emulators still occupy console/ADB ports.
-      // Treat every discovered online serial as occupied when choosing new ports.
-      occupiedSerials: onlineDevices.map((d) => d.serial),
-      workers: Math.min(opts.workers, testFiles.length),
-      avd: config.avd,
-    });
-    launchedEmulators = provision.launched;
-    const healthyProvisioned = filterHealthyDevices(provision.allSerials);
-    warnUnhealthyDevices(healthyProvisioned.unhealthyDevices);
-    const selectedProvisioned = selectDevicesForStrategy(
-      healthyProvisioned.healthySerials,
+  if (isIos) {
+    // ─── iOS device discovery & provisioning ───
+    const iosDevices = onlineDevices.filter((d) => d.platform === 'ios');
+    deviceSerials = iosDevices.map((d) => d.serial);
+
+    const neededWorkers = Math.min(opts.workers, testFiles.length);
+    if (deviceSerials.length < neededWorkers && config.simulator) {
+      process.stderr.write(
+        `${DIM}Provisioning iOS simulators: have ${deviceSerials.length}, need ${neededWorkers}${RESET}\n`,
+      );
+      const provision = provisionSimulators({
+        simulatorName: config.simulator,
+        workers: neededWorkers,
+        existingUdids: deviceSerials,
+      });
+      clonedSimulators = provision.clonedSimulators;
+      deviceSerials = provision.allUdids;
+
+      if (clonedSimulators.length > 0) {
+        process.stderr.write(
+          `${DIM}Cloned ${clonedSimulators.length} simulator(s) for parallel workers.${RESET}\n`,
+        );
+      }
+
+      // Re-discover devices so the daemon sees newly booted simulators
+      if (provision.allUdids.length > iosDevices.length) {
+        // Give simulators a moment to register, then refresh
+        await new Promise((resolve) => setTimeout(resolve, 2_000));
+        const refreshClient = new PilotGrpcClient(`localhost:${firstDaemonPort}`);
+        await refreshClient.waitForReady(5_000);
+        await refreshClient.listDevices();
+        refreshClient.close();
+      }
+    }
+  } else {
+    // ─── Android device discovery & provisioning ───
+    const prefilteredOnline = prefilterDevicesForStrategy(
+      onlineDevices.map((d) => d.serial),
       deviceStrategy,
       config.avd,
     );
-    warnSkippedDevices(selectedProvisioned.skippedDevices);
-    deviceSerials = selectedProvisioned.selectedSerials;
-  } else {
-    deviceSerials = selectedOnline.selectedSerials;
+    warnSkippedDevices(prefilteredOnline.skippedDevices);
+    const healthyOnline = filterHealthyDevices(prefilteredOnline.candidateSerials);
+    warnUnhealthyDevices(healthyOnline.unhealthyDevices);
+    const selectedOnline = selectDevicesForStrategy(
+      healthyOnline.healthySerials,
+      deviceStrategy,
+      config.avd,
+    );
+    warnSkippedDevices(
+      selectedOnline.skippedDevices.filter(
+        (device) => !prefilteredOnline.skippedDevices.some((prefiltered) => prefiltered.serial === device.serial),
+      ),
+    );
+
+    if (
+      config.launchEmulators &&
+      selectedOnline.selectedSerials.length < Math.min(opts.workers, testFiles.length)
+    ) {
+      const provision = await provisionEmulators({
+        existingSerials: selectedOnline.selectedSerials,
+        occupiedSerials: onlineDevices.map((d) => d.serial),
+        workers: Math.min(opts.workers, testFiles.length),
+        avd: config.avd,
+      });
+      launchedEmulators = provision.launched;
+      const healthyProvisioned = filterHealthyDevices(provision.allSerials);
+      warnUnhealthyDevices(healthyProvisioned.unhealthyDevices);
+      const selectedProvisioned = selectDevicesForStrategy(
+        healthyProvisioned.healthySerials,
+        deviceStrategy,
+        config.avd,
+      );
+      warnSkippedDevices(selectedProvisioned.skippedDevices);
+      deviceSerials = selectedProvisioned.selectedSerials;
+    } else {
+      deviceSerials = selectedOnline.selectedSerials;
+    }
   }
 
   if (deviceSerials.length === 0) {
     throw new Error(
-      'No online devices found. Connect a device, start an emulator, ' +
-      'or set `launchEmulators: true` in your config.',
+      isIos
+        ? `No booted iOS simulators found.${config.simulator ? ` Boot a simulator matching '${config.simulator}', or add more simulators for parallel execution.` : ' Set `simulator` in your config and boot at least one.'}`
+        : 'No online devices found. Connect a device, start an emulator, ' +
+          'or set `launchEmulators: true` in your config.',
     );
   }
 
@@ -221,6 +265,9 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
     }
     if (launchedEmulators.length > 0) {
       forceCleanupEmulators(launchedEmulators);
+    }
+    for (const sim of clonedSimulators) {
+      deleteSimulator(sim.udid);
     }
   };
   process.on('SIGINT', emergencyCleanup);
@@ -587,21 +634,28 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
       } catch { /* daemon may already be dead */ }
     }
 
-    // 3. Clean up ADB port forwards created by worker daemons.
-    // Each daemon set up `adb forward tcp:<agentPort> tcp:18700` on its device.
-    // Stale forwards break subsequent runs on the same device.
-    for (const worker of workers) {
-      try {
-        execFileSync('adb', ['-s', worker.deviceSerial, 'forward', '--remove', `tcp:${worker.agentPort}`], {
-          timeout: 5_000,
-          stdio: 'ignore',
-        });
-      } catch { /* forward may already be gone */ }
-    }
+    if (isIos) {
+      // 3. Clean up cloned simulators created for this run.
+      for (const sim of clonedSimulators) {
+        deleteSimulator(sim.udid);
+      }
+    } else {
+      // 3. Clean up ADB port forwards created by worker daemons.
+      // Each daemon set up `adb forward tcp:<agentPort> tcp:18700` on its device.
+      // Stale forwards break subsequent runs on the same device.
+      for (const worker of workers) {
+        try {
+          execFileSync('adb', ['-s', worker.deviceSerial, 'forward', '--remove', `tcp:${worker.agentPort}`], {
+            timeout: 5_000,
+            stdio: 'ignore',
+          });
+        } catch { /* forward may already be gone */ }
+      }
 
-    // 4. Leave emulators running for reuse by the next run.
-    // The PID manifest keeps them tracked. Only emergency cleanup kills them.
-    preserveEmulatorsForReuse(launchedEmulators);
+      // 4. Leave emulators running for reuse by the next run.
+      // The PID manifest keeps them tracked. Only emergency cleanup kills them.
+      preserveEmulatorsForReuse(launchedEmulators);
+    }
   }
 
   const totalDuration = Date.now() - totalStart;

@@ -444,6 +444,10 @@ impl AgentConnection {
         self.connected
     }
 
+    pub fn port(&self) -> u16 {
+        self.host_port
+    }
+
     /// Establish port forwarding and verify the agent is reachable.
     /// For Android, sets up ADB port forwarding.
     /// For iOS simulators, no forwarding is needed (shared localhost).

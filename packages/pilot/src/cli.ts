@@ -992,20 +992,35 @@ async function main(): Promise<void> {
       // match the requested worker count (same as the dispatcher does).
       let uiDeviceSerials: string[] | undefined;
       if (config.workers > 1) {
-        const allConnected = listConnectedDeviceSerials();
-        // Put the already-configured device first, then add others
-        const others = allConnected.filter((s) => s !== config.device);
-        uiDeviceSerials = [config.device!, ...others].filter(Boolean);
+        if (config.platform === 'ios') {
+          const { listBootedSimulators, provisionSimulators } = await import('./ios-simulator.js');
+          const booted = listBootedSimulators();
+          const others = booted.filter((s) => s.udid !== config.device).map((s) => s.udid);
+          uiDeviceSerials = [config.device!, ...others].filter(Boolean);
 
-        if (uiDeviceSerials.length < config.workers && config.launchEmulators) {
-          const provision = await provisionEmulators({
-            existingSerials: uiDeviceSerials,
-            occupiedSerials: allConnected,
-            workers: config.workers,
-            avd: config.avd,
-          });
-          launchedEmulators = [...launchedEmulators, ...provision.launched];
-          uiDeviceSerials = provision.allSerials;
+          if (uiDeviceSerials.length < config.workers && config.simulator) {
+            const provision = provisionSimulators({
+              simulatorName: config.simulator,
+              workers: config.workers,
+              existingUdids: uiDeviceSerials,
+            });
+            uiDeviceSerials = provision.allUdids;
+          }
+        } else {
+          const allConnected = listConnectedDeviceSerials();
+          const others = allConnected.filter((s) => s !== config.device);
+          uiDeviceSerials = [config.device!, ...others].filter(Boolean);
+
+          if (uiDeviceSerials.length < config.workers && config.launchEmulators) {
+            const provision = await provisionEmulators({
+              existingSerials: uiDeviceSerials,
+              occupiedSerials: allConnected,
+              workers: config.workers,
+              avd: config.avd,
+            });
+            launchedEmulators = [...launchedEmulators, ...provision.launched];
+            uiDeviceSerials = provision.allSerials;
+          }
         }
 
         if (uiDeviceSerials.length < 2) {
@@ -1056,19 +1071,35 @@ async function main(): Promise<void> {
       // Collect additional device serials for multi-worker watch mode.
       let watchDeviceSerials: string[] | undefined;
       if (config.workers > 1) {
-        const allConnected = listConnectedDeviceSerials();
-        const others = allConnected.filter((s) => s !== config.device);
-        watchDeviceSerials = [config.device!, ...others].filter(Boolean);
+        if (config.platform === 'ios') {
+          const { listBootedSimulators, provisionSimulators } = await import('./ios-simulator.js');
+          const booted = listBootedSimulators();
+          const others = booted.filter((s) => s.udid !== config.device).map((s) => s.udid);
+          watchDeviceSerials = [config.device!, ...others].filter(Boolean);
 
-        if (watchDeviceSerials.length < config.workers && config.launchEmulators) {
-          const provision = await provisionEmulators({
-            existingSerials: watchDeviceSerials,
-            occupiedSerials: allConnected,
-            workers: config.workers,
-            avd: config.avd,
-          });
-          launchedEmulators = [...launchedEmulators, ...provision.launched];
-          watchDeviceSerials = provision.allSerials;
+          if (watchDeviceSerials.length < config.workers && config.simulator) {
+            const provision = provisionSimulators({
+              simulatorName: config.simulator,
+              workers: config.workers,
+              existingUdids: watchDeviceSerials,
+            });
+            watchDeviceSerials = provision.allUdids;
+          }
+        } else {
+          const allConnected = listConnectedDeviceSerials();
+          const others = allConnected.filter((s) => s !== config.device);
+          watchDeviceSerials = [config.device!, ...others].filter(Boolean);
+
+          if (watchDeviceSerials.length < config.workers && config.launchEmulators) {
+            const provision = await provisionEmulators({
+              existingSerials: watchDeviceSerials,
+              occupiedSerials: allConnected,
+              workers: config.workers,
+              avd: config.avd,
+            });
+            launchedEmulators = [...launchedEmulators, ...provision.launched];
+            watchDeviceSerials = provision.allSerials;
+          }
         }
 
         if (watchDeviceSerials.length < 2) {

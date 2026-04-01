@@ -32,6 +32,7 @@ let device: Device | undefined;
 let client: PilotGrpcClient | undefined;
 let config: PilotConfig | undefined;
 let assignedSerial: string | undefined;
+let resolvedXctestrunPath: string | undefined;
 
 function send(msg: WorkerToMainMessage): void {
   if (process.send) {
@@ -128,20 +129,24 @@ async function handleInit(msg: InitMessage): Promise<void> {
   const resolvedAgentTestApk = config.agentTestApk
     ? path.resolve(config.rootDir, config.agentTestApk)
     : undefined;
+  const resolvedIosXctestrun = config.iosXctestrun
+    ? path.resolve(config.rootDir, config.iosXctestrun)
+    : undefined;
+  resolvedXctestrunPath = resolvedIosXctestrun;
   sendProgress('starting Pilot agent');
-  await device.startAgent(config.package ?? '', resolvedAgentApk, resolvedAgentTestApk, config.iosXctestrun);
+  await device.startAgent(config.package ?? '', resolvedAgentApk, resolvedAgentTestApk, resolvedIosXctestrun);
 
   try {
     if (config.package) {
       sendProgress(`launching ${config.package}`);
       await launchConfiguredApp(
-        sessionContext(msg.deviceSerial, resolvedAgentApk, resolvedAgentTestApk),
+        sessionContext(msg.deviceSerial, resolvedAgentApk, resolvedAgentTestApk, resolvedIosXctestrun),
         'worker initialization',
       );
     } else {
       sendProgress('validating session readiness');
       await ensureSessionReady(
-        sessionContext(msg.deviceSerial, resolvedAgentApk, resolvedAgentTestApk),
+        sessionContext(msg.deviceSerial, resolvedAgentApk, resolvedAgentTestApk, resolvedIosXctestrun),
         'worker initialization',
       );
     }
@@ -159,7 +164,7 @@ async function handleInit(msg: InitMessage): Promise<void> {
     await device.waitForIdle();
     await device.terminateApp(config.package);
     await launchConfiguredApp(
-      sessionContext(msg.deviceSerial, resolvedAgentApk, resolvedAgentTestApk),
+      sessionContext(msg.deviceSerial, resolvedAgentApk, resolvedAgentTestApk, resolvedIosXctestrun),
       'warmup',
     );
     await device.waitForIdle();
@@ -270,6 +275,7 @@ function sessionContext(
   deviceSerial?: string,
   agentApkPath?: string,
   agentTestApkPath?: string,
+  iosXctestrunPath?: string,
 ): SessionPreflightContext {
   if (!device || !client || !config) {
     throw new Error(`Worker ${workerId}: Not initialized`);
@@ -287,6 +293,7 @@ function sessionContext(
     client,
     agentApkPath,
     agentTestApkPath,
+    iosXctestrunPath: iosXctestrunPath ?? resolvedXctestrunPath,
     deviceSerial: serial,
   };
 }

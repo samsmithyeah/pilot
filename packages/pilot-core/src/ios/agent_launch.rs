@@ -5,9 +5,6 @@ use tokio::net::TcpStream;
 use tokio::process::Command;
 use tracing::{debug, info, instrument};
 
-/// Port the iOS agent listens on.
-const AGENT_PORT: u16 = 18700;
-
 /// Launch the PilotAgent XCUITest runner on an iOS simulator.
 ///
 /// This is the iOS equivalent of Android's `am instrument -w dev.pilot.agent/.PilotAgent`.
@@ -17,8 +14,21 @@ const AGENT_PORT: u16 = 18700;
 /// `.xctestrun` plist (not the xcodebuild process env) because XCUITest reads its
 /// configuration exclusively from that file.
 #[instrument(skip(xctestrun_path, target_bundle_id))]
-pub async fn start_agent(udid: &str, xctestrun_path: &str, target_bundle_id: &str) -> Result<()> {
-    start_agent_impl(udid, xctestrun_path, target_bundle_id, false, false).await
+pub async fn start_agent(
+    udid: &str,
+    xctestrun_path: &str,
+    target_bundle_id: &str,
+    agent_port: u16,
+) -> Result<()> {
+    start_agent_impl(
+        udid,
+        xctestrun_path,
+        target_bundle_id,
+        false,
+        false,
+        agent_port,
+    )
+    .await
 }
 
 /// Start the agent, optionally forcing a fresh launch even if an agent
@@ -28,8 +38,17 @@ pub async fn start_agent_fresh(
     udid: &str,
     xctestrun_path: &str,
     target_bundle_id: &str,
+    agent_port: u16,
 ) -> Result<()> {
-    start_agent_impl(udid, xctestrun_path, target_bundle_id, true, true).await
+    start_agent_impl(
+        udid,
+        xctestrun_path,
+        target_bundle_id,
+        true,
+        true,
+        agent_port,
+    )
+    .await
 }
 
 async fn start_agent_impl(
@@ -38,22 +57,30 @@ async fn start_agent_impl(
     target_bundle_id: &str,
     force: bool,
     attach_to_running_app: bool,
+    agent_port: u16,
 ) -> Result<()> {
     // Check if agent is already running by trying to connect
-    if !force && ping_agent().await.is_ok() {
+    if !force && ping_agent(agent_port).await.is_ok() {
         info!("iOS agent is already running");
         return Ok(());
     }
 
-    info!(udid, xctestrun_path, "Starting iOS agent via xcodebuild");
+    info!(
+        udid,
+        xctestrun_path, agent_port, "Starting iOS agent via xcodebuild"
+    );
 
     // Patch the xctestrun file to inject target bundle ID and env vars.
     // xcodebuild process env vars don't reach the XCUITest runner — they must
     // be in the plist's EnvironmentVariables / TestingEnvironmentVariables dicts.
-    let patched_xctestrun =
-        patch_xctestrun(xctestrun_path, target_bundle_id, attach_to_running_app)
-            .await
-            .context("Failed to patch xctestrun file")?;
+    let patched_xctestrun = patch_xctestrun(
+        xctestrun_path,
+        target_bundle_id,
+        attach_to_running_app,
+        agent_port,
+    )
+    .await
+    .context("Failed to patch xctestrun file")?;
 
     // Launch xcodebuild test-without-building in background
     let mut cmd = Command::new("xcodebuild");
@@ -95,8 +122,10 @@ async fn start_agent_impl(
         }
     });
 
-    // Wait for the agent to start accepting connections
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    // Wait for the agent to start accepting connections.
+    // Freshly booted simulators can take 60+ seconds for xcodebuild to install
+    // and launch the XCUITest runner, so use a generous timeout.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
     loop {
         if tokio::time::Instant::now() > deadline {
             bail!(
@@ -105,7 +134,7 @@ async fn start_agent_impl(
             );
         }
 
-        match ping_agent().await {
+        match ping_agent(agent_port).await {
             Ok(_) => {
                 info!(udid, "iOS agent is ready");
                 return Ok(());
@@ -122,14 +151,13 @@ async fn start_agent_impl(
 /// Called before restarting the agent in launchApp/restartApp.
 ///
 /// Kills both the host-side xcodebuild process AND the simulator-side runner
-/// app. Without killing the runner app, it keeps listening on port 18700 and
+/// app. Without killing the runner app, it keeps listening on its port and
 /// `start_agent` would skip launching a new one.
 pub async fn kill_existing_agents_on(udid: &str) {
-    // Kill host-side xcodebuild
-    let _ = Command::new("pkill")
-        .args(["-f", "xcodebuild test-without-building"])
-        .output()
-        .await;
+    // Kill host-side xcodebuild targeting this specific simulator.
+    // Match on the destination id= argument to avoid killing agents for other simulators.
+    let pattern = format!("xcodebuild test-without-building.*id={udid}");
+    let _ = Command::new("pkill").args(["-f", &pattern]).output().await;
 
     // Kill the runner app on the simulator — xcrun simctl terminate
     // targets the simulator process, not the host. The runner's bundle ID
@@ -139,7 +167,7 @@ pub async fn kill_existing_agents_on(udid: &str) {
         .output()
         .await;
 
-    // Brief pause for processes to die and port 18700 to be released
+    // Brief pause for processes to die and port to be released
     tokio::time::sleep(Duration::from_millis(1000)).await;
 }
 
@@ -157,13 +185,14 @@ async fn patch_xctestrun(
     xctestrun_path: &str,
     target_bundle_id: &str,
     attach_to_running_app: bool,
+    agent_port: u16,
 ) -> Result<String> {
     let mode = if attach_to_running_app {
         "attach"
     } else {
         "launch"
     };
-    let patched_path = format!("{xctestrun_path}.{mode}.patched.xctestrun");
+    let patched_path = format!("{xctestrun_path}.{mode}.port{agent_port}.patched.xctestrun");
 
     // Copy original to patched location
     tokio::fs::copy(xctestrun_path, &patched_path)
@@ -178,9 +207,9 @@ async fn patch_xctestrun(
     let commands = vec![
         format!("Add :{base}:UITargetAppBundleIdentifier string {target_bundle_id}"),
         format!("Add :{base}:EnvironmentVariables:PILOT_TARGET_BUNDLE_ID string {target_bundle_id}"),
-        format!("Add :{base}:EnvironmentVariables:PILOT_AGENT_PORT string {AGENT_PORT}"),
+        format!("Add :{base}:EnvironmentVariables:PILOT_AGENT_PORT string {agent_port}"),
         format!("Add :{base}:TestingEnvironmentVariables:PILOT_TARGET_BUNDLE_ID string {target_bundle_id}"),
-        format!("Add :{base}:TestingEnvironmentVariables:PILOT_AGENT_PORT string {AGENT_PORT}"),
+        format!("Add :{base}:TestingEnvironmentVariables:PILOT_AGENT_PORT string {agent_port}"),
     ];
     let mut commands = commands;
     if attach_to_running_app {
@@ -212,8 +241,8 @@ async fn patch_xctestrun(
 }
 
 /// Ping the iOS agent to check if it's running.
-async fn ping_agent() -> Result<()> {
-    let addr = format!("127.0.0.1:{AGENT_PORT}");
+async fn ping_agent(port: u16) -> Result<()> {
+    let addr = format!("127.0.0.1:{port}");
     let stream = tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(&addr))
         .await
         .map_err(|_| anyhow::anyhow!("Connection timeout"))?

@@ -232,10 +232,12 @@ impl PilotServiceImpl {
             .map_err(|e| format!("Failed to relaunch app via simctl before agent restart: {e}"))?;
         tokio::time::sleep(Duration::from_millis(250)).await;
 
+        let agent_port = self.agent.read().await.port();
         ios::agent_launch::start_agent_fresh(
             serial,
             &config.xctestrun_path,
             &config.target_package,
+            agent_port,
         )
         .await
         .map_err(|e| format!("Failed to restart iOS agent: {e}"))?;
@@ -1282,10 +1284,12 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
                     }));
                 }
 
+                let agent_port = self.agent.read().await.port();
                 if let Err(e) = ios::agent_launch::start_agent(
                     &serial,
                     &req.ios_xctestrun_path,
                     &req.target_package,
+                    agent_port,
                 )
                 .await
                 {

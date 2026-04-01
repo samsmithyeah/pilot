@@ -72,6 +72,7 @@ export interface DeviceInfoProto {
   model: string;
   state: string;
   isEmulator: boolean;
+  platform: string;
 }
 
 export interface ListDevicesResponse {
