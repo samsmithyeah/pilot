@@ -357,7 +357,7 @@ export class PilotGrpcClient {
       agentApkPath: agentApkPath ?? '',
       agentTestApkPath: agentTestApkPath ?? '',
       iosXctestrunPath: iosXctestrunPath ?? '',
-    }, 120_000);
+    }, 180_000);
   }
 
   async ping(): Promise<PingResponse> {

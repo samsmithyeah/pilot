@@ -195,6 +195,8 @@ export interface ProvisionSimulatorsResult {
   allUdids: string[]
   /** Simulators that were cloned and should be cleaned up after the run. */
   clonedSimulators: ClonedSimulator[]
+  /** UDIDs that were freshly booted or cloned — need longer init timeouts. */
+  freshUdids: Set<string>
 }
 
 /**
@@ -241,14 +243,17 @@ export function provisionSimulators(opts: {
   workers: number
   /** UDIDs already assigned to existing workers — skip these. */
   existingUdids?: string[]
+  /** Path to .app bundle — install on freshly booted sims so workers don't have to. */
+  appPath?: string
 }): ProvisionSimulatorsResult {
   const { simulatorName, workers, existingUdids = [] } = opts;
   const existingSet = new Set(existingUdids);
   const allUdids = [...existingUdids];
   const clonedSimulators: ClonedSimulator[] = [];
+  const freshUdids = new Set<string>();
 
   if (allUdids.length >= workers) {
-    return { allUdids: allUdids.slice(0, workers), clonedSimulators };
+    return { allUdids: allUdids.slice(0, workers), clonedSimulators, freshUdids };
   }
 
   const all = listSimulators();
@@ -262,7 +267,7 @@ export function provisionSimulators(opts: {
   }
 
   if (allUdids.length >= workers) {
-    return { allUdids: allUdids.slice(0, workers), clonedSimulators };
+    return { allUdids: allUdids.slice(0, workers), clonedSimulators, freshUdids };
   }
 
   // Phase 1: boot any shutdown simulators that match the name
@@ -270,11 +275,15 @@ export function provisionSimulators(opts: {
   for (const sim of shutdown) {
     if (allUdids.length >= workers) break;
     bootSimulator(sim.udid);
+    if (opts.appPath) {
+      try { installApp(sim.udid, opts.appPath); } catch { /* may already be installed */ }
+    }
     allUdids.push(sim.udid);
+    freshUdids.add(sim.udid);
   }
 
   if (allUdids.length >= workers) {
-    return { allUdids: allUdids.slice(0, workers), clonedSimulators };
+    return { allUdids: allUdids.slice(0, workers), clonedSimulators, freshUdids };
   }
 
   // Phase 2: clone the source simulator to create new instances.
@@ -301,7 +310,7 @@ export function provisionSimulators(opts: {
 
   if (!source) {
     // No simulator to clone from — return what we have
-    return { allUdids, clonedSimulators };
+    return { allUdids, clonedSimulators, freshUdids };
   }
 
   try {
@@ -313,6 +322,7 @@ export function provisionSimulators(opts: {
         bootSimulator(newUdid);
         allUdids.push(newUdid);
         clonedSimulators.push({ udid: newUdid, name: cloneName, cloned: true });
+        freshUdids.add(newUdid);
       } catch (err) {
         process.stderr.write(
           `Failed to clone simulator for worker ${cloneIndex}: ${err instanceof Error ? err.message : err}\n`,
@@ -327,5 +337,5 @@ export function provisionSimulators(opts: {
     }
   }
 
-  return { allUdids: allUdids.slice(0, workers), clonedSimulators };
+  return { allUdids: allUdids.slice(0, workers), clonedSimulators, freshUdids };
 }

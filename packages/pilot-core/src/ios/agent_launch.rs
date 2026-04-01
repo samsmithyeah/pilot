@@ -123,9 +123,10 @@ async fn start_agent_impl(
     });
 
     // Wait for the agent to start accepting connections.
-    // Freshly booted simulators can take 60+ seconds for xcodebuild to install
-    // and launch the XCUITest runner, so use a generous timeout.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+    // Freshly booted/cloned simulators can take 90+ seconds for xcodebuild to
+    // install and launch the XCUITest runner, especially when multiple
+    // xcodebuild processes compete for resources in parallel mode.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(150);
     loop {
         if tokio::time::Instant::now() > deadline {
             bail!(

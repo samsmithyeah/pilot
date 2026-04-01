@@ -147,6 +147,7 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
 
   let launchedEmulators: LaunchedEmulator[] = [];
   let clonedSimulators: ClonedSimulator[] = [];
+  let freshIosUdids = new Set<string>();
   let deviceSerials: string[];
 
   if (isIos) {
@@ -163,8 +164,10 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
         simulatorName: config.simulator,
         workers: neededWorkers,
         existingUdids: deviceSerials,
+        appPath: config.app ? path.resolve(config.rootDir, config.app) : undefined,
       });
       clonedSimulators = provision.clonedSimulators;
+      freshIosUdids = provision.freshUdids;
       deviceSerials = provision.allUdids;
 
       if (clonedSimulators.length > 0) {
@@ -319,12 +322,28 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
     // Initialize all workers in parallel — each has its own daemon, device,
     // and agent so there are no shared resources during init.
     const initPromises: Promise<WorkerHandle>[] = [];
-    for (let workerId = 0; workerId < maxUsefulWorkers && workerId < deviceSerials.length; workerId++) {
-      const candidateSerial = deviceSerials[workerId];
-      const isFreshEmulator = launchedSerials.has(candidateSerial);
+
+    // Pre-check port availability to avoid wasting time on occupied ports.
+    // Ports are baseDaemonPort+1+workerId; skip workers whose port is taken.
+    const availableWorkerSlots: Array<{ workerId: number; daemonPort: number; agentPort: number }> = [];
+    for (let wid = 0; availableWorkerSlots.length < maxUsefulWorkers && availableWorkerSlots.length < deviceSerials.length && wid < maxUsefulWorkers + 10; wid++) {
+      const port = baseDaemonPort + 1 + wid;
+      const agentPort = baseAgentPort + 1 + wid;
+      if (wid === 0 || await isPortAvailable(port)) {
+        availableWorkerSlots.push({ workerId: availableWorkerSlots.length, daemonPort: port, agentPort });
+      } else {
+        process.stderr.write(
+          `${DIM}Skipping port ${port} (in use), trying next...${RESET}\n`,
+        );
+      }
+    }
+
+    for (const slot of availableWorkerSlots) {
+      const candidateSerial = deviceSerials[slot.workerId];
+      const isFresh = launchedSerials.has(candidateSerial) || freshIosUdids.has(candidateSerial);
       initPromises.push(
         initializeWorker({
-          workerId,
+          workerId: slot.workerId,
           deviceSerial: candidateSerial,
           daemonBin,
           serializedConfig,
@@ -332,11 +351,13 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
           baseAgentPort,
           firstDaemon,
           resolvedScript,
-          initializationTimeoutMs: isFreshEmulator
+          initializationTimeoutMs: isFresh
             ? LAUNCHED_EMULATOR_INIT_TIMEOUT_MS
             : EXISTING_DEVICE_INIT_TIMEOUT_MS,
-          freshEmulator: isFreshEmulator,
+          freshEmulator: isFresh,
           tsxBin,
+          daemonPortOverride: slot.daemonPort,
+          agentPortOverride: slot.agentPort,
         }),
       );
     }
@@ -701,6 +722,10 @@ interface InitializeWorkerOptions {
   initializationTimeoutMs: number
   freshEmulator: boolean
   tsxBin?: string
+  /** Override the daemon port instead of computing baseDaemonPort + 1 + workerId. */
+  daemonPortOverride?: number
+  /** Override the agent port instead of computing baseAgentPort + 1 + workerId. */
+  agentPortOverride?: number
 }
 
 async function initializeWorker(opts: InitializeWorkerOptions): Promise<WorkerHandle> {
@@ -717,8 +742,8 @@ async function initializeWorker(opts: InitializeWorkerOptions): Promise<WorkerHa
     tsxBin,
   } = opts;
 
-  const daemonPort = baseDaemonPort + 1 + workerId;
-  const agentPort = baseAgentPort + 1 + workerId;
+  const daemonPort = opts.daemonPortOverride ?? (baseDaemonPort + 1 + workerId);
+  const agentPort = opts.agentPortOverride ?? (baseAgentPort + 1 + workerId);
 
   let daemonProcess: ChildProcess | undefined;
   if (workerId === 0) {
