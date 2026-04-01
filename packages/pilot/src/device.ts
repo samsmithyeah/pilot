@@ -444,9 +444,10 @@ export class Device {
     return res.scheme as ColorScheme;
   }
 
-  /** @internal — Start network capture (used by the runner). */
-  async _startNetworkCapture(): Promise<void> {
-    await this._client.startNetworkCapture();
+  /** @internal — Start network capture (used by the runner). Returns proxy port. */
+  async _startNetworkCapture(): Promise<{ proxyPort: number }> {
+    const res = await this._client.startNetworkCapture();
+    return { proxyPort: res.proxyPort };
   }
 
   /** @internal — Stop network capture and return entries (used by the runner). */

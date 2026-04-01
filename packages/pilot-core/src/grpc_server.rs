@@ -22,12 +22,16 @@ pub struct PilotServiceImpl {
     device_manager: Arc<RwLock<DeviceManager>>,
     agent: Arc<RwLock<AgentConnection>>,
     network_proxy: Arc<RwLock<Option<NetworkProxy>>>,
-    /// Serial of the device whose proxy settings were modified (for cleanup).
+    /// Serial/UDID of the device whose proxy settings were modified (for cleanup).
     proxy_device_serial: Arc<RwLock<Option<String>>>,
-    /// Device-side port used for `adb reverse` (for cleanup).
+    /// Platform the proxy was started on (for platform-specific cleanup).
+    proxy_platform: Arc<RwLock<Option<Platform>>>,
+    /// Device-side port used for `adb reverse` (for cleanup, Android only).
     proxy_reverse_port: Arc<RwLock<Option<u16>>>,
-    /// On-device path of the installed CA cert (for cleanup).
+    /// On-device path of the installed CA cert (for cleanup, Android only).
     proxy_ca_cert_path: Arc<RwLock<Option<String>>>,
+    /// macOS network service name used for proxy (for cleanup, iOS only).
+    proxy_network_service: Arc<RwLock<Option<String>>>,
     /// iOS agent launch config (stored for restart on launchApp).
     ios_agent_config: Arc<RwLock<Option<IosAgentConfig>>>,
 }
@@ -49,8 +53,10 @@ impl PilotServiceImpl {
             agent,
             network_proxy: Arc::new(RwLock::new(None)),
             proxy_device_serial: Arc::new(RwLock::new(None)),
+            proxy_platform: Arc::new(RwLock::new(None)),
             proxy_reverse_port: Arc::new(RwLock::new(None)),
             proxy_ca_cert_path: Arc::new(RwLock::new(None)),
+            proxy_network_service: Arc::new(RwLock::new(None)),
             ios_agent_config: Arc::new(RwLock::new(None)),
         }
     }
@@ -361,22 +367,31 @@ impl PilotServiceImpl {
     pub async fn cleanup_network_proxy(&self) {
         let proxy = self.network_proxy.write().await.take();
         let serial = self.proxy_device_serial.write().await.take();
+        let platform = self.proxy_platform.write().await.take();
         let reverse_port = self.proxy_reverse_port.write().await.take();
         let ca_cert_path = self.proxy_ca_cert_path.write().await.take();
+        let _network_service = self.proxy_network_service.write().await.take();
 
         if let Some(serial) = &serial {
-            info!(%serial, "Cleaning up device proxy settings on shutdown");
-            if let Err(e) = adb::shell(serial, "settings put global http_proxy :0").await {
-                warn!(%serial, "Failed to reset http_proxy on shutdown: {e}");
-            }
-            if let Some(port) = reverse_port {
-                if let Err(e) = adb::remove_reverse(serial, port).await {
-                    warn!(%serial, port, "Failed to remove reverse port forward on shutdown: {e}");
+            match platform {
+                Some(Platform::Ios) => {
+                    info!(%serial, "iOS proxy stopped on shutdown");
                 }
-            }
-            if let Some(cert_path) = &ca_cert_path {
-                if let Err(e) = adb::shell(serial, &format!("rm -f {cert_path}")).await {
-                    warn!(%serial, "Failed to remove CA cert on shutdown: {e}");
+                _ => {
+                    info!(%serial, "Cleaning up Android proxy settings on shutdown");
+                    if let Err(e) = adb::shell(serial, "settings put global http_proxy :0").await {
+                        warn!(%serial, "Failed to reset http_proxy on shutdown: {e}");
+                    }
+                    if let Some(port) = reverse_port {
+                        if let Err(e) = adb::remove_reverse(serial, port).await {
+                            warn!(%serial, port, "Failed to remove reverse port forward on shutdown: {e}");
+                        }
+                    }
+                    if let Some(cert_path) = &ca_cert_path {
+                        if let Err(e) = adb::shell(serial, &format!("rm -f {cert_path}")).await {
+                            warn!(%serial, "Failed to remove CA cert on shutdown: {e}");
+                        }
+                    }
                 }
             }
         }
@@ -2566,22 +2581,59 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
                 .map_err(|e| Status::internal(format!("Failed to create MITM CA: {e}")))?,
         );
 
-        // Get device serial early so we can install the CA cert
         let serial = self.active_serial().await?;
-
-        // Install the CA cert on the device (best-effort — may fail on non-rooted devices)
+        let platform = self.require_platform().await?;
         let ca_pem_path = mitm_ca.ca_pem_path().to_string_lossy().to_string();
-        let cert_filename = mitm_ca
-            .device_cert_filename()
-            .map_err(|e| Status::internal(format!("Failed to compute CA cert hash: {e}")))?;
-        let device_cert_path = adb::device_ca_cert_path(&cert_filename);
         let mut warning: Option<String> = None;
-        if let Err(e) = adb::install_ca_cert(&serial, &ca_pem_path, &cert_filename).await {
-            let msg = format!(
-                "Failed to install CA cert on device: {e} — HTTPS traffic will not be captured"
-            );
-            error!("{msg}");
-            warning = Some(msg);
+
+        match platform {
+            Platform::Ios => {
+                // Network capture on iOS only works for simulators (they share the
+                // host network so macOS system proxy routes their traffic through
+                // the MITM proxy). Physical iOS devices have their own network
+                // stack and no programmatic proxy API.
+                let is_simulator = self
+                    .device_manager
+                    .read()
+                    .await
+                    .active_device()
+                    .map(|d| d.is_emulator)
+                    .unwrap_or(true);
+                if !is_simulator {
+                    return Ok(Response::new(proto::StartNetworkCaptureResponse {
+                        request_id,
+                        success: false,
+                        proxy_port: 0,
+                        error_message:
+                            "Network capture is not supported on physical iOS devices — only simulators"
+                                .to_string(),
+                    }));
+                }
+
+                // Install CA cert on the iOS simulator's trust store
+                if let Err(e) = ios::device::install_ca_cert(&serial, &ca_pem_path).await {
+                    let msg = format!(
+                        "Failed to install CA cert on simulator: {e} — HTTPS traffic will not be captured"
+                    );
+                    error!("{msg}");
+                    warning = Some(msg);
+                }
+            }
+            Platform::Android => {
+                // Install the CA cert on the Android device (best-effort — may fail on non-rooted devices)
+                let cert_filename = mitm_ca.device_cert_filename().map_err(|e| {
+                    Status::internal(format!("Failed to compute CA cert hash: {e}"))
+                })?;
+                let device_cert_path = adb::device_ca_cert_path(&cert_filename);
+                if let Err(e) = adb::install_ca_cert(&serial, &ca_pem_path, &cert_filename).await {
+                    let msg = format!(
+                        "Failed to install CA cert on device: {e} — HTTPS traffic will not be captured"
+                    );
+                    error!("{msg}");
+                    warning = Some(msg);
+                }
+                *self.proxy_ca_cert_path.write().await = Some(device_cert_path);
+            }
         }
 
         let proxy = NetworkProxy::start(mitm_ca)
@@ -2589,31 +2641,40 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
             .map_err(|e| Status::internal(format!("Failed to start proxy: {e}")))?;
         let host_port = proxy.port();
 
-        // Use `adb reverse` to make the proxy reachable as 127.0.0.1:{port} on
-        // the device. This is more reliable than `settings put global http_proxy`
-        // with 10.0.2.2 because it works at the ADB transport level and doesn't
-        // depend on the emulator's network routing or Android version behavior.
-        let device_port = host_port; // use same port number on device side
-        if let Err(e) = adb::reverse_port(&serial, device_port, host_port).await {
-            error!("Failed to set up adb reverse: {e}");
-        }
+        match platform {
+            Platform::Ios => {
+                // iOS simulators share the host network — the proxy is accessible
+                // at 127.0.0.1:{host_port}. The CLI configures the macOS system
+                // proxy via `networksetup` (one-time admin setup).
+                info!(%serial, host_port, "iOS proxy started — CLI will configure macOS system proxy");
+            }
+            Platform::Android => {
+                // Use `adb reverse` to make the proxy reachable as 127.0.0.1:{port} on
+                // the device. More reliable than `settings put global http_proxy`
+                // with 10.0.2.2 because it works at the ADB transport level.
+                let device_port = host_port;
+                if let Err(e) = adb::reverse_port(&serial, device_port, host_port).await {
+                    error!("Failed to set up adb reverse: {e}");
+                }
 
-        let proxy_setting = format!("127.0.0.1:{device_port}");
-        info!(%serial, %proxy_setting, host_port, "Configuring device HTTP proxy via adb reverse");
+                let proxy_setting = format!("127.0.0.1:{device_port}");
+                info!(%serial, %proxy_setting, host_port, "Configuring device HTTP proxy via adb reverse");
 
-        if let Err(e) = adb::shell(
-            &serial,
-            &format!("settings put global http_proxy {proxy_setting}"),
-        )
-        .await
-        {
-            error!("Failed to set device proxy: {e}");
+                if let Err(e) = adb::shell(
+                    &serial,
+                    &format!("settings put global http_proxy {proxy_setting}"),
+                )
+                .await
+                {
+                    error!("Failed to set device proxy: {e}");
+                }
+                *self.proxy_reverse_port.write().await = Some(device_port);
+            }
         }
 
         *proxy_guard = Some(proxy);
         *self.proxy_device_serial.write().await = Some(serial);
-        *self.proxy_reverse_port.write().await = Some(device_port);
-        *self.proxy_ca_cert_path.write().await = Some(device_cert_path);
+        *self.proxy_platform.write().await = Some(platform);
 
         Ok(Response::new(proto::StartNetworkCaptureResponse {
             request_id,
@@ -2640,23 +2701,33 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
             }));
         };
 
-        // Revert device proxy settings, remove reverse port forward, and clean up CA cert
+        // Revert proxy settings based on platform
         let serial = self.proxy_device_serial.write().await.take();
+        let platform = self.proxy_platform.write().await.take();
         let reverse_port = self.proxy_reverse_port.write().await.take();
         let ca_cert_path = self.proxy_ca_cert_path.write().await.take();
+        let _network_service = self.proxy_network_service.write().await.take();
         if let Some(serial) = &serial {
-            info!(%serial, "Reverting device HTTP proxy");
-            if let Err(e) = adb::shell(serial, "settings put global http_proxy :0").await {
-                warn!(%serial, "Failed to reset http_proxy: {e}");
-            }
-            if let Some(port) = reverse_port {
-                if let Err(e) = adb::remove_reverse(serial, port).await {
-                    warn!(%serial, port, "Failed to remove reverse port forward: {e}");
+            match platform {
+                Some(Platform::Ios) => {
+                    // macOS proxy cleanup is handled by the CLI.
+                    info!(%serial, "iOS proxy stopped — CLI handles macOS proxy cleanup");
                 }
-            }
-            if let Some(cert_path) = &ca_cert_path {
-                if let Err(e) = adb::shell(serial, &format!("rm -f {cert_path}")).await {
-                    warn!(%serial, "Failed to remove CA cert: {e}");
+                _ => {
+                    info!(%serial, "Reverting Android device HTTP proxy");
+                    if let Err(e) = adb::shell(serial, "settings put global http_proxy :0").await {
+                        warn!(%serial, "Failed to reset http_proxy: {e}");
+                    }
+                    if let Some(port) = reverse_port {
+                        if let Err(e) = adb::remove_reverse(serial, port).await {
+                            warn!(%serial, port, "Failed to remove reverse port forward: {e}");
+                        }
+                    }
+                    if let Some(cert_path) = &ca_cert_path {
+                        if let Err(e) = adb::shell(serial, &format!("rm -f {cert_path}")).await {
+                            warn!(%serial, "Failed to remove CA cert: {e}");
+                        }
+                    }
                 }
             }
         }
