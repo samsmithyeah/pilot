@@ -243,6 +243,23 @@ async function ensureDaemonRunning(address: string, daemonBin?: string, platform
     // No daemon running, nothing to kill
   }
 
+  // Remove stale ADB port forwards on the default agent port (18700).
+  // A previous Android instance may have set up a forward that hijacks
+  // traffic meant for the iOS XCUITest agent.
+  try {
+    const fwdList = execFileSync('adb', ['forward', '--list'], { encoding: 'utf-8' }).trim();
+    for (const line of fwdList.split('\n')) {
+      if (!line.includes('tcp:18700')) continue;
+      const serial = line.split(' ')[0];
+      if (!serial) continue;
+      try {
+        execFileSync('adb', ['-s', serial, 'forward', '--remove', 'tcp:18700']);
+      } catch { /* already gone */ }
+    }
+  } catch {
+    // ADB not available or no forwards — safe to ignore
+  }
+
   // Start a fresh daemon
   const resolvedBin = process.env.PILOT_DAEMON_BIN ?? daemonBin ?? 'pilot-core';
   const daemonArgs = ['--port', port];

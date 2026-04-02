@@ -6,7 +6,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'preact/hooks';
-import { ArrowLeft, Check, ChevronsDownUp, ChevronsUpDown, Circle, CircleSlash, Eye, Link, Play, Square, X } from 'lucide-preact';
+import { ArrowLeft, Check, ChevronsDownUp, ChevronsUpDown, Circle, CircleSlash, Eye, Link, LoaderCircle, Play, Square, X } from 'lucide-preact';
 import type { TestTreeNode, ClientMessage } from '../ui-protocol.js';
 
 const ICON_SIZE = 13;
@@ -239,11 +239,9 @@ function TreeNode({ node, depth, expandedNodes, selectedTestId, onToggleExpanded
         )}
 
         <div class="te-actions">
-          {!isRunning && (
-            <button class="te-action-btn te-run-btn" onClick={handleRun} title="Run">
-              <Play size={ICON_SIZE} />
-            </button>
-          )}
+          <button class="te-action-btn te-run-btn" onClick={handleRun} disabled={isRunning} title="Run">
+            <Play size={ICON_SIZE} />
+          </button>
           {node.type === 'file' && (
             <button
               class={`te-action-btn te-watch-btn ${node.watchEnabled ? 'active' : ''}`}
@@ -283,7 +281,7 @@ function StatusIcon({ status }: { status: TestTreeNode['status'] }) {
     case 'skipped':
       return <span class="te-status-icon skipped"><CircleSlash size={STATUS_SIZE} /></span>;
     case 'running':
-      return <span class="te-status-icon running"><Circle size={STATUS_SIZE} /></span>;
+      return <span class="te-status-icon running"><LoaderCircle size={STATUS_SIZE} /></span>;
     default:
       return <span class="te-status-icon idle"><Circle size={STATUS_SIZE} /></span>;
   }

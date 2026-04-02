@@ -43,7 +43,7 @@ interface NaturalSize {
 export function ScreenshotPanel({ event, screenshots, highlightBounds, onScreenshotClick, devicePixelRatio }: Props) {
   injectStyles();
 
-  const [tab, setTab] = useState<ScreenshotTab>('after');
+  const [tab, setTab] = useState<ScreenshotTab>('action');
   const [scale, setScale] = useState(1);
   const [naturalSize, setNaturalSize] = useState<NaturalSize | null>(null);
   const imgRef = useRef<HTMLImageElement>(null);

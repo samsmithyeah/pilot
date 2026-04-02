@@ -169,6 +169,20 @@ export async function startUIServer(
     simulator: ctx.config.simulator,
   };
 
+  // Resolve a friendly display name for single-worker mode (e.g. UUID → "iPhone 17").
+  // Multi-worker resolves names inside initializeWorkers().
+  const singleWorkerDisplayName = (() => {
+    const serial = ctx.deviceSerial;
+    if (!serial) return undefined;
+    if (ctx.config.platform === 'ios') {
+      return listSimulators().find((s) => s.udid === serial)?.name ?? serial;
+    }
+    if (serial.startsWith('emulator-')) {
+      return getRunningAvdName(serial) ?? serial;
+    }
+    return serial;
+  })();
+
   // Resolve tsx binary for forking TypeScript files
   const jsScript = path.resolve(__dirname, 'ui-run.js');
   const tsScript = path.resolve(__dirname, 'ui-run.ts');
@@ -2033,7 +2047,7 @@ export async function startUIServer(
     } else if (ctx.deviceSerial) {
       ws.send(JSON.stringify({
         type: 'device-info',
-        serial: ctx.deviceSerial,
+        serial: singleWorkerDisplayName ?? ctx.deviceSerial,
         model: undefined,
         isEmulator: ctx.deviceSerial.startsWith('emulator-'),
         platform: ctx.config.platform,
@@ -2100,10 +2114,10 @@ export async function startUIServer(
   if (!multiWorker && ctx.deviceSerial) {
     broadcast({
       type: 'device-info',
-      serial: ctx.deviceSerial,
+      serial: singleWorkerDisplayName ?? ctx.deviceSerial,
       model: undefined,
       isEmulator: ctx.deviceSerial.startsWith('emulator-'),
-        platform: ctx.config.platform,
+      platform: ctx.config.platform,
     });
   }
 
