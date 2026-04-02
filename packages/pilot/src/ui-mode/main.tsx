@@ -37,6 +37,7 @@ function App() {
   const [isStopping, setIsStopping] = useState(false);
   const [deviceSerial, setDeviceSerial] = useState('');
   const [devicePlatform, setDevicePlatform] = useState<'android' | 'ios' | undefined>();
+  const [pilotVersion, setPilotVersion] = useState('');
   const [theme, setTheme] = useState<Theme>(() => {
     const stored = localStorage.getItem('pilot-ui-theme');
     return (stored === 'light' || stored === 'dark' || stored === 'system') ? stored : 'system';
@@ -98,6 +99,16 @@ function App() {
     return null;
   }, [tree.selectedTestId]);
 
+  const viewedTestFile = useMemo(() => {
+    if (tree.selectedTestId) {
+      const sep = tree.selectedTestId.indexOf('::');
+      if (sep !== -1) {
+        return tree.selectedTestId.slice(0, sep);
+      }
+    }
+    return '';
+  }, [tree.selectedTestId]);
+
   const currentTrace = viewedTestName ? testTraces.get(viewedTestName) : undefined;
   const traceEvents = currentTrace?.events ?? EMPTY_EVENTS;
   const actionEvents = currentTrace?.actionEvents ?? EMPTY_ACTION_EVENTS;
@@ -122,24 +133,35 @@ function App() {
   }, [tree.selectedTestId, tree.allFiles]);
 
   // Metadata for trace viewer components
+  const testDeviceSerial = useMemo(() => {
+    if (viewedTestName) {
+      const workerId = testWorkerMapRef.current.get(viewedTestName);
+      if (workerId != null && workers[workerId]) {
+        return workers[workerId].displayName || workers[workerId].deviceSerial;
+      }
+    }
+    return deviceSerial;
+  }, [viewedTestName, workers, deviceSerial]);
+
   const metadata = useMemo<TraceMetadata>(() => ({
     version: 1,
-    pilotVersion: '',
-    testFile: '',
+    pilotVersion,
+    testFile: viewedTestFile,
     testName: viewedTestName ?? (isRunning ? 'Running...' : ''),
     testStatus: viewedTestNode?.status === 'failed' ? 'failed'
       : viewedTestNode?.status === 'running' ? 'running'
       : viewedTestNode?.status === 'skipped' ? 'skipped'
-      : 'passed',
+      : viewedTestNode?.status === 'passed' ? 'passed'
+      : 'idle',
     testDuration: viewedTestNode?.duration ?? 0,
     startTime: 0,
     endTime: viewedTestNode?.duration ?? 0,
-    device: { serial: deviceSerial, isEmulator: deviceSerial.startsWith('emulator-') },
+    device: { serial: testDeviceSerial, isEmulator: testDeviceSerial.startsWith('emulator-') },
     traceConfig: { screenshots: true, snapshots: true, sources: true, network: true },
     actionCount: actionEvents.length,
     screenshotCount: screenshots.size,
     error: viewedTestNode?.error,
-  }), [viewedTestName, viewedTestNode, isRunning, actionEvents.length, screenshots.size, deviceSerial]);
+  }), [viewedTestName, viewedTestFile, viewedTestNode, isRunning, actionEvents.length, screenshots.size, testDeviceSerial, pilotVersion]);
 
   const selectedEvent = actionEvents[selectedIndex];
 
@@ -376,6 +398,7 @@ function App() {
       case 'device-info':
         setDeviceSerial(msg.serial);
         setDevicePlatform(msg.platform);
+        if (msg.pilotVersion) setPilotVersion(msg.pilotVersion);
         break;
       case 'workers-info':
         setWorkers(msg.workers.map((w) => ({

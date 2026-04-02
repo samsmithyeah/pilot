@@ -50,6 +50,16 @@ import { RunQueue } from '../watch-queue.js';
 
 const SPA_HTML_PATH = path.resolve(__dirname, 'index.html');
 
+const PILOT_VERSION = (() => {
+  try {
+    const pkgPath = path.resolve(__dirname, '../../package.json');
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+    return (pkg.version as string) ?? '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+})();
+
 const DIM = '\x1b[2m';
 const YELLOW = '\x1b[33m';
 const RESET = '\x1b[0m';
@@ -1900,10 +1910,11 @@ export async function startUIServer(
           if (worker) {
             broadcast({
               type: 'device-info',
-              serial: worker.deviceSerial,
+              serial: worker.displayName || worker.deviceSerial,
               model: undefined,
               isEmulator: worker.deviceSerial.startsWith('emulator-'),
               platform: ctx.config.platform,
+              pilotVersion: PILOT_VERSION,
             });
           }
         }
@@ -1916,10 +1927,11 @@ export async function startUIServer(
           if (worker) {
             broadcast({
               type: 'device-info',
-              serial: worker.deviceSerial,
+              serial: worker.displayName || worker.deviceSerial,
               model: undefined,
               isEmulator: worker.deviceSerial.startsWith('emulator-'),
               platform: ctx.config.platform,
+              pilotVersion: PILOT_VERSION,
             });
           }
         }
@@ -2028,10 +2040,11 @@ export async function startUIServer(
       if (selectedWorker) {
         ws.send(JSON.stringify({
           type: 'device-info',
-          serial: selectedWorker.deviceSerial,
+          serial: selectedWorker.displayName || selectedWorker.deviceSerial,
           model: undefined,
           isEmulator: selectedWorker.deviceSerial.startsWith('emulator-'),
           platform: ctx.config.platform,
+          pilotVersion: PILOT_VERSION,
         } satisfies ServerMessage));
       }
 
@@ -2054,6 +2067,7 @@ export async function startUIServer(
         model: undefined,
         isEmulator: ctx.deviceSerial.startsWith('emulator-'),
         platform: ctx.config.platform,
+        pilotVersion: PILOT_VERSION,
       } satisfies ServerMessage));
     }
 
@@ -2121,6 +2135,7 @@ export async function startUIServer(
       model: undefined,
       isEmulator: ctx.deviceSerial.startsWith('emulator-'),
       platform: ctx.config.platform,
+      pilotVersion: PILOT_VERSION,
     });
   }
 

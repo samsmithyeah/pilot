@@ -56,7 +56,7 @@ export function TimelineFilmstrip({ events, screenshots, metadata, selectedIndex
     <div class="timeline">
       <div class="timeline-meta">
         <span class={`test-status ${statusClass}`}>{statusIcon} {metadata.testName}</span>
-        {metadata.testStatus !== 'running' && (
+        {metadata.testStatus !== 'running' && metadata.testStatus !== 'idle' && (
           <span>{' \u00b7 '}{metadata.testDuration}ms</span>
         )}
         {' \u00b7 '}

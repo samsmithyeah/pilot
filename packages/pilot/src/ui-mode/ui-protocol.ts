@@ -160,6 +160,7 @@ export interface DeviceInfoMessage {
   screenWidth?: number
   screenHeight?: number
   platform?: 'android' | 'ios'
+  pilotVersion?: string
 }
 
 export interface SourceMessage {

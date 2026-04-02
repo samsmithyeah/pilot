@@ -167,7 +167,7 @@ export function ActionsPanel({ events, actionEvents, selectedIndex, pinnedIndex,
             <span class="metadata-label">File</span>
             <span class="metadata-value">{metadata.testFile}</span>
             <span class="metadata-label">Status</span>
-            <span class="metadata-value" style={{ color: metadata.testStatus === 'passed' ? 'var(--color-success)' : 'var(--color-error)' }}>{metadata.testStatus}</span>
+            <span class="metadata-value" style={{ color: metadata.testStatus === 'passed' ? 'var(--color-success)' : metadata.testStatus === 'failed' ? 'var(--color-error)' : undefined }}>{metadata.testStatus}</span>
             <span class="metadata-label">Duration</span>
             <span class="metadata-value">{metadata.testDuration}ms</span>
             <span class="metadata-label">Device</span>
