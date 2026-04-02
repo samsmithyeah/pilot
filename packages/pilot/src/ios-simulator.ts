@@ -628,6 +628,9 @@ export function provisionSimulators(opts: {
         try {
           const newUdid = createSimulator(createName, primarySim.deviceType, primarySim.runtime);
           bootSimulator(newUdid);
+          if (opts.appPath) {
+            try { installApp(newUdid, opts.appPath); } catch { /* worker will retry */ }
+          }
           allUdids.push(newUdid);
           clonedSimulators.push({ udid: newUdid, name: createName, cloned: true });
           freshUdids.add(newUdid);
@@ -647,6 +650,9 @@ export function provisionSimulators(opts: {
         try {
           const newUdid = cloneSimulator(source.udid, cloneName);
           bootSimulator(newUdid);
+          if (opts.appPath) {
+            try { installApp(newUdid, opts.appPath); } catch { /* worker will retry */ }
+          }
           allUdids.push(newUdid);
           clonedSimulators.push({ udid: newUdid, name: cloneName, cloned: true });
           freshUdids.add(newUdid);

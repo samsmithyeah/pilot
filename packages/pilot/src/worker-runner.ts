@@ -14,6 +14,7 @@ import { Device } from './device.js';
 import { runTestFile, collectResults } from './runner.js';
 import type { PilotConfig } from './config.js';
 import { isPackageInstalled, waitForPackageIndexed } from './emulator.js';
+import { installApp, isAppInstalled } from './ios-simulator.js';
 import type {
   MainToWorkerMessage,
   WorkerToMainMessage,
@@ -119,6 +120,16 @@ async function handleInit(msg: InitMessage): Promise<void> {
       if (config.package && msg.deviceSerial) {
         await waitForPackageIndexed(msg.deviceSerial, config.package);
       }
+    }
+  } else if (config.platform === 'ios' && config.app && msg.deviceSerial) {
+    // iOS: install .app on this simulator if not already present.
+    // The CLI only installs on the primary simulator; cloned workers need it too.
+    const resolvedApp = path.resolve(config.rootDir, config.app);
+    const alreadyInstalled = config.package
+      && isAppInstalled(msg.deviceSerial, config.package);
+    if (!alreadyInstalled) {
+      sendProgress(`installing ${path.basename(resolvedApp)}`);
+      installApp(msg.deviceSerial, resolvedApp);
     }
   }
 

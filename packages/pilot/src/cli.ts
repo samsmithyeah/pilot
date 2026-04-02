@@ -1064,6 +1064,7 @@ async function main(): Promise<void> {
               simulatorName: config.simulator,
               workers: config.workers,
               existingUdids: uiDeviceSerials,
+              appPath: config.app ? path.resolve(config.rootDir, config.app) : undefined,
               reusableUdids,
             });
             uiDeviceSerials = provision.allUdids;
