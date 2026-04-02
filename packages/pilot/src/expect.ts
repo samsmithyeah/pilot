@@ -265,24 +265,12 @@ function wrapAssertionWithTrace(
     const selectorStr = selectorDescription(handle);
     const start = Date.now();
 
-    // Look up element bounds + capture before-screenshot in parallel.
-    let bounds: { left: number; top: number; right: number; bottom: number } | undefined;
-    const boundsPromise = (async () => {
-      try {
-        const res = await handle._client.findElement(handle._selector, 100);
-        if (res.found && res.element?.bounds) {
-          bounds = res.element.bounds;
-        }
-      } catch { /* best-effort */ }
-    })();
-
-    const [, { captures: beforeCaptures }] = await Promise.all([
-      boundsPromise,
-      trace.collector.captureBeforeAction(
-        trace.takeScreenshot,
-        trace.captureHierarchy,
-      ),
-    ]);
+    // Capture before-screenshot (bounds lookup happens after the assertion
+    // so the element is guaranteed to exist and be stable).
+    const { captures: beforeCaptures } = await trace.collector.captureBeforeAction(
+      trace.takeScreenshot,
+      trace.captureHierarchy,
+    );
 
     let passed = true;
     let error: string | undefined;
@@ -303,7 +291,6 @@ function wrapAssertionWithTrace(
         duration: Date.now() - start,
         attempts: Math.max(1, Math.round((Date.now() - start) / POLL_INTERVAL_MS)),
         error: timeoutError,
-        bounds,
         sourceLocation,
         hasScreenshotBefore: !!beforeCaptures.screenshotBefore,
         hasScreenshotAfter: false,
@@ -332,6 +319,18 @@ function wrapAssertionWithTrace(
     // assertion time, not assertion + screenshot overhead.
     const duration = Date.now() - start;
     const attempts = Math.max(1, Math.round(duration / POLL_INTERVAL_MS));
+
+    // Look up element bounds after assertion completes — the element is
+    // guaranteed to exist (for passing assertions) and the screen is stable.
+    let bounds: { left: number; top: number; right: number; bottom: number } | undefined;
+    if (passed) {
+      try {
+        const res = await handle._client.findElement(handle._selector, 100);
+        if (res.found && res.element?.bounds) {
+          bounds = res.element.bounds;
+        }
+      } catch { /* best-effort */ }
+    }
 
     // Emit event immediately so _actionIndex increments before the runner
     // emits group-end boundaries.  No after-capture — the trace viewer uses
