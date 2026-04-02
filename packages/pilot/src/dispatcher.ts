@@ -139,7 +139,7 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
   const firstDaemon = spawn(
     daemonBin,
     ['--port', String(firstDaemonPort), '--agent-port', String(firstAgentPort)],
-    { detached: true, stdio: 'ignore' },
+    { stdio: 'ignore' },
   );
   firstDaemon.unref();
   firstDaemon.on('error', () => {
@@ -788,7 +788,7 @@ async function initializeWorker(opts: InitializeWorkerOptions): Promise<WorkerHa
     daemonProcess = spawn(
       daemonBin,
       ['--port', String(daemonPort), '--agent-port', String(agentPort)],
-      { detached: true, stdio: 'ignore' },
+      { stdio: 'ignore' },
     );
     daemonProcess.unref();
     daemonProcess.on('error', (err) => {

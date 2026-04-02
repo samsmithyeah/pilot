@@ -194,7 +194,7 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
       daemonBin,
       ['--port', String(daemonPort), '--agent-port', String(agentPort),
         ...(ctx.config.platform ? ['--platform', ctx.config.platform] : [])],
-      { detached: true, stdio: 'ignore' },
+      { stdio: 'ignore' },
     );
     daemonProcess.on('error', () => { /* handled by waitForReady */ });
 

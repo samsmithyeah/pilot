@@ -265,7 +265,6 @@ async function ensureDaemonRunning(address: string, daemonBin?: string, platform
   const daemonArgs = ['--port', port];
   if (platform) daemonArgs.push('--platform', platform);
   const child = spawn(resolvedBin, daemonArgs, {
-    detached: true,
     stdio: 'ignore',
   });
   child.on('error', () => {
