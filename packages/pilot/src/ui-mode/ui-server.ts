@@ -15,7 +15,7 @@
 import * as http from 'node:http';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { fork, spawn, type ChildProcess } from 'node:child_process';
+import { execFileSync, fork, spawn, type ChildProcess } from 'node:child_process';
 import { watch as chokidarWatch, type FSWatcher } from 'chokidar';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { PilotConfig } from '../config.js';
@@ -914,6 +914,43 @@ export async function startUIServer(
     agentPort: number,
     daemonBin: string,
   ): Promise<UIWorkerHandle> {
+    // Kill any stale daemon on this port from a previous run or another
+    // Pilot instance so we always get a fresh daemon with the correct
+    // --platform flag. Without this, waitForReady succeeds by connecting
+    // to the old daemon, causing cross-instance interference.
+    try {
+      const probe = new PilotGrpcClient(`localhost:${daemonPort}`);
+      const alive = await probe.waitForReady(1_000);
+      probe.close();
+      if (alive) {
+        const lsofOut = execFileSync('lsof', ['-ti', `tcp:${daemonPort}`], { encoding: 'utf-8' }).trim();
+        for (const pid of lsofOut.split('\n').filter(Boolean)) {
+          try { process.kill(Number(pid), 'SIGTERM'); } catch { /* already gone */ }
+        }
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    } catch {
+      // No daemon running, nothing to kill
+    }
+
+    // Remove stale ADB port forwards on the agent port. A previous
+    // Android instance may have set up `adb forward tcp:<agentPort>`
+    // which hijacks traffic meant for the iOS XCUITest agent, causing
+    // the iOS daemon to receive Android screenshots instead.
+    try {
+      const fwdList = execFileSync('adb', ['forward', '--list'], { encoding: 'utf-8' }).trim();
+      for (const line of fwdList.split('\n')) {
+        if (!line.includes(`tcp:${agentPort}`)) continue;
+        const serial = line.split(' ')[0];
+        if (!serial) continue;
+        try {
+          execFileSync('adb', ['-s', serial, 'forward', '--remove', `tcp:${agentPort}`]);
+        } catch { /* already gone */ }
+      }
+    } catch {
+      // ADB not available or no forwards — safe to ignore
+    }
+
     // Spawn daemon
     const daemonProcess = spawn(
       daemonBin,

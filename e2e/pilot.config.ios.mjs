@@ -7,7 +7,7 @@ export default defineConfig({
   timeout: 10_000,
   retries: 0,
   screenshot: "only-on-failure",
-  workers: 1,
+  workers: 2,
   trace: "retain-on-failure",
   simulator: "iPhone 17",
   daemonBin: "../packages/pilot-core/target/release/pilot-core",
