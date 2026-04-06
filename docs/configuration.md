@@ -131,13 +131,23 @@ trace: {
 
 ## Example Configurations
 
-### Minimal
+### Minimal (Android)
 
 ```typescript
 import { defineConfig } from "pilot";
 
 export default defineConfig({
   apk: "./app-debug.apk",
+});
+```
+
+### Minimal (iOS)
+
+```typescript
+import { defineConfig } from "pilot";
+
+export default defineConfig({
+  app: "./build/MyApp.app",
 });
 ```
 
@@ -176,7 +186,7 @@ export default defineConfig({
 });
 ```
 
-### CI Configuration
+### CI Configuration (Android)
 
 ```typescript
 import { defineConfig } from "pilot";
@@ -187,6 +197,23 @@ export default defineConfig({
   retries: 2, // Retry failed tests up to 2 times
   screenshot: "always", // Capture screenshots for every test
   outputDir: "test-artifacts", // CI-friendly output directory
+  reporter: ["junit", { outputFile: "pilot-junit.xml" }],
+});
+```
+
+### CI Configuration (iOS)
+
+```typescript
+import { defineConfig } from "pilot";
+
+export default defineConfig({
+  app: "./build/MyApp.app",
+  package: "com.example.myapp",
+  simulator: "iPhone 17",
+  timeout: 60_000,
+  retries: 2,
+  screenshot: "always",
+  outputDir: "test-artifacts",
   reporter: ["junit", { outputFile: "pilot-junit.xml" }],
 });
 ```

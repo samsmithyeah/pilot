@@ -619,7 +619,7 @@ ${bold('Usage:')}
   pilot test --watch              Watch test files and re-run on change
   pilot test --ui                 Open interactive UI mode
   pilot test --ui --ui-port 8080  UI mode on specific port
-  pilot test --device <serial>    Target specific device
+  pilot test --device <serial>    Target specific device/simulator
   pilot test --workers <n>        Run tests in parallel across n devices
   pilot test --shard=x/y          Run shard x of y (for CI)
   pilot test --trace <mode>       Record traces (on, retain-on-failure, etc.)
@@ -631,13 +631,13 @@ ${bold('Usage:')}
 
 ${bold('Options:')}
   -w, --watch              Watch test files and re-run on change
-  -d, --device <serial>    Target a specific device by serial
+  -d, --device <serial>    Target a specific device or simulator by serial/UDID
   -j, --workers <n>        Number of parallel workers (default: 1)
   --shard=x/y              Split tests across CI machines (e.g. --shard=1/4)
   --trace <mode>           Trace mode: off, on, on-first-retry, on-all-retries,
                            retain-on-failure, retain-on-first-failure
   -c, --config <path>      Path to config file (default: pilot.config.ts)
-  --force-install          Reinstall the APK even if already installed
+  --force-install          Reinstall the app even if already installed
   -v, --version            Print version
   -h, --help               Show this help
 `);
