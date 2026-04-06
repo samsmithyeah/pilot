@@ -206,7 +206,7 @@ async function dismissBlockingSystemUi(ctx: SessionPreflightContext): Promise<vo
 
   if (!detectBlockingSystemDialog(hierarchy)) return;
 
-  for (const selector of [text('Wait'), text('Close app'), text('OK')]) {
+  for (const selector of [text('Not Now'), text('Wait'), text('Close app'), text('OK')]) {
     try {
       await ctx.device.tap(selector);
       await ctx.device.waitForIdle(1_000);

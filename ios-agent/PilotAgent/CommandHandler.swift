@@ -260,11 +260,11 @@ class CommandHandler {
             if let center = snapshotCenter(for: element.elementId) {
                 // Triple-tap to select all text in the field
                 actionExecutor.tapCoordinates(x: Int(center.x), y: Int(center.y))
-                Thread.sleep(forTimeInterval: 0.1)
-                actionExecutor.tapCoordinates(x: Int(center.x), y: Int(center.y))
                 Thread.sleep(forTimeInterval: 0.05)
                 actionExecutor.tapCoordinates(x: Int(center.x), y: Int(center.y))
-                Thread.sleep(forTimeInterval: 0.1)
+                Thread.sleep(forTimeInterval: 0.03)
+                actionExecutor.tapCoordinates(x: Int(center.x), y: Int(center.y))
+                Thread.sleep(forTimeInterval: 0.05)
                 // Delete selected text
                 actionExecutor.typeTextWithoutFocus("\u{8}") // backspace
             } else {
@@ -291,9 +291,9 @@ class CommandHandler {
                 try actionExecutor.swipeScreen(direction: direction, speed: speed, distance: distance)
             }
             // Swipe generates scroll momentum that continues for 500ms+.
-            // Use a longer settle than the standard 100ms touchBarrier so the
+            // Use a longer settle than the standard touchBarrier so the
             // next command's snapshot doesn't capture mid-momentum positions.
-            Thread.sleep(forTimeInterval: 0.4)
+            Thread.sleep(forTimeInterval: 0.2)
             RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.01))
             return ["success": true]
 
@@ -465,7 +465,7 @@ class CommandHandler {
             let targetApp = rebindApp(bundleId: targetBundleId(fallback: params))
             targetApp.activate()
             // Brief wait for the app to settle.
-            Thread.sleep(forTimeInterval: 0.3)
+            Thread.sleep(forTimeInterval: 0.15)
             // Quick check for system dialogs without blocking.
             // Only check one button with a very short timeout to stay within
             // the daemon's 4-second command timeout for launchApp.
@@ -473,7 +473,13 @@ class CommandHandler {
             let openButton = springboard.buttons["Open"]
             if openButton.exists {
                 openButton.tap()
-                Thread.sleep(forTimeInterval: 0.2)
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+            // Dismiss "Save Password?" dialog from iOS Passwords framework.
+            let notNow = springboard.buttons["Not Now"]
+            if notNow.exists {
+                notNow.tap()
+                Thread.sleep(forTimeInterval: 0.1)
             }
             return ["success": true]
 
@@ -659,11 +665,11 @@ class CommandHandler {
     /// `findElement` from assertion polling) can snapshot the app state
     /// before the gesture handler has fired, causing spurious failures.
     ///
-    /// 100ms is measured on Apple Silicon / Xcode 26 as reliably sufficient
-    /// for single and multi-touch events. The RunLoop pump additionally
-    /// processes any pending XPC or GCD callbacks.
+    /// 60ms is sufficient on Apple Silicon / Xcode 26 for single and
+    /// multi-touch events. The RunLoop pump additionally processes any
+    /// pending XPC or GCD callbacks.
     private func touchBarrier() {
-        Thread.sleep(forTimeInterval: 0.1)
+        Thread.sleep(forTimeInterval: 0.06)
         RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.01))
     }
 

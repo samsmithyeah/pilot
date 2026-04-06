@@ -34,8 +34,8 @@ describe('isRecoverableInfrastructureError', () => {
     expect(isRecoverableInfrastructureError(new Error('Expected "Login" to be visible'))).toBe(false);
   });
 
-  it('returns false for test timeout errors', () => {
-    expect(isRecoverableInfrastructureError(new Error('Test timed out after 60000ms'))).toBe(false);
+  it('returns true for test timeout errors (may be caused by hung agent)', () => {
+    expect(isRecoverableInfrastructureError(new Error('Test timed out after 60000ms'))).toBe(true);
   });
 
   it('returns false for generic errors', () => {

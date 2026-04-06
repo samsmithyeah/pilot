@@ -146,7 +146,7 @@ impl PilotServiceImpl {
         idle_timeout_ms: u64,
     ) -> Result<(), String> {
         let _ = ios::device::terminate_app(serial, package_name).await;
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
         ios::device::launch_app(serial, package_name)
             .await
             .map_err(|e| e.to_string())?;
@@ -177,7 +177,7 @@ impl PilotServiceImpl {
             if tokio::time::Instant::now() >= deadline {
                 return Err(err);
             }
-            tokio::time::sleep(Duration::from_millis(400)).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
         }
     }
 
@@ -195,7 +195,7 @@ impl PilotServiceImpl {
                 4_000,
             )
             .await;
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         let launch = self
             .send_agent_command_with_timeout(
@@ -232,11 +232,11 @@ impl PilotServiceImpl {
 
         ios::agent_launch::kill_existing_agents_on(serial).await;
         let _ = ios::device::terminate_app(serial, package_name).await;
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
         ios::device::launch_app(serial, package_name)
             .await
             .map_err(|e| format!("Failed to relaunch app via simctl before agent restart: {e}"))?;
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         let agent_port = self.agent.read().await.port();
         ios::agent_launch::start_agent_fresh(
@@ -1368,6 +1368,10 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
                         screenshot: Vec::new(),
                     }));
                 }
+
+                // Apply test-friendly defaults every time the agent starts,
+                // not just on first boot — reused simulators may have stale config.
+                ios::device::configure_simulator(&serial).await;
 
                 let agent_port = self.agent.read().await.port();
                 if let Err(e) = ios::agent_launch::start_agent(

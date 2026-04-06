@@ -65,6 +65,11 @@ async fn start_agent_impl(
         return Ok(());
     }
 
+    // Kill any stale xcodebuild processes targeting this simulator before
+    // starting a new one. Without this, leftover processes from a previous
+    // run can hold the port or interfere with the new agent launch.
+    kill_existing_agents_on(udid).await;
+
     info!(
         udid,
         xctestrun_path, agent_port, "Starting iOS agent via xcodebuild"
@@ -174,7 +179,7 @@ async fn start_agent_impl(
             }
             Err(_) => {
                 debug!("Agent not ready yet, retrying...");
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                tokio::time::sleep(Duration::from_millis(500)).await;
             }
         }
     }

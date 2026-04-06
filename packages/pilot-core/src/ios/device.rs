@@ -348,22 +348,24 @@ pub async fn boot_simulator(udid: &str) -> Result<()> {
 
 /// Apply test-friendly defaults to the simulator (disable password autofill,
 /// keyboard autocorrect, etc.) so system dialogs don't interfere with tests.
-async fn configure_simulator(udid: &str) {
+pub async fn configure_simulator(udid: &str) {
     // Disable "Save Password?" dialog which blocks the UI during login tests.
-    let _ = Command::new("xcrun")
-        .args([
-            "simctl",
-            "spawn",
-            udid,
-            "defaults",
-            "write",
-            "-g",
-            "AutoFillPasswords",
-            "-bool",
-            "NO",
-        ])
-        .output()
-        .await;
+    // The setting must be written to multiple domains because Apple has moved
+    // the password autofill control across iOS versions and frameworks.
+    for domain in [
+        "-g",                  // Global (pre-iOS 26)
+        "com.apple.WebUI",     // WebKit credential UI (iOS 26+)
+        "com.apple.Safari",    // Safari password autofill
+        "com.apple.Password",  // Passwords framework (iOS 26+)
+    ] {
+        let _ = Command::new("xcrun")
+            .args([
+                "simctl", "spawn", udid, "defaults", "write", domain,
+                "AutoFillPasswords", "-bool", "NO",
+            ])
+            .output()
+            .await;
+    }
     debug!(udid, "Configured simulator defaults for testing");
 }
 

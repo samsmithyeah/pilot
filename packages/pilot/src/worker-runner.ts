@@ -14,7 +14,7 @@ import { Device } from './device.js';
 import { runTestFile, collectResults } from './runner.js';
 import type { PilotConfig } from './config.js';
 import { isPackageInstalled, waitForPackageIndexed } from './emulator.js';
-import { installApp, isAppInstalled } from './ios-simulator.js';
+import { installApp, isAppInstalled, probeSimulatorHealth, rebootSimulator } from './ios-simulator.js';
 import type {
   MainToWorkerMessage,
   WorkerToMainMessage,
@@ -251,6 +251,10 @@ async function runFileWithRecovery(
           );
         },
         abortFileOnError: isRecoverableInfrastructureError,
+        // On retry (attempt 2), bust the ESM import cache so the file's
+        // test registrations re-execute. Without this, import() returns the
+        // cached module and no tests are registered for the retry.
+        bustImportCache: attempt > 1,
         projectUseOptions,
         projectName,
       });
@@ -322,9 +326,31 @@ function findRecoverableInfrastructureFailure(
 }
 
 async function recoverFileSession(filePath: string, err: unknown): Promise<void> {
+  const errMsg = err instanceof Error ? err.message : String(err);
   process.stderr.write(
-    `Worker ${workerId}: Recovering session after infrastructure error in ${path.basename(filePath)}: ${err instanceof Error ? err.message : err}\n`,
+    `Worker ${workerId}: Recovering session after infrastructure error in ${path.basename(filePath)}: ${errMsg}\n`,
   );
+
+  // On iOS, check if the simulator itself is unhealthy (e.g. "Shutting Down"
+  // state, crashed, or unresponsive). If so, reboot it before attempting
+  // session recovery — otherwise startAgent/launchApp will keep failing.
+  if (config?.platform === 'ios' && assignedSerial) {
+    const health = probeSimulatorHealth(assignedSerial);
+    if (!health.healthy) {
+      process.stderr.write(
+        `Worker ${workerId}: Simulator ${assignedSerial} is unhealthy (${health.reason}), rebooting...\n`,
+      );
+      rebootSimulator(assignedSerial);
+      // Re-install the app after reboot — it may have been lost
+      if (config.app) {
+        const resolvedApp = path.resolve(config.rootDir, config.app);
+        installApp(assignedSerial, resolvedApp);
+      }
+      process.stderr.write(
+        `Worker ${workerId}: Simulator rebooted and healthy.\n`,
+      );
+    }
+  }
 
   if (config?.package) {
     await launchConfiguredApp(

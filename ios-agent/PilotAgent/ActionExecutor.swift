@@ -9,7 +9,7 @@ class ActionExecutor {
     /// Minimum pixel margin for tapping outside an element during blur.
     private static let blurTapMarginPx: CGFloat = 50
     /// Time to wait for idle after focus/blur actions.
-    private static let focusIdleTimeout: TimeInterval = 0.5
+    private static let focusIdleTimeout: TimeInterval = 0.25
 
     init(app: XCUIApplication) {
         self.app = app
@@ -79,7 +79,7 @@ class ActionExecutor {
         }
         element.tap()
         // Small delay for focus
-        Thread.sleep(forTimeInterval: 0.1)
+        Thread.sleep(forTimeInterval: 0.05)
         element.typeText(text)
     }
 
@@ -100,13 +100,13 @@ class ActionExecutor {
         }
 
         element.tap()
-        Thread.sleep(forTimeInterval: 0.1)
+        Thread.sleep(forTimeInterval: 0.05)
 
         // Use Cmd+A via event synthesis to select all text, then delete.
         // XCUIKeyboardKey rawValues can't be concatenated for modifier combos —
         // we must use the EventSynthesizer's keyPress API instead.
         if EventSynthesizer.keyPress(key: "a", modifiers: .command) {
-            Thread.sleep(forTimeInterval: 0.1)
+            Thread.sleep(forTimeInterval: 0.05)
             if EventSynthesizer.keyPress(key: XCUIKeyboardKey.delete.rawValue) {
                 return
             }
@@ -116,7 +116,7 @@ class ActionExecutor {
         element.tap()
         element.tap()
         element.tap()
-        Thread.sleep(forTimeInterval: 0.1)
+        Thread.sleep(forTimeInterval: 0.05)
         element.typeText("\u{8}") // backspace character
     }
 
@@ -195,7 +195,7 @@ class ActionExecutor {
 
             try swipe(container, direction: swipeDir, speed: 5000, distance: 0.8)
             // Brief wait for UI to settle
-            Thread.sleep(forTimeInterval: 0.5)
+            Thread.sleep(forTimeInterval: 0.25)
         }
         throw AgentError.timeout("Could not find target element after \(maxScrolls) scrolls")
     }
@@ -272,7 +272,7 @@ class ActionExecutor {
     /// Select an option from a picker/dropdown by text.
     func selectOption(_ element: XCUIElement, optionText: String) throws {
         element.tap()
-        Thread.sleep(forTimeInterval: 0.5)
+        Thread.sleep(forTimeInterval: 0.3)
 
         // Look for the option text in the app
         let option = app.staticTexts[optionText]
@@ -292,7 +292,7 @@ class ActionExecutor {
     /// Select an option from a picker/dropdown by index.
     func selectOptionByIndex(_ element: XCUIElement, index: Int) throws {
         element.tap()
-        Thread.sleep(forTimeInterval: 0.5)
+        Thread.sleep(forTimeInterval: 0.3)
 
         // On iOS, pickers work differently. Try to find options in an action sheet or popup.
         let cells = app.cells

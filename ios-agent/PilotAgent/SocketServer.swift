@@ -94,7 +94,7 @@ class SocketServer {
 
             // Run the RunLoop briefly to process XPC callbacks and GCD events.
             // Short interval when commands are pending, longer when idle.
-            let interval = pending != nil ? 0.001 : 0.05
+            let interval = pending != nil ? 0.001 : 0.01
             RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: interval))
         }
     }

@@ -446,9 +446,10 @@ enum EventSynthesizer {
             return false
         }
 
-        // Critical: 500ms delay after first character (Maestro's workaround
-        // for iOS dropping characters / not triggering delegates)
-        Thread.sleep(forTimeInterval: 0.5)
+        // Brief delay after first character (Maestro's workaround for iOS
+        // dropping characters / not triggering delegates). 150ms is sufficient
+        // on Apple Silicon with the _XCT_sendString primary path.
+        Thread.sleep(forTimeInterval: 0.15)
 
         if !rest.isEmpty {
             return typeViaEventPath(rest, typingSpeed: 30)
@@ -486,8 +487,8 @@ enum EventSynthesizer {
         let sendFunc = unsafeBitCast(imp, to: SendMethod.self)
         // Use a moderate typing frequency. 30 chars/sec can drop characters
         // in React Native apps where the JS bridge processes keystrokes async.
-        // 15 chars/sec (~67ms per keystroke) is reliable while still being fast.
-        sendFunc(proxy, sendSel, text as NSString, 15) { error in
+        // 20 chars/sec (~50ms per keystroke) is reliable while still being fast.
+        sendFunc(proxy, sendSel, text as NSString, 20) { error in
             success = (error == nil)
             if let error = error {
                 NSLog("[EventSynth] _XCT_sendString error: %@", error.localizedDescription)

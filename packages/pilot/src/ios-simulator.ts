@@ -118,6 +118,38 @@ export function shutdownSimulator(udid: string): void {
 }
 
 /**
+ * Reboot a simulator: shutdown then boot. Handles simulators stuck in
+ * "Shutting Down" state by waiting for the shutdown to complete before
+ * booting.
+ */
+export function rebootSimulator(udid: string): void {
+  shutdownSimulator(udid);
+
+  // Wait for the simulator to fully shut down (up to 15s).
+  // Simulators in "Shutting Down" state take a few seconds to transition
+  // to "Shutdown" before they can be booted again.
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    const sims = listSimulators();
+    const sim = sims.find((s) => s.udid === udid);
+    if (!sim || sim.state === 'Shutdown') break;
+    if (sim.state === 'Booted') break; // Already booted (shutdown was no-op)
+    // Still shutting down — wait
+    execFileSync('sleep', ['0.5']);
+  }
+
+  bootSimulator(udid);
+
+  // Wait for the simulator to be ready (launchd responsive)
+  const bootDeadline = Date.now() + 30_000;
+  while (Date.now() < bootDeadline) {
+    const result = probeSimulatorHealth(udid);
+    if (result.healthy) return;
+    execFileSync('sleep', ['1']);
+  }
+}
+
+/**
  * Install an app bundle on a simulator.
  */
 export function installApp(udid: string, appPath: string): void {

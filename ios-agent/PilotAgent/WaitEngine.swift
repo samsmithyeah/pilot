@@ -10,7 +10,7 @@ import Foundation
 class WaitEngine {
     private let app: XCUIApplication
 
-    private static let stabilityWindowMs: UInt64 = 300
+    private static let stabilityWindowMs: UInt64 = 150
     private static let defaultIdleTimeout: TimeInterval = 5.0
     private static let defaultElementTimeout: TimeInterval = 10.0
 
@@ -23,7 +23,7 @@ class WaitEngine {
     /// We use a brief sleep to allow animations to settle. Keep this short
     /// since it blocks the single-threaded command handler.
     func waitForIdle(timeoutMs: Int64 = 5000) {
-        let maxWait: TimeInterval = 0.5
+        let maxWait: TimeInterval = 0.25
         Thread.sleep(forTimeInterval: min(TimeInterval(timeoutMs) / 1000.0, maxWait))
     }
 
