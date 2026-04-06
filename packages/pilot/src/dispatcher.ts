@@ -225,8 +225,9 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
     }
   } else {
     // ─── Android device discovery & provisioning ───
+    const androidDevices = onlineDevices.filter((d) => d.platform !== 'ios');
     const prefilteredOnline = prefilterDevicesForStrategy(
-      onlineDevices.map((d) => d.serial),
+      androidDevices.map((d) => d.serial),
       deviceStrategy,
       config.avd,
     );
@@ -250,7 +251,7 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
     ) {
       const provision = await provisionEmulators({
         existingSerials: selectedOnline.selectedSerials,
-        occupiedSerials: onlineDevices.map((d) => d.serial),
+        occupiedSerials: androidDevices.map((d) => d.serial),
         workers: Math.min(opts.workers, testFiles.length),
         avd: config.avd,
       });

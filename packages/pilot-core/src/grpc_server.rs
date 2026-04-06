@@ -1400,25 +1400,29 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
             }
             Platform::Android => {
                 // ─── Android: install APKs and launch instrumentation ───
+                let has_apk_paths =
+                    !req.agent_apk_path.is_empty() && !req.agent_test_apk_path.is_empty();
                 let agent_installed = adb::is_package_installed(&serial, "dev.pilot.agent")
                     .await
                     .unwrap_or(false);
 
-                if !agent_installed {
-                    if req.agent_apk_path.is_empty() || req.agent_test_apk_path.is_empty() {
-                        return Ok(Response::new(proto::ActionResponse {
-                            request_id,
-                            success: false,
-                            error_type: "AGENT_NOT_INSTALLED".to_string(),
-                            error_message: "Pilot agent is not installed on the device. \
-                                Set agentApk and agentTestApk in your pilot config, \
-                                or install manually with: adb install <path-to-agent.apk>"
-                                .to_string(),
-                            screenshot: Vec::new(),
-                        }));
-                    }
+                if !agent_installed && !has_apk_paths {
+                    return Ok(Response::new(proto::ActionResponse {
+                        request_id,
+                        success: false,
+                        error_type: "AGENT_NOT_INSTALLED".to_string(),
+                        error_message: "Pilot agent is not installed on the device. \
+                            Set agentApk and agentTestApk in your pilot config, \
+                            or install manually with: adb install <path-to-agent.apk>"
+                            .to_string(),
+                        screenshot: Vec::new(),
+                    }));
+                }
 
-                    info!("Agent not installed, installing APKs...");
+                // Always reinstall when APK paths are provided so that code
+                // changes to the agent are deployed without manual intervention.
+                if has_apk_paths {
+                    info!("Installing agent APKs...");
                     if let Err(e) = adb::install_apk(&serial, &req.agent_apk_path).await {
                         return Ok(Response::new(proto::ActionResponse {
                             request_id,
