@@ -487,8 +487,9 @@ enum EventSynthesizer {
         let sendFunc = unsafeBitCast(imp, to: SendMethod.self)
         // Use a moderate typing frequency. 30 chars/sec can drop characters
         // in React Native apps where the JS bridge processes keystrokes async.
-        // 20 chars/sec (~50ms per keystroke) is reliable while still being fast.
-        sendFunc(proxy, sendSel, text as NSString, 20) { error in
+        // 15 chars/sec (~67ms per keystroke) is reliable under CPU pressure
+        // (e.g. 4+ parallel workers sharing a machine).
+        sendFunc(proxy, sendSel, text as NSString, 15) { error in
             success = (error == nil)
             if let error = error {
                 NSLog("[EventSynth] _XCT_sendString error: %@", error.localizedDescription)
