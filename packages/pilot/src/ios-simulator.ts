@@ -3,6 +3,11 @@
  *
  * Parallel to `emulator.ts` for Android, this module wraps `xcrun simctl`
  * commands for discovering, booting, and managing iOS simulators.
+ *
+ * All simctl calls are synchronous (`execFileSync`) because the parallel
+ * provisioning loop needs deterministic ordering — clone, boot, and health
+ * checks must complete in sequence per simulator. `Atomics.wait` is used for
+ * brief sleeps between retries since `setTimeout` requires an async context.
  */
 
 import { execFileSync } from 'node:child_process';

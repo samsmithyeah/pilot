@@ -7,9 +7,9 @@ export default defineConfig({
   timeout: 10_000,
   retries: 0,
   screenshot: "only-on-failure",
-  workers: 2,
+  workers: 4,
   trace: "retain-on-failure",
-  simulator: "iPhone 17",
+  simulator: process.env.PILOT_IOS_SIMULATOR || "iPhone 17",
   daemonBin: "../packages/pilot-core/target/release/pilot-core",
   // xctestrun path lives in Xcode DerivedData — find yours with:
   //   ls ~/Library/Developer/Xcode/DerivedData/PilotAgent-*/Build/Products/*.xctestrun

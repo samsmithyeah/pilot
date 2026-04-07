@@ -132,6 +132,147 @@ describe('session-preflight', () => {
     );
   });
 
+  it('iOS clearAppData + restartApp path when no deep link configured', async () => {
+    const ctx = makeContext({
+      config: { package: 'com.example.app', activity: undefined, platform: 'ios' },
+    });
+    // iOS verifySession polls hierarchy instead of waitForIdle
+    vi.mocked(ctx.client.getUiHierarchy).mockResolvedValue({
+      requestId: '1',
+      hierarchyXml: '<hierarchy><node /></hierarchy>',
+      errorMessage: '',
+    });
+
+    await expect(launchConfiguredApp(ctx, 'file reset')).resolves.toBeUndefined();
+
+    expect(ctx.device.clearAppData).toHaveBeenCalledWith('com.example.app');
+    expect(ctx.device.restartApp).toHaveBeenCalledWith('com.example.app');
+    expect(ctx.device.terminateApp).not.toHaveBeenCalled();
+    expect(ctx.device.launchApp).not.toHaveBeenCalled();
+    expect(ctx.device.openDeepLink).not.toHaveBeenCalled();
+  });
+
+  it('iOS clearAppData path recovers when restartApp fails', async () => {
+    const ctx = makeContext({
+      config: { package: 'com.example.app', activity: undefined, platform: 'ios' },
+    });
+    vi.mocked(ctx.device.restartApp).mockRejectedValueOnce(new Error('agent stale'));
+    vi.mocked(ctx.client.getUiHierarchy).mockResolvedValue({
+      requestId: '1',
+      hierarchyXml: '<hierarchy><node /></hierarchy>',
+      errorMessage: '',
+    });
+
+    await expect(launchConfiguredApp(ctx, 'file reset')).resolves.toBeUndefined();
+
+    expect(ctx.device.clearAppData).toHaveBeenCalledWith('com.example.app');
+    expect(ctx.device.restartApp).toHaveBeenCalledWith('com.example.app');
+    // Should still succeed via ensureSessionReady
+    expect(ctx.client.ping).toHaveBeenCalled();
+  });
+
+  it('iOS soft reset skips home deep link when reset URL has no path', async () => {
+    const ctx = makeContext({
+      config: {
+        package: 'com.example.app',
+        activity: undefined,
+        platform: 'ios',
+        resetAppDeepLink: 'example:///',
+      },
+    });
+    vi.mocked(ctx.client.getUiHierarchy).mockResolvedValue({
+      requestId: '1',
+      hierarchyXml: '<hierarchy><node /></hierarchy>',
+      errorMessage: '',
+    });
+
+    await expect(launchConfiguredApp(ctx, 'file reset')).resolves.toBeUndefined();
+
+    // Only one deep link call — home URL equals reset URL so it's skipped
+    expect(ctx.device.openDeepLink).toHaveBeenCalledTimes(1);
+    expect(ctx.device.openDeepLink).toHaveBeenCalledWith('example:///');
+  });
+
+  it('iOS soft reset uses default wait time when resetAppWaitMs not set', async () => {
+    const ctx = makeContext({
+      config: {
+        package: 'com.example.app',
+        activity: undefined,
+        platform: 'ios',
+        resetAppDeepLink: 'example:///__reset',
+      },
+    });
+    vi.mocked(ctx.client.getUiHierarchy).mockResolvedValue({
+      requestId: '1',
+      hierarchyXml: '<hierarchy><node /></hierarchy>',
+      errorMessage: '',
+    });
+
+    await expect(launchConfiguredApp(ctx, 'file reset')).resolves.toBeUndefined();
+
+    // Default is 750ms
+    expect(ctx.device.waitForIdle).toHaveBeenNthCalledWith(1, 750);
+  });
+
+  it('iOS soft reset falls back to setTimeout when waitForIdle rejects', async () => {
+    const ctx = makeContext({
+      config: {
+        package: 'com.example.app',
+        activity: undefined,
+        platform: 'ios',
+        resetAppDeepLink: 'example:///__reset',
+        resetAppWaitMs: 100,
+      },
+    });
+    vi.mocked(ctx.device.waitForIdle).mockRejectedValue(new Error('timeout'));
+    vi.mocked(ctx.client.getUiHierarchy).mockResolvedValue({
+      requestId: '1',
+      hierarchyXml: '<hierarchy><node /></hierarchy>',
+      errorMessage: '',
+    });
+
+    await expect(launchConfiguredApp(ctx, 'file reset')).resolves.toBeUndefined();
+
+    expect(ctx.device.openDeepLink).toHaveBeenCalledTimes(2);
+  });
+
+  it('iOS soft reset is skipped when allowSoftReset is false', async () => {
+    const ctx = makeContext({
+      config: {
+        package: 'com.example.app',
+        activity: undefined,
+        platform: 'ios',
+        resetAppDeepLink: 'example:///__reset',
+      },
+    });
+    vi.mocked(ctx.client.getUiHierarchy).mockResolvedValue({
+      requestId: '1',
+      hierarchyXml: '<hierarchy><node /></hierarchy>',
+      errorMessage: '',
+    });
+
+    await expect(launchConfiguredApp(ctx, 'file reset', { allowSoftReset: false })).resolves.toBeUndefined();
+
+    expect(ctx.device.openDeepLink).not.toHaveBeenCalled();
+    expect(ctx.device.clearAppData).toHaveBeenCalledWith('com.example.app');
+    expect(ctx.device.restartApp).toHaveBeenCalledWith('com.example.app');
+  });
+
+  it('iOS verifySession polls hierarchy until non-empty', async () => {
+    const ctx = makeContext({
+      config: { package: 'com.example.app', activity: undefined, platform: 'ios' },
+    });
+    vi.mocked(ctx.client.getUiHierarchy)
+      .mockResolvedValueOnce({ requestId: '1', hierarchyXml: '', errorMessage: '' })
+      .mockResolvedValueOnce({ requestId: '1', hierarchyXml: '  ', errorMessage: '' })
+      .mockResolvedValueOnce({ requestId: '1', hierarchyXml: '<hierarchy><node /></hierarchy>', errorMessage: '' });
+
+    await expect(launchConfiguredApp(ctx, 'file reset')).resolves.toBeUndefined();
+
+    // 3 hierarchy calls: 2 empty + 1 non-empty
+    expect(ctx.client.getUiHierarchy).toHaveBeenCalledTimes(3);
+  });
+
   it('dismisses blocking system dialogs before relaunching', async () => {
     const ctx = makeContext();
     vi.mocked(ctx.client.ping)

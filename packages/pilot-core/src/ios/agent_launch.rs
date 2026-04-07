@@ -280,21 +280,25 @@ async fn patch_xctestrun(
         k
     };
 
-    let mut cmd = std::process::Command::new(plist_buddy);
-    for (key, type_and_value) in &keys {
-        // Delete first (ignore failure if key doesn't exist), then Add.
-        cmd.arg("-c").arg(format!("Delete {key}"));
-        cmd.arg("-c").arg(format!("Add {key} {type_and_value}"));
+    // First pass: delete all keys (failures are expected if keys don't exist yet)
+    let mut del_cmd = std::process::Command::new(plist_buddy);
+    for (key, _) in &keys {
+        del_cmd.arg("-c").arg(format!("Delete {key}"));
     }
-    cmd.arg(&patched_path);
+    del_cmd.arg(&patched_path);
+    let _ = del_cmd.output();
 
-    let output = cmd.output().context("Failed to run PlistBuddy")?;
+    // Second pass: add all keys (failures here are real errors)
+    let mut add_cmd = std::process::Command::new(plist_buddy);
+    for (key, type_and_value) in &keys {
+        add_cmd.arg("-c").arg(format!("Add {key} {type_and_value}"));
+    }
+    add_cmd.arg(&patched_path);
+    let output = add_cmd.output().context("Failed to run PlistBuddy")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        // PlistBuddy returns non-zero if any command fails (e.g. Delete on
-        // a key that doesn't exist yet). This is expected — log for debugging.
-        debug!("PlistBuddy warnings (may be benign): {stderr}");
+        anyhow::bail!("PlistBuddy failed to patch xctestrun: {stderr}");
     }
 
     info!("Patched xctestrun at {patched_path}");

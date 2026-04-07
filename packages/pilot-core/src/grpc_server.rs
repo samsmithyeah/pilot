@@ -167,8 +167,16 @@ impl PilotServiceImpl {
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
         loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return self
+                    .probe_ios_agent_session(wait_for_idle, idle_timeout_ms)
+                    .await;
+            }
+            // Cap the probe timeout so it can't exceed the outer deadline.
+            let capped_idle_timeout = (idle_timeout_ms).min(remaining.as_millis() as u64);
             let err = match self
-                .probe_ios_agent_session(wait_for_idle, idle_timeout_ms)
+                .probe_ios_agent_session(wait_for_idle, capped_idle_timeout)
                 .await
             {
                 Ok(()) => return Ok(()),
