@@ -353,15 +353,22 @@ pub async fn configure_simulator(udid: &str) {
     // The setting must be written to multiple domains because Apple has moved
     // the password autofill control across iOS versions and frameworks.
     for domain in [
-        "-g",                  // Global (pre-iOS 26)
-        "com.apple.WebUI",     // WebKit credential UI (iOS 26+)
-        "com.apple.Safari",    // Safari password autofill
-        "com.apple.Password",  // Passwords framework (iOS 26+)
+        "-g",                 // Global (pre-iOS 26)
+        "com.apple.WebUI",    // WebKit credential UI (iOS 26+)
+        "com.apple.Safari",   // Safari password autofill
+        "com.apple.Password", // Passwords framework (iOS 26+)
     ] {
         let _ = Command::new("xcrun")
             .args([
-                "simctl", "spawn", udid, "defaults", "write", domain,
-                "AutoFillPasswords", "-bool", "NO",
+                "simctl",
+                "spawn",
+                udid,
+                "defaults",
+                "write",
+                domain,
+                "AutoFillPasswords",
+                "-bool",
+                "NO",
             ])
             .output()
             .await;

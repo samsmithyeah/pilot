@@ -31,6 +31,14 @@ if echo "$CHANGED_FILES" | grep -q '^proto/'; then
   fi
 fi
 
+# ─── Test app ───
+if echo "$CHANGED_FILES" | grep -q '^test-app/'; then
+  echo "▸ Test app: typecheck"
+  (cd test-app && npm run typecheck)
+  echo "▸ Test app: lint"
+  (cd test-app && npm run lint)
+fi
+
 # ─── Android agent ───
 if echo "$CHANGED_FILES" | grep -q '^agent/'; then
   echo "▸ Android: ktlintCheck"

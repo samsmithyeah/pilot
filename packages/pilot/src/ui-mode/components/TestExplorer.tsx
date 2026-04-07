@@ -94,7 +94,7 @@ export function TestExplorer(props: TestExplorerProps) {
   // Clear all pending when a run stops
   useEffect(() => {
     if (!isRunning && pendingIds.size > 0) setPendingIds(new Set());
-  }, [isRunning]); // eslint-disable-line
+  }, [isRunning]);  
 
   const handleSetPending = useCallback((nodeId: string) => {
     const node = findNode(files, nodeId);

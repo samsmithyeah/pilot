@@ -17,7 +17,7 @@ export default function ProfileScreen() {
   if (loading || !email) {
     return (
       <View style={styles.container}>
-        <Text style={styles.loadingText} accessibilityRole="status">
+        <Text style={styles.loadingText} accessibilityRole="text">
           Loading...
         </Text>
       </View>
