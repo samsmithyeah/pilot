@@ -1,102 +1,110 @@
-import { test, expect, describe } from "pilot"
+import { test, expect, describe } from "pilot";
 
-const PKG = "dev.pilot.testapp"
+const PKG = "dev.pilot.testapp";
 
 // ─── Device Setup ───
 
 describe("Device setup", () => {
   test("wake() wakes the device screen", async ({ device }) => {
-    await device.wake()
-  })
+    await device.wake();
+  });
 
   test("unlock() dismisses the lock screen", async ({ device }) => {
-    await device.unlock()
-  })
-})
+    await device.unlock();
+  });
+});
 
 // ─── App Lifecycle ───
 
 describe("App lifecycle", () => {
   test("currentPackage() returns the foreground app", async ({ device }) => {
-    const pkg = await device.currentPackage()
-    expect(pkg).toBe(PKG)
-  })
+    const pkg = await device.currentPackage();
+    expect(pkg).toBe(PKG);
+  });
 
-  test("getAppState() returns 'foreground' for active app", async ({ device }) => {
-    const state = await device.getAppState(PKG)
-    expect(state).toBe("foreground")
-  })
+  test("getAppState() returns 'foreground' for active app", async ({
+    device,
+  }) => {
+    const state = await device.getAppState(PKG);
+    expect(state).toBe("foreground");
+  });
 
   test("terminateApp() stops the app", async ({ device }) => {
-    await device.terminateApp(PKG)
-    const state = await device.getAppState(PKG)
-    expect(state).toBe("stopped")
-  })
+    await device.terminateApp(PKG);
+    const state = await device.getAppState(PKG);
+    expect(state).toBe("stopped");
+  });
 
   test("launchApp() with clearData starts fresh", async ({ device }) => {
-    await device.launchApp(PKG, { clearData: true })
-    const pkg = await device.currentPackage()
-    expect(pkg).toBe(PKG)
-  })
-})
+    await device.launchApp(PKG, { clearData: true });
+    const pkg = await device.currentPackage();
+    expect(pkg).toBe(PKG);
+  });
+});
 
 // ─── Deep Links ───
 
 describe("Deep links", () => {
   test("openDeepLink() navigates to a screen", async ({ device }) => {
-    await device.openDeepLink("pilottest:///login")
-  })
-})
+    await device.openDeepLink("pilottest:///login");
+  });
+});
 
 // ─── Orientation ───
 
 describe("Orientation", () => {
-  test("setOrientation('landscape') changes to landscape", async ({ device }) => {
-    await device.setOrientation("landscape")
-    const orientation = await device.getOrientation()
-    expect(orientation).toBe("landscape")
-  })
+  test("setOrientation('landscape') changes to landscape", async ({
+    device,
+  }) => {
+    await device.setOrientation("landscape");
+    const orientation = await device.getOrientation();
+    expect(orientation).toBe("landscape");
+  });
 
   test("setOrientation('portrait') restores portrait", async ({ device }) => {
-    await device.setOrientation("portrait")
-    const orientation = await device.getOrientation()
-    expect(orientation).toBe("portrait")
-  })
-})
+    await device.setOrientation("portrait");
+    const orientation = await device.getOrientation();
+    expect(orientation).toBe("portrait");
+  });
+});
 
 // ─── Keyboard ───
 
 describe("Keyboard", () => {
-  test("isKeyboardShown() returns false when no keyboard visible", async ({ device }) => {
-    await device.launchApp(PKG)
-    const shown = await device.isKeyboardShown()
-    expect(shown).toBe(false)
-  })
+  test("isKeyboardShown() returns false when no keyboard visible", async ({
+    device,
+  }) => {
+    const shown = await device.isKeyboardShown();
+    expect(shown).toBe(false);
+  });
 
-  test("hideKeyboard() does not throw when no keyboard is shown", async ({ device }) => {
-    await device.hideKeyboard()
-  })
-})
+  test("hideKeyboard() does not throw when no keyboard is shown", async ({
+    device,
+  }) => {
+    await device.hideKeyboard();
+  });
+});
 
 // ─── Clipboard ───
 
 describe("Clipboard", () => {
-  test("setClipboard() + getClipboard() round-trips text", async ({ device }) => {
-    await device.launchApp(PKG)
-    await device.setClipboard("Pilot E2E clipboard test!")
-    const clipText = await device.getClipboard()
-    expect(clipText).toBe("Pilot E2E clipboard test!")
-  })
-})
+  test("setClipboard() + getClipboard() round-trips text", async ({
+    device,
+  }) => {
+    await device.setClipboard("Pilot E2E clipboard test!");
+    const clipText = await device.getClipboard();
+    expect(clipText).toBe("Pilot E2E clipboard test!");
+  });
+});
 
 // ─── waitForIdle ───
 
 describe("Wait for idle", () => {
   test("waitForIdle() completes without error", async ({ device }) => {
-    await device.waitForIdle()
-  })
+    await device.waitForIdle();
+  });
 
   test("waitForIdle() with custom timeout", async ({ device }) => {
-    await device.waitForIdle(5000)
-  })
-})
+    await device.waitForIdle(5000);
+  });
+});

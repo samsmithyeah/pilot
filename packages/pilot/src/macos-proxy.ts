@@ -102,20 +102,39 @@ export function _resetState(): void {
   _sudoDeclined = false;
   _activeProxyService = null;
   _proxyExitHandlerInstalled = false;
+  stopSudoHeartbeat();
 }
 
 let _activeProxyService: string | null = null;
 let _proxyExitHandlerInstalled = false;
+let _sudoHeartbeat: ReturnType<typeof setInterval> | null = null;
+
+/** Keep the sudo credential cache alive during long test runs (every 4 min). */
+function startSudoHeartbeat(): void {
+  if (_sudoHeartbeat) return;
+  _sudoHeartbeat = setInterval(() => {
+    try { execFileSync('sudo', ['-v', '-n'], { stdio: 'pipe', timeout: 5_000 }); } catch { /* cache gone or expired */ }
+  }, 4 * 60 * 1000);
+  _sudoHeartbeat.unref(); // don't keep the process alive just for the heartbeat
+}
+
+function stopSudoHeartbeat(): void {
+  if (_sudoHeartbeat) {
+    clearInterval(_sudoHeartbeat);
+    _sudoHeartbeat = null;
+  }
+}
 
 function installProxyExitHandler(): void {
   if (_proxyExitHandlerInstalled) return;
   _proxyExitHandlerInstalled = true;
   const cleanup = () => {
+    stopSudoHeartbeat();
     if (_activeProxyService) {
       try {
         execFileSync('sudo', ['-n', 'networksetup', '-setwebproxystate', _activeProxyService, 'off'], { stdio: 'pipe' });
         execFileSync('sudo', ['-n', 'networksetup', '-setsecurewebproxystate', _activeProxyService, 'off'], { stdio: 'pipe' });
-      } catch { /* best-effort — sudo cache may have expired on very long runs */ }
+      } catch { /* best-effort */ }
       _activeProxyService = null;
     }
   };
@@ -141,6 +160,7 @@ export function setMacProxy(port: number): string | null {
   }
   _activeProxyService = service;
   installProxyExitHandler();
+  startSudoHeartbeat();
   return service;
 }
 
@@ -148,6 +168,7 @@ export function setMacProxy(port: number): string | null {
  * Disable the macOS system proxy for the given network service.
  */
 export function clearMacProxy(service: string): void {
+  stopSudoHeartbeat();
   try {
     execFileSync('sudo', ['-n', 'networksetup', '-setwebproxystate', service, 'off'], { stdio: 'pipe' });
     execFileSync('sudo', ['-n', 'networksetup', '-setsecurewebproxystate', service, 'off'], { stdio: 'pipe' });

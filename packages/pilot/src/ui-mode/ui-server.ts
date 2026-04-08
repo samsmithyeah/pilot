@@ -853,6 +853,40 @@ export async function startUIServer(
   // ─── Multi-worker execution (persistent ui-worker.ts processes)
   // ═══════════════════════════════════════════════════════════════════
 
+  /**
+   * Run a single `lsof` call to find PIDs listening on any of the given ports.
+   * Returns a Map from port number to the list of PIDs on that port.
+   */
+  function collectListeningPids(ports: number[]): Map<number, number[]> {
+    const result = new Map<number, number[]>();
+    if (ports.length === 0) return result;
+    try {
+      // Use -F (field mode) to get PID + port associations from a single call.
+      const fullArgs = ['-P', '-sTCP:LISTEN', '-F', 'pn', ...ports.map((p) => `-iTCP:${p}`)];
+      const out = execFileSync('lsof', fullArgs, { encoding: 'utf-8' }).trim();
+      let currentPid = 0;
+      for (const line of out.split('\n')) {
+        if (line.startsWith('p')) {
+          currentPid = Number(line.slice(1));
+        } else if (line.startsWith('n') && currentPid > 0) {
+          // Lines look like "n*:50151" or "n127.0.0.1:50151"
+          const colonIdx = line.lastIndexOf(':');
+          if (colonIdx >= 0) {
+            const port = Number(line.slice(colonIdx + 1));
+            if (ports.includes(port)) {
+              const existing = result.get(port) ?? [];
+              if (!existing.includes(currentPid)) existing.push(currentPid);
+              result.set(port, existing);
+            }
+          }
+        }
+      }
+    } catch {
+      // lsof failed or no matching processes — fine
+    }
+    return result;
+  }
+
   /** Initialize persistent workers. Called once during server startup. */
   async function initializeWorkers(): Promise<void> {
     if (!ctx.deviceSerials || ctx.deviceSerials.length === 0) return;
@@ -873,13 +907,18 @@ export async function startUIServer(
 
     const initPromises: Promise<UIWorkerHandle | null>[] = [];
 
+    // Collect PIDs listening on all daemon ports in a single lsof call
+    // so each worker doesn't need to shell out individually.
+    const daemonPorts = Array.from({ length: numWorkers }, (_, i) => baseDaemonPort + 100 + i);
+    const stalePidsByPort = collectListeningPids(daemonPorts);
+
     for (let i = 0; i < numWorkers; i++) {
       const deviceSerial = ctx.deviceSerials[i];
-      const daemonPort = baseDaemonPort + 100 + i;
+      const daemonPort = daemonPorts[i];
       const agentPort = baseAgentPort + 100 + i;
 
       initPromises.push(
-        initializeOneWorker(i, deviceSerial, daemonPort, agentPort, daemonBin),
+        initializeOneWorker(i, deviceSerial, daemonPort, agentPort, daemonBin, stalePidsByPort.get(daemonPort)),
       );
     }
 
@@ -949,24 +988,18 @@ export async function startUIServer(
     daemonPort: number,
     agentPort: number,
     daemonBin: string,
+    stalePids?: number[],
   ): Promise<UIWorkerHandle> {
     // Kill any stale daemon on this port from a previous run or another
     // Pilot instance so we always get a fresh daemon with the correct
     // --platform flag. Without this, waitForReady succeeds by connecting
     // to the old daemon, causing cross-instance interference.
-    try {
-      const probe = new PilotGrpcClient(`localhost:${daemonPort}`);
-      const alive = await probe.waitForReady(1_000);
-      probe.close();
-      if (alive) {
-        const lsofOut = execFileSync('lsof', ['-ti', `tcp:${daemonPort}`], { encoding: 'utf-8' }).trim();
-        for (const pid of lsofOut.split('\n').filter(Boolean)) {
-          try { process.kill(Number(pid), 'SIGTERM'); } catch { /* already gone */ }
-        }
-        await new Promise((r) => setTimeout(r, 500));
+    // PIDs were pre-collected via a single batched lsof call.
+    if (stalePids && stalePids.length > 0) {
+      for (const pid of stalePids) {
+        try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ }
       }
-    } catch {
-      // No daemon running, nothing to kill
+      await new Promise((r) => setTimeout(r, 500));
     }
 
     // Remove stale ADB port forwards on the agent port. A previous
