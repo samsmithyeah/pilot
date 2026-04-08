@@ -76,10 +76,15 @@ export async function launchConfiguredApp(
     await ctx.device.clearAppData(ctx.config.package);
     try {
       await ctx.device.restartApp(ctx.config.package);
-    } catch {
+    } catch (err) {
       // restartApp can fail on iOS if the agent session is stale after
       // clearAppData. The app will be relaunched by ensureSessionReady's
-      // recovery path, or by the test's own beforeAll/beforeEach.
+      // recovery path, or by the test's own beforeAll/beforeEach. Surface
+      // the error to stderr so a real app crash here is debuggable rather
+      // than silently masked until the next test fails for an unrelated
+      // reason.
+      const message = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`[pilot] iOS file-level restartApp failed (will recover): ${message}\n`);
     }
     await ensureSessionReady(ctx, phase);
     // After launch, wait for the app to actually be ready (non-empty

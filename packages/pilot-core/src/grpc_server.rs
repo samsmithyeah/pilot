@@ -2087,7 +2087,15 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
                     )
                     .await;
 
-                if agent_result.is_err() {
+                // Fall back to simctl on transport error AND on agent-reported
+                // failure (Ok(resp) where !resp.success). The agent can return
+                // a structured failure (e.g. app already gone, XCUI error) that
+                // would otherwise be silently swallowed.
+                let needs_fallback = match &agent_result {
+                    Err(_) => true,
+                    Ok(resp) => !resp.success,
+                };
+                if needs_fallback {
                     let serial = self.active_serial().await?;
                     let _ = ios::device::terminate_app(&serial, &req.package_name).await;
                 }

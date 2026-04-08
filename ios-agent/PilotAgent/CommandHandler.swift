@@ -514,20 +514,12 @@ class CommandHandler {
             return ["package": bundleId]
 
         case "openDeepLink":
-            // Deep links are handled by the daemon via xcrun simctl openurl
-            // The agent can also open URLs via the app
-            let uri = params["uri"] as? String ?? ""
-            if !uri.isEmpty {
-                let safariApp = XCUIApplication(bundleIdentifier: "com.apple.mobilesafari")
-                safariApp.launch()
-                // Navigate to URL
-                let urlField = safariApp.textFields.firstMatch
-                if urlField.waitForExistence(timeout: 5) {
-                    urlField.tap()
-                    urlField.typeText(uri + "\n")
-                }
-            }
-            return ["success": true]
+            // Deep links are handled by the daemon via `xcrun simctl openurl`,
+            // which is the only correct path on iOS — the agent should never
+            // be reached for this command. If it is, fail loudly rather than
+            // silently launching Safari and typing into the address bar (which
+            // would pop a visible browser mid-test).
+            throw AgentError.actionFailed("openDeepLink must be handled by the daemon via simctl openurl, not the agent")
 
         // ─── Orientation ───
 

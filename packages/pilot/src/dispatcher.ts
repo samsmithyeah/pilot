@@ -139,14 +139,15 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
   const firstDaemonPort = baseDaemonPort + 1;
   const firstAgentPort = baseAgentPort + 1;
 
-  // Free agent host ports from any leftover stale process. The most common
-  // offender is a leftover iOS `PilotAgent` from a previous iOS run — its
-  // host-localhost socket squats on the port we want to use for `adb forward`,
-  // silently shadowing the Android agent so every command routes to the iOS
-  // simulator. Free every port we might use across the requested worker count.
-  for (let w = 0; w < opts.workers; w++) {
-    freeStaleAgentPort(baseAgentPort + 1 + w);
-  }
+  // Free the first agent host port from any leftover stale process before
+  // spawning firstDaemon. The common offender is a leftover iOS `PilotAgent`
+  // from a previous iOS run — its host-localhost socket squats on the port
+  // we want to use for `adb forward`, silently shadowing the Android agent
+  // so every command routes to the iOS simulator. Subsequent worker slots
+  // free their own agent port inline during slot allocation below, since
+  // the slot allocator may walk past `opts.workers` when daemon ports are
+  // occupied — freeing only `[0, opts.workers)` upfront would miss them.
+  freeStaleAgentPort(firstAgentPort);
 
   const firstDaemon = spawn(
     daemonBin,
@@ -380,11 +381,21 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
 
     // Pre-check port availability to avoid wasting time on occupied ports.
     // Ports are baseDaemonPort+1+workerId; skip workers whose port is taken.
+    // For each candidate slot we also free any stale iOS PilotAgent squatting
+    // on the agent port — the slot loop may walk past opts.workers when daemon
+    // ports are occupied, so we cannot rely on a fixed-size upfront sweep.
+    // wid=0 is special: it reuses firstDaemon (already spawned), and its
+    // agent port (firstAgentPort) was freed before that spawn.
     const availableWorkerSlots: Array<{ workerId: number; daemonPort: number; agentPort: number }> = [];
     for (let wid = 0; availableWorkerSlots.length < maxUsefulWorkers && availableWorkerSlots.length < deviceSerials.length && wid < maxUsefulWorkers + 10; wid++) {
       const port = baseDaemonPort + 1 + wid;
       const agentPort = baseAgentPort + 1 + wid;
-      if (wid === 0 || await isPortAvailable(port)) {
+      if (wid === 0) {
+        availableWorkerSlots.push({ workerId: availableWorkerSlots.length, daemonPort: port, agentPort });
+        continue;
+      }
+      freeStaleAgentPort(agentPort);
+      if (await isPortAvailable(port)) {
         availableWorkerSlots.push({ workerId: availableWorkerSlots.length, daemonPort: port, agentPort });
       } else {
         process.stderr.write(
