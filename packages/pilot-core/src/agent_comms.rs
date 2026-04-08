@@ -4,7 +4,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::adb;
 
@@ -24,6 +24,25 @@ const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 /// found" response arrives, falsely marking the connection as dead and
 /// triggering an unnecessary reconnect on the next command.
 const READ_TIMEOUT_HEADROOM: Duration = Duration::from_secs(5);
+
+/// Categorizes a `try_send_command` failure so the caller can decide whether
+/// retrying is safe. See the long comment on `send_command_with_timeout` for
+/// the reasoning.
+enum SendError {
+    /// Failed before writing any byte to the agent. Safe to retry.
+    Connect(anyhow::Error),
+    /// TCP connection succeeded; the agent may have observed the command
+    /// (or part of it). Not safe to retry side-effectful commands.
+    PostSend(anyhow::Error),
+}
+
+impl From<SendError> for anyhow::Error {
+    fn from(value: SendError) -> Self {
+        match value {
+            SendError::Connect(e) | SendError::PostSend(e) => e,
+        }
+    }
+}
 
 // ─── Agent Command Protocol ───
 //
@@ -528,78 +547,108 @@ impl AgentConnection {
             bail!("Not connected to agent. Call StartAgent or connect first.");
         }
 
-        // Send the command with a single attempt. We deliberately do NOT
-        // retry on failure: many failure modes (e.g. "Agent returned empty
-        // response" — agent processed the command but the response was
-        // dropped) mean the command already executed once on the agent, so
-        // retrying it would double-execute side-effectful commands like tap
-        // or openDeepLink. We also do NOT flip `self.connected = false` on a
-        // single failed command — a transient hierarchy dump failure does
-        // not mean the agent process is dead, and poisoning the cached
-        // connection flag would falsely trigger expensive recovery on the
-        // next test's session preflight. The flag only flips on an explicit
-        // disconnect; the trace collector swallows transient hierarchy/screen
-        // capture errors so a single dropped response is non-fatal.
-        self.try_send_command(command, timeout).await
+        // We split failures into two classes:
+        //
+        // 1. Connect-time failures (we never wrote a single byte to the agent)
+        //    — safe to retry. The command was never observed by the agent, so
+        //    even side-effectful commands like tap/openDeepLink can be tried
+        //    again without double-executing. This matters in practice right
+        //    after `restartApp`: force-stopping the target app briefly tears
+        //    down the agent's listening socket on Android while the agent
+        //    process re-binds, so the very next command can hit a transient
+        //    "Failed to connect to agent socket".
+        //
+        // 2. Post-send failures (we already wrote the command to the socket)
+        //    — NOT safe to retry. The agent may have processed the command
+        //    even if the response was dropped, so retrying would double up
+        //    side-effectful commands. The trace collector swallows transient
+        //    hierarchy/screen capture errors, so a single dropped response is
+        //    still non-fatal for non-essential commands.
+        //
+        // In neither case do we flip `self.connected = false`: a transient
+        // socket blip does not mean the agent process is dead, and poisoning
+        // the cached connection flag would trigger expensive recovery on the
+        // next test's session preflight.
+        match self.try_send_command(command, timeout).await {
+            Ok(resp) => Ok(resp),
+            Err(SendError::Connect(e)) => {
+                warn!("Agent connect failed, retrying once: {e}");
+                self.try_send_command(command, timeout)
+                    .await
+                    .map_err(Into::into)
+            }
+            Err(SendError::PostSend(e)) => Err(e),
+        }
     }
 
     async fn try_send_command(
         &self,
         command: &AgentCommand,
         timeout: Duration,
-    ) -> Result<AgentResponse> {
+    ) -> std::result::Result<AgentResponse, SendError> {
         let addr = format!("127.0.0.1:{}", self.host_port);
         let mut stream = tokio::time::timeout(Duration::from_secs(5), async {
             TcpStream::connect(&addr).await
         })
         .await
-        .map_err(|_| anyhow!("Timed out connecting to agent socket"))?
-        .context("Failed to connect to agent socket")?;
+        .map_err(|_| SendError::Connect(anyhow!("Timed out connecting to agent socket")))?
+        .map_err(|e| SendError::Connect(anyhow!(e).context("Failed to connect to agent socket")))?;
 
-        let request_id = uuid::Uuid::new_v4().to_string();
-        let json_msg = command.to_json(&request_id);
-        let payload = serde_json::to_string(&json_msg).context("Failed to serialize command")?;
-        debug!(payload = %payload, "Sending command to agent");
+        // Everything past the successful TCP connect counts as a "post-send"
+        // failure: even if the write hasn't happened yet, we treat it as
+        // unsafe to retry once we've claimed a socket, because in practice
+        // the write is what fails most of the time and we can't tell from
+        // the outside whether the agent observed it.
+        async {
+            let request_id = uuid::Uuid::new_v4().to_string();
+            let json_msg = command.to_json(&request_id);
+            let payload =
+                serde_json::to_string(&json_msg).context("Failed to serialize command")?;
+            debug!(payload = %payload, "Sending command to agent");
 
-        // Write the command as a newline-delimited JSON message
-        stream
-            .write_all(payload.as_bytes())
-            .await
-            .context("Failed to write to agent socket")?;
-        stream
-            .write_all(b"\n")
-            .await
-            .context("Failed to write newline to agent socket")?;
-        stream.flush().await?;
-
-        // Read the response (newline-delimited JSON). Use the caller-supplied
-        // timeout plus headroom so the agent's own work clock always finishes
-        // first — see READ_TIMEOUT_HEADROOM for the rationale.
-        let read_timeout = timeout + READ_TIMEOUT_HEADROOM;
-        let reader = BufReader::new(&mut stream);
-        let mut line = String::new();
-
-        tokio::time::timeout(read_timeout, async {
-            let mut reader = reader;
-            reader
-                .read_line(&mut line)
+            // Write the command as a newline-delimited JSON message
+            stream
+                .write_all(payload.as_bytes())
                 .await
-                .context("Failed to read from agent socket")
-        })
-        .await
-        .map_err(|_| anyhow!("Agent command timed out after {read_timeout:?}"))??;
+                .context("Failed to write to agent socket")?;
+            stream
+                .write_all(b"\n")
+                .await
+                .context("Failed to write newline to agent socket")?;
+            stream.flush().await?;
 
-        let line = line.trim();
-        if line.is_empty() {
-            bail!("Agent returned empty response");
+            // Read the response (newline-delimited JSON). Use the caller-
+            // supplied timeout plus headroom so the agent's own work clock
+            // always finishes first — see READ_TIMEOUT_HEADROOM for the
+            // rationale.
+            let read_timeout = timeout + READ_TIMEOUT_HEADROOM;
+            let reader = BufReader::new(&mut stream);
+            let mut line = String::new();
+
+            tokio::time::timeout(read_timeout, async {
+                let mut reader = reader;
+                reader
+                    .read_line(&mut line)
+                    .await
+                    .context("Failed to read from agent socket")
+            })
+            .await
+            .map_err(|_| anyhow!("Agent command timed out after {read_timeout:?}"))??;
+
+            let line = line.trim();
+            if line.is_empty() {
+                bail!("Agent returned empty response");
+            }
+
+            debug!(response = %line, "Received response from agent");
+
+            let raw: Value =
+                serde_json::from_str(line).context("Failed to parse agent response as JSON")?;
+
+            Ok(AgentResponse::from_json(&raw))
         }
-
-        debug!(response = %line, "Received response from agent");
-
-        let raw: Value =
-            serde_json::from_str(line).context("Failed to parse agent response as JSON")?;
-
-        Ok(AgentResponse::from_json(&raw))
+        .await
+        .map_err(SendError::PostSend)
     }
 
     async fn ping_agent(&self) -> Result<()> {

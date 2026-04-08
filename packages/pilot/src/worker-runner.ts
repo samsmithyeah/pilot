@@ -104,9 +104,14 @@ async function handleInit(msg: InitMessage): Promise<void> {
     // Non-fatal
   }
 
-  // Install app under test if APK path is configured and not already installed
+  // Install app under test if APK path is configured and not already installed.
+  // On a freshly-launched emulator, the AVD snapshot may have a stale copy of
+  // the app baked in (so `pm list packages` says installed, but the bytes are
+  // out of date). Always reinstall on fresh emulators to be safe — the cost
+  // is small and the alternative is silent failures with stale UI.
   if (config.apk) {
-    const alreadyInstalled = config.package
+    const alreadyInstalled = !msg.freshEmulator
+      && config.package
       && msg.deviceSerial
       && isPackageInstalled(msg.deviceSerial, config.package);
 
@@ -124,8 +129,11 @@ async function handleInit(msg: InitMessage): Promise<void> {
   } else if (config.platform === 'ios' && config.app && msg.deviceSerial) {
     // iOS: install .app on this simulator if not already present.
     // The CLI only installs on the primary simulator; cloned workers need it too.
+    // Same fresh-simulator caveat as Android — reinstall unconditionally on
+    // a freshly-cloned simulator since the bundle may be stale.
     const resolvedApp = path.resolve(config.rootDir, config.app);
-    const alreadyInstalled = config.package
+    const alreadyInstalled = !msg.freshEmulator
+      && config.package
       && isAppInstalled(msg.deviceSerial, config.package);
     if (!alreadyInstalled) {
       sendProgress(`installing ${path.basename(resolvedApp)}`);

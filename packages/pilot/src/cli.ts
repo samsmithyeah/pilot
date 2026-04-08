@@ -19,7 +19,7 @@ import { createReporters, ReporterDispatcher, type FullResult } from './reporter
 import { ensureSessionReady, launchConfiguredApp } from './session-preflight.js';
 import { glob } from 'glob';
 import { resolveTraceConfig } from './trace/types.js';
-import { spawn, execFileSync, spawnSync } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import {
   clearOfflineEmulatorTransports,
   preserveEmulatorsForReuse,
@@ -38,6 +38,7 @@ import {
   ensureAdbRoot,
 } from './emulator.js';
 import { isRecoverableInfrastructureError } from './worker-protocol.js';
+import { findPidsOnPort, freeStaleAgentPort } from './port-utils.js';
 
 // ─── ANSI helpers ───
 
@@ -216,21 +217,6 @@ async function checkDeviceHealth(serial: string | undefined): Promise<void> {
 
 // ─── Daemon management ───
 
-/** Find PIDs listening on a TCP port. Works on macOS (lsof) and Linux (fuser). */
-function findPidsOnPort(port: string): number[] {
-  try {
-    if (process.platform === 'darwin') {
-      return execFileSync('lsof', ['-ti', `tcp:${port}`], { encoding: 'utf-8' })
-        .trim().split('\n').filter(Boolean).map(Number).filter(n => !isNaN(n));
-    }
-    // Linux: fuser writes PIDs to stderr
-    const result = spawnSync('fuser', [`${port}/tcp`], { encoding: 'utf-8' });
-    const output = (result.stderr || '').trim();
-    return output.split(/\s+/).filter(Boolean).map(Number).filter(n => !isNaN(n));
-  } catch {
-    return [];
-  }
-}
 
 /** Track the daemon process we spawned so we can kill it on exit. */
 let spawnedDaemonProcess: ReturnType<typeof spawn> | undefined;
@@ -276,6 +262,13 @@ async function ensureDaemonRunning(address: string, daemonBin?: string, platform
   } catch {
     // ADB not available or no forwards — safe to ignore
   }
+
+  // Free the agent host port from any leftover process (stale iOS PilotAgent
+  // from a previous run, or a stuck pilot-core daemon). If we leave a stale
+  // listener squatting on this port, the new daemon's `adb forward` is
+  // shadowed by the stale socket and every command silently routes to the
+  // wrong device — see freeStaleAgentPort for the full rationale.
+  freeStaleAgentPort(18700);
 
   // Start a fresh daemon
   const resolvedBin = process.env.PILOT_DAEMON_BIN ?? daemonBin ?? 'pilot-core';
@@ -498,8 +491,20 @@ function parseArgs(argv: string[]): CliArgs {
       args.help = true;
     } else if (arg === '--device' || arg === '-d') {
       args.device = rest[++i];
+    } else if (arg?.startsWith('--device=')) {
+      args.device = arg.slice('--device='.length);
     } else if (arg === '--workers' || arg === '-j') {
       const val = parseInt(rest[++i], 10);
+      if (isNaN(val) || val < 1) {
+        console.error(red('--workers must be a positive integer'));
+        process.exit(1);
+      }
+      args.workers = val;
+    } else if (arg?.startsWith('--workers=') || arg?.startsWith('-j=')) {
+      const raw = arg.startsWith('--workers=')
+        ? arg.slice('--workers='.length)
+        : arg.slice('-j='.length);
+      const val = parseInt(raw, 10);
       if (isNaN(val) || val < 1) {
         console.error(red('--workers must be a positive integer'));
         process.exit(1);
@@ -553,6 +558,9 @@ function parseArgs(argv: string[]): CliArgs {
       args.command = arg;
     } else if (!arg.startsWith('-')) {
       args.files.push(arg);
+    } else {
+      console.error(red(`Unknown argument: ${arg}`));
+      process.exit(1);
     }
 
     i++;
@@ -980,6 +988,13 @@ async function main(): Promise<void> {
       return;
     }
 
+    // The selected device was just launched in this session if it appears in
+    // launchedEmulators. Freshly-launched devices may have a stale snapshot of
+    // the app under test pre-baked in (the package is "installed" but the bytes
+    // are out of date), so force a reinstall regardless of the skip-install
+    // optimization.
+    const deviceJustLaunched = launchedEmulators.some((e) => e.serial === config.device);
+
     if (config.platform === 'ios') {
       // iOS: install and launch .app on simulator before starting the agent.
       // The app must be running BEFORE the XCUITest agent starts so that
@@ -988,7 +1003,8 @@ async function main(): Promise<void> {
         try {
           const { installApp, isAppInstalled } = await import('./ios-simulator.js');
           const resolvedApp = path.resolve(config.rootDir, config.app);
-          const alreadyInstalled = config.package
+          const alreadyInstalled = !deviceJustLaunched
+            && config.package
             && isAppInstalled(config.device, config.package);
 
           if (alreadyInstalled && !args.forceInstall) {
@@ -1027,7 +1043,8 @@ async function main(): Promise<void> {
 
       // Install app under test if APK path is configured and not already installed.
       if (config.apk) {
-        const isInstalled = config.package
+        const isInstalled = !deviceJustLaunched
+          && config.package
           && config.device
           && isPackageInstalled(config.device, config.package);
 

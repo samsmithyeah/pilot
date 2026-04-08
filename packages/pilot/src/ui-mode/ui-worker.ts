@@ -163,9 +163,11 @@ async function handleInit(msg: UIWorkerInitMessage): Promise<void> {
     // Non-fatal
   }
 
-  // Install app if needed
+  // Install app if needed. Always reinstall on freshly-launched devices —
+  // the AVD/simulator snapshot may have a stale copy of the app baked in.
   if (config.apk) {
-    const alreadyInstalled = config.package
+    const alreadyInstalled = !msg.freshEmulator
+      && config.package
       && msg.deviceSerial
       && isPackageInstalled(msg.deviceSerial, config.package);
 
@@ -183,7 +185,8 @@ async function handleInit(msg: UIWorkerInitMessage): Promise<void> {
     // iOS: install .app on this simulator if not already present.
     // The CLI only installs on the primary simulator; cloned workers need it too.
     const resolvedApp = path.resolve(config.rootDir, config.app);
-    const alreadyInstalled = config.package
+    const alreadyInstalled = !msg.freshEmulator
+      && config.package
       && isAppInstalled(msg.deviceSerial, config.package);
     if (!alreadyInstalled) {
       sendProgress(`installing ${path.basename(resolvedApp)}`);

@@ -46,6 +46,7 @@ import {
 } from './ios-simulator.js';
 import { resolveTraceConfig } from './trace/types.js';
 import { ensureSudoAccess } from './macos-proxy.js';
+import { freeStaleAgentPort } from './port-utils.js';
 
 const DIM = '\x1b[2m';
 const YELLOW = '\x1b[33m';
@@ -137,6 +138,15 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
 
   const firstDaemonPort = baseDaemonPort + 1;
   const firstAgentPort = baseAgentPort + 1;
+
+  // Free agent host ports from any leftover stale process. The most common
+  // offender is a leftover iOS `PilotAgent` from a previous iOS run — its
+  // host-localhost socket squats on the port we want to use for `adb forward`,
+  // silently shadowing the Android agent so every command routes to the iOS
+  // simulator. Free every port we might use across the requested worker count.
+  for (let w = 0; w < opts.workers; w++) {
+    freeStaleAgentPort(baseAgentPort + 1 + w);
+  }
 
   const firstDaemon = spawn(
     daemonBin,
