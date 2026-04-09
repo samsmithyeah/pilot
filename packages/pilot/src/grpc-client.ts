@@ -72,6 +72,7 @@ export interface DeviceInfoProto {
   model: string;
   state: string;
   isEmulator: boolean;
+  platform: string;
 }
 
 export interface ListDevicesResponse {
@@ -348,13 +349,15 @@ export class PilotGrpcClient {
     targetPackage: string,
     agentApkPath?: string,
     agentTestApkPath?: string,
+    iosXctestrunPath?: string,
   ): Promise<ActionResponse> {
     return this.call<ActionResponse>('startAgent', {
       requestId: requestId(),
       targetPackage,
       agentApkPath: agentApkPath ?? '',
       agentTestApkPath: agentTestApkPath ?? '',
-    }, 120_000);
+      iosXctestrunPath: iosXctestrunPath ?? '',
+    }, 180_000);
   }
 
   async ping(): Promise<PingResponse> {

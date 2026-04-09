@@ -23,6 +23,8 @@ import { shouldRecord, shouldRetain } from './trace/trace-mode.js';
 import { packageTrace } from './trace/trace-packager.js';
 import { TraceCollector, setActiveTraceCollector, withActiveTraceCollector } from './trace/trace-collector.js';
 import type { AnyTraceEvent } from './trace/types.js';
+import { setMacProxy, clearMacProxy } from './macos-proxy.js';
+import { getSimulatorScreenScale } from './ios-simulator.js';
 
 // ─── Result types ───
 
@@ -252,6 +254,17 @@ export interface RunOptions {
   device?: Device;
   screenshotDir?: string;
   reporter?: PilotReporter;
+  /**
+   * Notification fired before tracing/group starts so UI mode can tag
+   * subsequent trace events to this test. Must be lightweight (no device
+   * actions) — it runs outside the beforeEach trace group.
+   */
+  onTestStart?: (fullName: string) => Promise<void>;
+  /**
+   * Setup work that runs inside the beforeEach trace group. Use this for
+   * any device actions (e.g. session readiness checks) so they appear
+   * grouped in the trace viewer instead of as ungrouped top-level events.
+   */
   beforeEachTest?: (fullName: string) => Promise<void>;
   abortFileOnError?: (error: Error) => boolean;
   /** Pre-resolved worker-scoped fixture values (set by worker-runner). */
@@ -393,7 +406,12 @@ async function runSuiteContext(
   // - appState: '' → clear app data (fresh unauthenticated state)
   if (scopeAppState !== undefined && opts.device && opts.config.package) {
     if (scopeAppState) {
-      await opts.device.restoreAppState(opts.config.package, scopeAppState);
+      // Resolve relative paths against rootDir so the daemon can find the archive
+      // regardless of its own working directory.
+      const resolvedPath = path.isAbsolute(scopeAppState)
+        ? scopeAppState
+        : path.resolve(opts.config.rootDir, scopeAppState);
+      await opts.device.restoreAppState(opts.config.package, resolvedPath);
     } else {
       await opts.device.clearAppData(opts.config.package);
     }
@@ -426,9 +444,9 @@ async function runSuiteContext(
             return fn === opts.testFilter;
           })
         : ctx.tests.find((t) => !t.skip);
-      if (targetTest && opts.beforeEachTest) {
+      if (targetTest && opts.onTestStart) {
         beforeAllFirstFullName = parentPrefix ? `${parentPrefix} > ${targetTest.name}` : targetTest.name;
-        await opts.beforeEachTest(beforeAllFirstFullName);
+        await opts.onTestStart(beforeAllFirstFullName);
       }
       const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pilot-trace-ba-'));
       // Trigger _startManaged to fire the monkey-patch (ui-run.ts sets up
@@ -443,17 +461,33 @@ async function runSuiteContext(
       beforeAllCollector.startGroup('beforeAll Hooks');
     }
   }
-  if (beforeAllCollector) {
-    await withActiveTraceCollector(beforeAllCollector, async () => {
+  try {
+    if (beforeAllCollector) {
+      await withActiveTraceCollector(beforeAllCollector, async () => {
+        for (const hook of ctx.beforeAll) {
+          await invokeHook(hook, opts.device);
+        }
+      });
+      beforeAllCollector.endGroup();
+    } else {
       for (const hook of ctx.beforeAll) {
         await invokeHook(hook, opts.device);
       }
-    });
-    beforeAllCollector.endGroup();
-  } else {
-    for (const hook of ctx.beforeAll) {
-      await invokeHook(hook, opts.device);
     }
+  } catch (err) {
+    // beforeAll failed — mark all tests in this context as failed and bail out.
+    // This prevents a single beforeAll error from crashing the entire runner.
+    if (beforeAllCollector) {
+      beforeAllCollector.cleanup();
+    }
+    const beforeAllError = err instanceof Error ? err : new Error(String(err));
+    const failed = failAll(ctx, parentPrefix, beforeAllError, opts.projectName);
+    for (const tr of collectResults(failed)) {
+      result.tests.push(tr);
+      opts.reporter?.onTestEnd?.(tr);
+    }
+    result.durationMs = Date.now() - suiteStart;
+    return result;
   }
 
   // Save beforeAll events for replay into each test's trace.
@@ -522,6 +556,7 @@ async function runSuiteContext(
     const attempt = 0; // TODO: wire up retry count when retries are implemented
     const recording = shouldRecord(traceConfig.mode, attempt);
     let traceCollector: TraceCollector | null = null;
+    let iosProxyService: string | null = null;
 
     if (recording && opts.device) {
       const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pilot-trace-'));
@@ -536,7 +571,11 @@ async function runSuiteContext(
       // Start network capture if configured
       if (traceConfig.network) {
         try {
-          await opts.device._startNetworkCapture();
+          const { proxyPort } = await opts.device._startNetworkCapture();
+          // iOS: configure macOS system proxy (simulators share host network)
+          if (opts.config.platform === 'ios' && proxyPort > 0) {
+            iosProxyService = setMacProxy(proxyPort);
+          }
         } catch (err) {
           // Network capture is best-effort — log so failures aren't invisible
           console.warn(`[pilot] Network capture failed to start: ${err instanceof Error ? err.message : err}`);
@@ -550,9 +589,11 @@ async function runSuiteContext(
       // slow operations like restartApp() under heavy load don't eat into
       // the budget for the actual test assertions.
 
-      // Notify before tracing starts so UI mode can tag events to this test
-      if (opts.beforeEachTest) {
-        await opts.beforeEachTest(fullName);
+      // Notify UI mode (lightweight, no device actions) so subsequent trace
+      // events can be tagged to this test. Must run before the group starts
+      // so the test-start message arrives before any group-start events.
+      if (opts.onTestStart) {
+        await opts.onTestStart(fullName);
       }
 
       // Replay beforeAll events into this test's trace stream.
@@ -560,6 +601,22 @@ async function runSuiteContext(
       // skip replay to avoid duplicates.
       if (fullName !== beforeAllFirstFullName && savedBeforeAllEvents.length > 0 && traceCollector) {
         replayBeforeAllEvents(traceCollector, savedBeforeAllEvents, beforeAllCollector, beforeAllHierarchies);
+      }
+
+      // Open the beforeEach group before running setup work and hooks.
+      // Heavy setup (session readiness, idle waits, user beforeEach hooks)
+      // is captured inside this group so device actions don't appear as
+      // ungrouped top-level events in the trace viewer.
+      const hasBeforeEachWork =
+        !!opts.beforeEachTest || !!opts.device || allBeforeEach.length > 0;
+      if (hasBeforeEachWork) {
+        traceCollector?.startGroup('beforeEach Hooks');
+      }
+
+      // Setup work that may issue device actions (e.g. ensureSessionReady
+      // in UI worker mode). Runs inside the beforeEach group.
+      if (opts.beforeEachTest) {
+        await opts.beforeEachTest(fullName);
       }
 
       // Wait for the device to be idle before each test. This ensures
@@ -574,13 +631,12 @@ async function runSuiteContext(
         }
       }
 
-      // Run beforeEach hooks
-      traceCollector?.startGroup('beforeEach Hooks');
-
       for (const hook of allBeforeEach) {
         await invokeHook(hook, opts.device);
       }
-      traceCollector?.endGroup();
+      if (hasBeforeEachWork) {
+        traceCollector?.endGroup();
+      }
 
       // Build fixture context: base (device) + worker-scoped + test-scoped
       const registry = getFixtureRegistry();
@@ -691,6 +747,12 @@ async function runSuiteContext(
 
     // Finalize trace recording
     if (traceCollector && opts.device) {
+      // Clear macOS proxy before stopping capture
+      if (iosProxyService) {
+        clearMacProxy(iosProxyService);
+        iosProxyService = null;
+      }
+
       // Stop network capture and collect raw entries
       let rawNetworkEntries: Awaited<ReturnType<typeof opts.device._stopNetworkCapture>>['entries'] | undefined;
       if (traceConfig.network) {
@@ -704,6 +766,20 @@ async function runSuiteContext(
         } catch (err) {
           console.warn(`[pilot] Failed to stop network capture: ${err instanceof Error ? err.message : err}`);
         }
+      }
+
+      // Capture a final screenshot so the last action has an "after" view.
+      // The trace viewer uses the next action's before-screenshot as "after",
+      // so this provides the terminal state.
+      if (traceCollector.config.screenshots) {
+        const tracing = opts.device!.tracing;
+        const { actionIndex: finalIdx } = await traceCollector.captureBeforeAction(
+          tracing['_getScreenshot'],
+          tracing['_getHierarchy'],
+        );
+        // Flush to UI mode live stream — emit a lightweight event so the
+        // screenshot buffer reaches the frontend.
+        traceCollector.emitPendingCaptures(finalIdx);
       }
 
       const collector = opts.device.tracing._stopManaged();
@@ -775,6 +851,9 @@ async function runSuiteContext(
               device: {
                 serial: opts.config.device ?? 'unknown',
                 isEmulator: (opts.config.device ?? '').startsWith('emulator-'),
+                devicePixelRatio: opts.config.platform === 'ios' && opts.config.device
+                  ? getSimulatorScreenScale(opts.config.device)
+                  : undefined,
               },
               pilotVersion: version,
               error: error?.message,
@@ -850,9 +929,9 @@ async function runSuiteContext(
         }
         return true;
       });
-      if (lastRunTest && opts.beforeEachTest) {
+      if (lastRunTest && opts.onTestStart) {
         const lastFullName = parentPrefix ? `${parentPrefix} > ${lastRunTest.name}` : lastRunTest.name;
-        await opts.beforeEachTest(lastFullName);
+        await opts.onTestStart(lastFullName);
       }
       const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pilot-trace-aa-'));
       const managedCollector = opts.device.tracing._startManaged(traceConfig, tempDir);
@@ -920,6 +999,26 @@ function skipAll(ctx: SuiteContext, prefix: string): SuiteResult {
     const childCtx = popContext();
     const childPrefix = prefix ? `${prefix} > ${s.name}` : s.name;
     result.suites.push(skipAll(childCtx, childPrefix));
+  }
+  return result;
+}
+
+/**
+ * Mark all tests in a context as failed with the given error.
+ * Used when beforeAll hooks throw — individual tests never got a chance to run.
+ */
+function failAll(ctx: SuiteContext, prefix: string, error: Error, project?: string): SuiteResult {
+  const result: SuiteResult = { name: prefix, tests: [], suites: [], durationMs: 0 };
+  for (const t of ctx.tests) {
+    const fullName = prefix ? `${prefix} > ${t.name}` : t.name;
+    result.tests.push({ name: t.name, fullName, status: 'failed', durationMs: 0, error, project });
+  }
+  for (const s of ctx.suites) {
+    pushContext();
+    s.fn();
+    const childCtx = popContext();
+    const childPrefix = prefix ? `${prefix} > ${s.name}` : s.name;
+    result.suites.push(failAll(childCtx, childPrefix, error, project));
   }
   return result;
 }

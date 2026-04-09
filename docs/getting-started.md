@@ -1,10 +1,12 @@
 # Getting Started
 
-This guide walks you through installing Pilot, writing your first test, and running it against an Android device or emulator.
+This guide walks you through installing Pilot, writing your first test, and running it against an Android or iOS device/simulator.
 
 ## Prerequisites
 
 Before you begin, make sure you have the following installed:
+
+### Android
 
 | Requirement | Minimum version | How to check |
 |---|---|---|
@@ -15,6 +17,17 @@ Before you begin, make sure you have the following installed:
 If you are using a single emulator or device, you can start it yourself and let
 Pilot detect it automatically. Pilot can also launch emulator instances for you
 when configured with `launchEmulators` and `avd`.
+
+### iOS
+
+| Requirement | Minimum version | How to check |
+|---|---|---|
+| Node.js | 18+ | `node --version` |
+| Xcode | 15+ | `xcodebuild -version` |
+| iOS Simulator | iOS 17+ | `xcrun simctl list devices` |
+
+Pilot manages iOS simulators automatically. Set the `simulator` config option to
+choose which simulator to boot (defaults to `iPhone 17`).
 
 ## Installation
 
@@ -28,6 +41,8 @@ This installs the TypeScript SDK, test runner, and the Pilot daemon binary for y
 
 Create `pilot.config.ts` in your project root:
 
+### Android
+
 ```typescript
 import { defineConfig } from "pilot";
 
@@ -40,9 +55,26 @@ export default defineConfig({
 
 The only required option is `apk` -- the path to the Android APK you want to test. If you want Pilot to auto-launch the app before tests, also set `package`. `activity` is optional and usually not needed.
 
+### iOS
+
+```typescript
+import { defineConfig } from "pilot";
+
+export default defineConfig({
+  app: "./build/MyApp.app",
+  package: "com.example.myapp",
+  timeout: 30_000,
+  screenshot: "only-on-failure",
+});
+```
+
+For iOS, set `app` to the path to the `.app` bundle built for the iOS Simulator. The `package` option is the bundle identifier. Pilot auto-detects the platform from `app` (iOS) vs `apk` (Android), or you can set `platform: "ios"` explicitly.
+
 See the [Configuration](configuration.md) guide for all available options.
 
-For parallel emulator runs, use:
+### Parallel runs
+
+For parallel Android emulator runs, use:
 
 ```typescript
 import { defineConfig } from "pilot";
@@ -59,6 +91,21 @@ export default defineConfig({
 When `avd` is set, Pilot defaults to using that AVD for provisioned emulator
 capacity. Set `deviceStrategy: "prefer-connected"` if you want connected
 devices to win instead.
+
+For parallel iOS simulator runs:
+
+```typescript
+import { defineConfig } from "pilot";
+
+export default defineConfig({
+  app: "./build/MyApp.app",
+  package: "com.example.myapp",
+  workers: 4,
+  simulator: "iPhone 17",
+});
+```
+
+Pilot provisions additional simulator clones automatically for multi-worker iOS runs.
 
 ## Write Your First Test
 

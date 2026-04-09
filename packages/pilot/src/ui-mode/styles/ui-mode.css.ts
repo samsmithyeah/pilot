@@ -629,7 +629,9 @@ html, body, #app {
 .te-status-icon.passed { color: var(--color-success); }
 .te-status-icon.failed { color: var(--color-error); }
 .te-status-icon.skipped { color: var(--color-skipped); }
-.te-status-icon.running { color: var(--color-accent); animation: pulse 1s infinite; }
+.te-status-icon.pending { color: var(--color-accent); animation: pulse 1s infinite; }
+.te-status-icon.running { color: var(--color-accent); }
+.te-status-icon.running svg { animation: spin 1s linear infinite; }
 .te-status-icon.idle { color: var(--color-text-faint); }
 
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
@@ -655,8 +657,9 @@ html, body, #app {
   background: transparent; color: var(--color-text-muted);
   cursor: pointer; font-size: 10px;
 }
-.te-action-btn:hover { background: var(--bg-active); color: var(--color-text); }
-.te-run-btn:hover { color: var(--color-success); }
+.te-action-btn:hover:not(:disabled) { background: var(--bg-active); color: var(--color-text); }
+.te-run-btn:hover:not(:disabled) { color: var(--color-success); }
+.te-node:hover .te-action-btn:disabled { opacity: 0.3; cursor: default; }
 .te-watch-btn.active { color: var(--color-accent); }
 
 /* ─── Device Mirror ─── */

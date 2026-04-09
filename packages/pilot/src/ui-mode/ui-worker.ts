@@ -15,6 +15,7 @@ import { Device } from '../device.js';
 import { runTestFile, collectResults } from '../runner.js';
 import type { PilotConfig } from '../config.js';
 import { isPackageInstalled, waitForPackageIndexed } from '../emulator.js';
+import { installApp, isAppInstalled, probeSimulatorHealth, rebootSimulator } from '../ios-simulator.js';
 import {
   serializeTestResult,
   serializeSuiteResult,
@@ -40,6 +41,7 @@ let assignedSerial: string | undefined;
 let screenshotDir: string | undefined;
 let ipcOpen = true;
 let currentAbortController: AbortController | undefined;
+let resolvedXctestrunPath: string | undefined;
 
 // ─── Helpers ───
 
@@ -73,6 +75,12 @@ function configFromSerialized(s: SerializedConfig, daemonAddress: string): Pilot
     workers: 1,
     launchEmulators: false,
     trace: s.trace as PilotConfig['trace'],
+    platform: s.platform,
+    app: s.app,
+    iosXctestrun: s.iosXctestrun,
+    simulator: s.simulator,
+    resetAppDeepLink: s.resetAppDeepLink,
+    resetAppWaitMs: s.resetAppWaitMs,
   };
 }
 
@@ -80,6 +88,7 @@ function sessionContext(
   deviceSerial?: string,
   agentApkPath?: string,
   agentTestApkPath?: string,
+  iosXctestrunPath?: string,
 ): SessionPreflightContext {
   if (!device || !client || !config) {
     throw new Error(`UI Worker ${workerId}: Not initialized`);
@@ -88,7 +97,11 @@ function sessionContext(
   const label = serial
     ? `UI Worker ${workerId} (${serial})`
     : `UI Worker ${workerId}`;
-  return { label, config, device, client, agentApkPath, agentTestApkPath, deviceSerial: serial };
+  return {
+    label, config, device, client, agentApkPath, agentTestApkPath,
+    iosXctestrunPath: iosXctestrunPath ?? resolvedXctestrunPath,
+    deviceSerial: serial,
+  };
 }
 
 // ─── Trace event streaming ───
@@ -150,9 +163,11 @@ async function handleInit(msg: UIWorkerInitMessage): Promise<void> {
     // Non-fatal
   }
 
-  // Install app if needed
+  // Install app if needed. Always reinstall on freshly-launched devices —
+  // the AVD/simulator snapshot may have a stale copy of the app baked in.
   if (config.apk) {
-    const alreadyInstalled = config.package
+    const alreadyInstalled = !msg.freshEmulator
+      && config.package
       && msg.deviceSerial
       && isPackageInstalled(msg.deviceSerial, config.package);
 
@@ -166,6 +181,17 @@ async function handleInit(msg: UIWorkerInitMessage): Promise<void> {
         await waitForPackageIndexed(msg.deviceSerial, config.package);
       }
     }
+  } else if (config.platform === 'ios' && config.app && msg.deviceSerial) {
+    // iOS: install .app on this simulator if not already present.
+    // The CLI only installs on the primary simulator; cloned workers need it too.
+    const resolvedApp = path.resolve(config.rootDir, config.app);
+    const alreadyInstalled = !msg.freshEmulator
+      && config.package
+      && isAppInstalled(msg.deviceSerial, config.package);
+    if (!alreadyInstalled) {
+      sendProgress(`installing ${path.basename(resolvedApp)}`);
+      installApp(msg.deviceSerial, resolvedApp);
+    }
   }
 
   // Start agent
@@ -175,20 +201,24 @@ async function handleInit(msg: UIWorkerInitMessage): Promise<void> {
   const resolvedAgentTestApk = config.agentTestApk
     ? path.resolve(config.rootDir, config.agentTestApk)
     : undefined;
+  const resolvedIosXctestrun = config.iosXctestrun
+    ? path.resolve(config.rootDir, config.iosXctestrun)
+    : undefined;
+  resolvedXctestrunPath = resolvedIosXctestrun;
   sendProgress('starting Pilot agent');
-  await device.startAgent('', resolvedAgentApk, resolvedAgentTestApk);
+  await device.startAgent(config.package ?? '', resolvedAgentApk, resolvedAgentTestApk, resolvedIosXctestrun);
 
   try {
     if (config.package) {
       sendProgress(`launching ${config.package}`);
       await launchConfiguredApp(
-        sessionContext(msg.deviceSerial, resolvedAgentApk, resolvedAgentTestApk),
+        sessionContext(msg.deviceSerial, resolvedAgentApk, resolvedAgentTestApk, resolvedIosXctestrun),
         'UI worker initialization',
       );
     } else {
       sendProgress('validating session readiness');
       await ensureSessionReady(
-        sessionContext(msg.deviceSerial, resolvedAgentApk, resolvedAgentTestApk),
+        sessionContext(msg.deviceSerial, resolvedAgentApk, resolvedAgentTestApk, resolvedIosXctestrun),
         'UI worker initialization',
       );
     }
@@ -204,7 +234,7 @@ async function handleInit(msg: UIWorkerInitMessage): Promise<void> {
     await device.waitForIdle();
     await device.terminateApp(config.package);
     await launchConfiguredApp(
-      sessionContext(msg.deviceSerial, resolvedAgentApk, resolvedAgentTestApk),
+      sessionContext(msg.deviceSerial, resolvedAgentApk, resolvedAgentTestApk, resolvedIosXctestrun),
       'warmup',
     );
     await device.waitForIdle();
@@ -305,8 +335,10 @@ async function runFileWithRecovery(
         reporter: reporterProxy,
         bustImportCache: true,
         abortSignal,
-        beforeEachTest: async (fullName: string) => {
+        onTestStart: async (fullName: string) => {
           send({ type: 'test-start', workerId, fullName, filePath });
+        },
+        beforeEachTest: async (fullName: string) => {
           await ensureSessionReady(sessionContext(undefined), `before test ${fullName}`);
         },
         abortFileOnError: isRecoverableInfrastructureError,
@@ -352,8 +384,33 @@ async function recoverFileSession(filePath: string, err: unknown): Promise<void>
   process.stderr.write(
     `UI Worker ${workerId}: Recovering session after infrastructure error in ${path.basename(filePath)}: ${err instanceof Error ? err.message : err}\n`,
   );
+
+  // On iOS, check if the simulator itself is unhealthy (e.g. "Shutting Down"
+  // state, crashed, or unresponsive). If so, reboot it before attempting
+  // session recovery — otherwise startAgent/launchApp will keep failing.
+  if (config?.platform === 'ios' && assignedSerial) {
+    const health = probeSimulatorHealth(assignedSerial);
+    if (!health.healthy) {
+      process.stderr.write(
+        `UI Worker ${workerId}: Simulator ${assignedSerial} is unhealthy (${health.reason}), rebooting...\n`,
+      );
+      rebootSimulator(assignedSerial);
+      if (config.app) {
+        const resolvedApp = path.resolve(config.rootDir, config.app);
+        installApp(assignedSerial, resolvedApp);
+      }
+      process.stderr.write(
+        `UI Worker ${workerId}: Simulator rebooted and healthy.\n`,
+      );
+    }
+  }
+
   if (config?.package) {
-    await launchConfiguredApp(sessionContext(undefined), `recovery for ${path.basename(filePath)}`);
+    await launchConfiguredApp(
+      sessionContext(undefined),
+      `recovery for ${path.basename(filePath)}`,
+      { allowSoftReset: false },
+    );
   } else {
     await ensureSessionReady(sessionContext(undefined), `recovery for ${path.basename(filePath)}`);
   }

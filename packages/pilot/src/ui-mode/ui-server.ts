@@ -15,7 +15,7 @@
 import * as http from 'node:http';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { fork, spawn, type ChildProcess } from 'node:child_process';
+import { execFileSync, fork, spawn, type ChildProcess } from 'node:child_process';
 import { watch as chokidarWatch, type FSWatcher } from 'chokidar';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { PilotConfig } from '../config.js';
@@ -24,7 +24,8 @@ import type { Device } from '../device.js';
 import type { ResolvedProject } from '../project.js';
 import { collectTransitiveDeps } from '../project.js';
 import type { LaunchedEmulator } from '../emulator.js';
-import { preserveEmulatorsForReuse } from '../emulator.js';
+import { preserveEmulatorsForReuse, getRunningAvdName } from '../emulator.js';
+import { listSimulators, getSimulatorScreenScale } from '../ios-simulator.js';
 import {
   deserializeTestResult,
   deserializeSuiteResult,
@@ -49,9 +50,31 @@ import { RunQueue } from '../watch-queue.js';
 
 const SPA_HTML_PATH = path.resolve(__dirname, 'index.html');
 
+const PILOT_VERSION = (() => {
+  try {
+    const pkgPath = path.resolve(__dirname, '../../package.json');
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+    return (pkg.version as string) ?? '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+})();
+
 const DIM = '\x1b[2m';
 const YELLOW = '\x1b[33m';
 const RESET = '\x1b[0m';
+
+/** Cached screen-scale lookup keyed by UDID — avoids repeated simctl calls. */
+const dprCache = new Map<string, number>();
+function cachedScreenScale(udid: string, platform?: 'android' | 'ios'): number | undefined {
+  if (platform !== 'ios') return undefined;
+  let dpr = dprCache.get(udid);
+  if (dpr == null) {
+    dpr = getSimulatorScreenScale(udid);
+    dprCache.set(udid, dpr);
+  }
+  return dpr;
+}
 
 // ─── Types ───
 
@@ -89,6 +112,8 @@ interface UIWorkerHandle {
   id: number
   process: ChildProcess
   deviceSerial: string
+  /** Friendly display name, e.g. "iPhone 16 #1" for iOS or the serial for Android. */
+  displayName: string
   daemonPort: number
   agentPort: number
   daemonProcess?: ChildProcess
@@ -160,7 +185,25 @@ export async function startUIServer(
     trace: typeof ctx.config.trace === 'string' || typeof ctx.config.trace === 'object'
       ? ctx.config.trace
       : 'on',
+    platform: ctx.config.platform,
+    app: ctx.config.app,
+    iosXctestrun: ctx.config.iosXctestrun,
+    simulator: ctx.config.simulator,
   };
+
+  // Resolve a friendly display name for single-worker mode (e.g. UUID → "iPhone 17").
+  // Multi-worker resolves names inside initializeWorkers().
+  const singleWorkerDisplayName = (() => {
+    const serial = ctx.deviceSerial;
+    if (!serial) return undefined;
+    if (ctx.config.platform === 'ios') {
+      return listSimulators().find((s) => s.udid === serial)?.name ?? serial;
+    }
+    if (serial.startsWith('emulator-')) {
+      return getRunningAvdName(serial) ?? serial;
+    }
+    return serial;
+  })();
 
   // Resolve tsx binary for forking TypeScript files
   const jsScript = path.resolve(__dirname, 'ui-run.js');
@@ -810,6 +853,40 @@ export async function startUIServer(
   // ─── Multi-worker execution (persistent ui-worker.ts processes)
   // ═══════════════════════════════════════════════════════════════════
 
+  /**
+   * Run a single `lsof` call to find PIDs listening on any of the given ports.
+   * Returns a Map from port number to the list of PIDs on that port.
+   */
+  function collectListeningPids(ports: number[]): Map<number, number[]> {
+    const result = new Map<number, number[]>();
+    if (ports.length === 0) return result;
+    try {
+      // Use -F (field mode) to get PID + port associations from a single call.
+      const fullArgs = ['-P', '-sTCP:LISTEN', '-F', 'pn', ...ports.map((p) => `-iTCP:${p}`)];
+      const out = execFileSync('lsof', fullArgs, { encoding: 'utf-8' }).trim();
+      let currentPid = 0;
+      for (const line of out.split('\n')) {
+        if (line.startsWith('p')) {
+          currentPid = Number(line.slice(1));
+        } else if (line.startsWith('n') && currentPid > 0) {
+          // Lines look like "n*:50151" or "n127.0.0.1:50151"
+          const colonIdx = line.lastIndexOf(':');
+          if (colonIdx >= 0) {
+            const port = Number(line.slice(colonIdx + 1));
+            if (ports.includes(port)) {
+              const existing = result.get(port) ?? [];
+              if (!existing.includes(currentPid)) existing.push(currentPid);
+              result.set(port, existing);
+            }
+          }
+        }
+      }
+    } catch {
+      // lsof failed or no matching processes — fine
+    }
+    return result;
+  }
+
   /** Initialize persistent workers. Called once during server startup. */
   async function initializeWorkers(): Promise<void> {
     if (!ctx.deviceSerials || ctx.deviceSerials.length === 0) return;
@@ -830,13 +907,18 @@ export async function startUIServer(
 
     const initPromises: Promise<UIWorkerHandle | null>[] = [];
 
+    // Collect PIDs listening on all daemon ports in a single lsof call
+    // so each worker doesn't need to shell out individually.
+    const daemonPorts = Array.from({ length: numWorkers }, (_, i) => baseDaemonPort + 100 + i);
+    const stalePidsByPort = collectListeningPids(daemonPorts);
+
     for (let i = 0; i < numWorkers; i++) {
       const deviceSerial = ctx.deviceSerials[i];
-      const daemonPort = baseDaemonPort + 100 + i;
+      const daemonPort = daemonPorts[i];
       const agentPort = baseAgentPort + 100 + i;
 
       initPromises.push(
-        initializeOneWorker(i, deviceSerial, daemonPort, agentPort, daemonBin),
+        initializeOneWorker(i, deviceSerial, daemonPort, agentPort, daemonBin, stalePidsByPort.get(daemonPort)),
       );
     }
 
@@ -859,6 +941,43 @@ export async function startUIServer(
       return;
     }
 
+    // Resolve friendly display names for workers.
+    // iOS: UUID → simulator name (e.g. "iPhone 16 #1")
+    // Android: serial → AVD name (e.g. "Pixel_7_Pro #1")
+    {
+      const resolveSerialToName = (serial: string): string => {
+        if (ctx.config.platform === 'ios') {
+          const simulators = listSimulators();
+          return simulators.find((s) => s.udid === serial)?.name ?? serial;
+        }
+        if (serial.startsWith('emulator-')) {
+          return getRunningAvdName(serial) ?? serial;
+        }
+        return serial;
+      };
+
+      // Resolve names for all workers.
+      const resolvedNames = uiWorkers.map((w) => resolveSerialToName(w.deviceSerial));
+
+      // Count occurrences of each name to decide whether to append #N.
+      const nameCounts = new Map<string, number>();
+      for (const name of resolvedNames) {
+        nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1);
+      }
+      const nameIndex = new Map<string, number>();
+      for (let i = 0; i < uiWorkers.length; i++) {
+        const name = resolvedNames[i];
+        const count = nameCounts.get(name) ?? 1;
+        if (count > 1) {
+          const idx = (nameIndex.get(name) ?? 0) + 1;
+          nameIndex.set(name, idx);
+          uiWorkers[i].displayName = `${name} #${idx}`;
+        } else {
+          uiWorkers[i].displayName = name;
+        }
+      }
+    }
+
     workersInitialized = true;
     console.log(`${DIM}${uiWorkers.length} UI worker(s) ready.${RESET}`);
   }
@@ -869,12 +988,44 @@ export async function startUIServer(
     daemonPort: number,
     agentPort: number,
     daemonBin: string,
+    stalePids?: number[],
   ): Promise<UIWorkerHandle> {
+    // Kill any stale daemon on this port from a previous run or another
+    // Pilot instance so we always get a fresh daemon with the correct
+    // --platform flag. Without this, waitForReady succeeds by connecting
+    // to the old daemon, causing cross-instance interference.
+    // PIDs were pre-collected via a single batched lsof call.
+    if (stalePids && stalePids.length > 0) {
+      for (const pid of stalePids) {
+        try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ }
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+
+    // Remove stale ADB port forwards on the agent port. A previous
+    // Android instance may have set up `adb forward tcp:<agentPort>`
+    // which hijacks traffic meant for the iOS XCUITest agent, causing
+    // the iOS daemon to receive Android screenshots instead.
+    try {
+      const fwdList = execFileSync('adb', ['forward', '--list'], { encoding: 'utf-8' }).trim();
+      for (const line of fwdList.split('\n')) {
+        if (!line.includes(`tcp:${agentPort}`)) continue;
+        const serial = line.split(' ')[0];
+        if (!serial) continue;
+        try {
+          execFileSync('adb', ['-s', serial, 'forward', '--remove', `tcp:${agentPort}`]);
+        } catch { /* already gone */ }
+      }
+    } catch {
+      // ADB not available or no forwards — safe to ignore
+    }
+
     // Spawn daemon
     const daemonProcess = spawn(
       daemonBin,
-      ['--port', String(daemonPort), '--agent-port', String(agentPort)],
-      { detached: true, stdio: 'ignore' },
+      ['--port', String(daemonPort), '--agent-port', String(agentPort),
+        ...(ctx.config.platform ? ['--platform', ctx.config.platform] : [])],
+      { stdio: 'ignore' },
     );
     daemonProcess.on('error', () => { /* handled by waitForReady */ });
 
@@ -899,11 +1050,15 @@ export async function startUIServer(
       },
     });
     child.setMaxListeners(20);
+    child.on('error', (err) => {
+      console.error(`${YELLOW}Worker ${id} process error: ${err.message}${RESET}`);
+    });
 
     const worker: UIWorkerHandle = {
       id,
       process: child,
       deviceSerial,
+      displayName: deviceSerial,
       daemonPort,
       agentPort,
       daemonProcess,
@@ -1384,6 +1539,8 @@ export async function startUIServer(
           const newWorker = await initializeOneWorker(
             worker.id, worker.deviceSerial, daemonPort, agentPort, daemonBin,
           );
+          // Preserve the friendly display name from before respawn.
+          newWorker.displayName = worker.displayName;
           // Replace in array
           uiWorkers[i] = newWorker;
         } catch (err) {
@@ -1798,9 +1955,12 @@ export async function startUIServer(
           if (worker) {
             broadcast({
               type: 'device-info',
-              serial: worker.deviceSerial,
+              serial: worker.displayName || worker.deviceSerial,
               model: undefined,
               isEmulator: worker.deviceSerial.startsWith('emulator-'),
+              platform: ctx.config.platform,
+              pilotVersion: PILOT_VERSION,
+              devicePixelRatio: cachedScreenScale(worker.deviceSerial, ctx.config.platform),
             });
           }
         }
@@ -1813,9 +1973,12 @@ export async function startUIServer(
           if (worker) {
             broadcast({
               type: 'device-info',
-              serial: worker.deviceSerial,
+              serial: worker.displayName || worker.deviceSerial,
               model: undefined,
               isEmulator: worker.deviceSerial.startsWith('emulator-'),
+              platform: ctx.config.platform,
+              pilotVersion: PILOT_VERSION,
+              devicePixelRatio: cachedScreenScale(worker.deviceSerial, ctx.config.platform),
             });
           }
         }
@@ -1916,7 +2079,7 @@ export async function startUIServer(
       // Send workers info
       ws.send(JSON.stringify({
         type: 'workers-info',
-        workers: uiWorkers.map((w) => ({ workerId: w.id, deviceSerial: w.deviceSerial })),
+        workers: uiWorkers.map((w) => ({ workerId: w.id, deviceSerial: w.deviceSerial, displayName: w.displayName })),
       } satisfies ServerMessage));
 
       // Send device info for selected worker
@@ -1924,9 +2087,12 @@ export async function startUIServer(
       if (selectedWorker) {
         ws.send(JSON.stringify({
           type: 'device-info',
-          serial: selectedWorker.deviceSerial,
+          serial: selectedWorker.displayName || selectedWorker.deviceSerial,
           model: undefined,
           isEmulator: selectedWorker.deviceSerial.startsWith('emulator-'),
+          platform: ctx.config.platform,
+          pilotVersion: PILOT_VERSION,
+          devicePixelRatio: cachedScreenScale(selectedWorker.deviceSerial, ctx.config.platform),
         } satisfies ServerMessage));
       }
 
@@ -1945,9 +2111,12 @@ export async function startUIServer(
     } else if (ctx.deviceSerial) {
       ws.send(JSON.stringify({
         type: 'device-info',
-        serial: ctx.deviceSerial,
+        serial: singleWorkerDisplayName ?? ctx.deviceSerial,
         model: undefined,
         isEmulator: ctx.deviceSerial.startsWith('emulator-'),
+        platform: ctx.config.platform,
+        pilotVersion: PILOT_VERSION,
+        devicePixelRatio: cachedScreenScale(ctx.deviceSerial, ctx.config.platform),
       } satisfies ServerMessage));
     }
 
@@ -2011,9 +2180,12 @@ export async function startUIServer(
   if (!multiWorker && ctx.deviceSerial) {
     broadcast({
       type: 'device-info',
-      serial: ctx.deviceSerial,
+      serial: singleWorkerDisplayName ?? ctx.deviceSerial,
       model: undefined,
       isEmulator: ctx.deviceSerial.startsWith('emulator-'),
+      platform: ctx.config.platform,
+      pilotVersion: PILOT_VERSION,
+      devicePixelRatio: cachedScreenScale(ctx.deviceSerial, ctx.config.platform),
     });
   }
 

@@ -37,6 +37,8 @@ import {
   waitForDeviceStability,
   ensureAdbRoot,
 } from './emulator.js';
+import { isRecoverableInfrastructureError } from './worker-protocol.js';
+import { findPidsOnPort, freeStaleAgentPort } from './port-utils.js';
 
 // ─── ANSI helpers ───
 
@@ -215,35 +217,71 @@ async function checkDeviceHealth(serial: string | undefined): Promise<void> {
 
 // ─── Daemon management ───
 
-async function ensureDaemonRunning(address: string, daemonBin?: string): Promise<PilotGrpcClient> {
-  const client = new PilotGrpcClient(address);
 
-  // Try to connect to existing daemon
-  const ready = await client.waitForReady(2_000);
-  if (ready) {
-    try {
-      const pong = await client.ping();
-      console.log(dim(`Connected to Pilot daemon v${pong.version}`));
-      return client;
-    } catch {
-      // fall through to start daemon
+/** Track the daemon process we spawned so we can kill it on exit. */
+let spawnedDaemonProcess: ReturnType<typeof spawn> | undefined;
+
+async function ensureDaemonRunning(address: string, daemonBin?: string, platform?: string): Promise<PilotGrpcClient> {
+  const port = address.split(':').pop() ?? '50051';
+
+  // Kill any stale daemon on this port so we always get a fresh one
+  // with the correct --platform flag. The daemon starts in <1s so
+  // the cost of a restart is negligible.
+  try {
+    const probe = new PilotGrpcClient(address);
+    const alive = await probe.waitForReady(1_000);
+    if (alive) {
+      probe.close();
+      // Find and kill the process listening on this port
+      const pids = findPidsOnPort(port);
+      for (const pid of pids) {
+        try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ }
+      }
+      // Brief wait for the port to free up
+      await new Promise((r) => setTimeout(r, 500));
+    } else {
+      probe.close();
     }
+  } catch {
+    // No daemon running, nothing to kill
   }
 
-  // Try to start daemon
-  console.log(dim('Starting Pilot daemon...'));
-  client.close();
+  // Remove stale ADB port forwards on the default agent port (18700).
+  // A previous Android instance may have set up a forward that hijacks
+  // traffic meant for the iOS XCUITest agent.
+  try {
+    const fwdList = execFileSync('adb', ['forward', '--list'], { encoding: 'utf-8' }).trim();
+    for (const line of fwdList.split('\n')) {
+      if (!line.includes('tcp:18700')) continue;
+      const serial = line.split(' ')[0];
+      if (!serial) continue;
+      try {
+        execFileSync('adb', ['-s', serial, 'forward', '--remove', 'tcp:18700']);
+      } catch { /* already gone */ }
+    }
+  } catch {
+    // ADB not available or no forwards — safe to ignore
+  }
 
+  // Free the agent host port from any leftover process (stale iOS PilotAgent
+  // from a previous run, or a stuck pilot-core daemon). If we leave a stale
+  // listener squatting on this port, the new daemon's `adb forward` is
+  // shadowed by the stale socket and every command silently routes to the
+  // wrong device — see freeStaleAgentPort for the full rationale.
+  freeStaleAgentPort(18700);
+
+  // Start a fresh daemon
   const resolvedBin = process.env.PILOT_DAEMON_BIN ?? daemonBin ?? 'pilot-core';
-  const port = address.split(':').pop() ?? '50051';
-  const child = spawn(resolvedBin, ['--port', port], {
-    detached: true,
+  const daemonArgs = ['--port', port];
+  if (platform) daemonArgs.push('--platform', platform);
+  const child = spawn(resolvedBin, daemonArgs, {
     stdio: 'ignore',
   });
   child.on('error', () => {
     // Handled below via waitForReady timeout
   });
   child.unref();
+  spawnedDaemonProcess = child;
 
   // Wait for daemon to be ready
   const newClient = new PilotGrpcClient(address);
@@ -253,7 +291,7 @@ async function ensureDaemonRunning(address: string, daemonBin?: string): Promise
     process.exit(1);
   }
 
-  console.log(dim('Pilot daemon started.'));
+  console.log(dim(`Connected to Pilot daemon v${(await newClient.ping()).version}`));
   return newClient;
 }
 
@@ -293,7 +331,55 @@ async function ensureSequentialTargetDevice(
   config: Awaited<ReturnType<typeof loadConfig>>,
 ): Promise<{ selectedSerial?: string; launched: LaunchedEmulator[] }> {
   if (config.device) {
+    // If the device is an iOS simulator that's already booted, log reuse
+    if (config.platform === 'ios') {
+      const { listBootedSimulators } = await import('./ios-simulator.js');
+      const booted = listBootedSimulators();
+      const sim = booted.find((s) => s.udid === config.device);
+      if (sim) {
+        process.stderr.write(
+          `${DIM}Reusing simulator ${sim.udid} (${sim.name}) from previous run.${RESET}\n`,
+        );
+      }
+    }
     return { selectedSerial: config.device, launched: [] };
+  }
+
+  // ─── iOS: use simulator instead of ADB device ───
+  if (config.platform === 'ios') {
+    const { listBootedSimulators, provisionSimulator, cleanupStaleSimulators } = await import('./ios-simulator.js');
+    if (!config.simulator) {
+      console.error(red('No simulator specified. Set `simulator` in your config (e.g. simulator: "iPhone 16").'));
+      process.exit(1);
+    }
+    const simulatorName = config.simulator;
+
+    // Clean up stale clones from previous runs
+    const staleResult = cleanupStaleSimulators(simulatorName);
+    if (staleResult.killed.length > 0) {
+      process.stderr.write(
+        `${DIM}Cleaned up ${staleResult.killed.length} stale simulator(s).${RESET}\n`,
+      );
+    }
+
+    // Check for already-booted simulators
+    const booted = listBootedSimulators();
+    const matching = booted.find((s) => s.name === simulatorName || s.udid === simulatorName);
+    if (matching) {
+      process.stderr.write(
+        `${DIM}Reusing simulator ${matching.udid} (${matching.name}) from previous run.${RESET}\n`,
+      );
+      return { selectedSerial: matching.udid, launched: [] };
+    }
+
+    // Boot the simulator
+    try {
+      const udid = provisionSimulator(simulatorName, config.app);
+      return { selectedSerial: udid, launched: [] };
+    } catch (e) {
+      console.error(red(`Failed to provision iOS simulator: ${(e as Error).message}`));
+      process.exit(1);
+    }
   }
 
   const clearedOfflineEmulators = clearOfflineEmulatorTransports();
@@ -374,6 +460,7 @@ interface CliArgs {
   watch: boolean;
   ui: boolean;
   uiPort?: number;
+  config?: string;
   forceInstall: boolean;
   version: boolean;
   help: boolean;
@@ -404,8 +491,20 @@ function parseArgs(argv: string[]): CliArgs {
       args.help = true;
     } else if (arg === '--device' || arg === '-d') {
       args.device = rest[++i];
+    } else if (arg?.startsWith('--device=')) {
+      args.device = arg.slice('--device='.length);
     } else if (arg === '--workers' || arg === '-j') {
       const val = parseInt(rest[++i], 10);
+      if (isNaN(val) || val < 1) {
+        console.error(red('--workers must be a positive integer'));
+        process.exit(1);
+      }
+      args.workers = val;
+    } else if (arg?.startsWith('--workers=') || arg?.startsWith('-j=')) {
+      const raw = arg.startsWith('--workers=')
+        ? arg.slice('--workers='.length)
+        : arg.slice('-j='.length);
+      const val = parseInt(raw, 10);
       if (isNaN(val) || val < 1) {
         console.error(red('--workers must be a positive integer'));
         process.exit(1);
@@ -447,6 +546,10 @@ function parseArgs(argv: string[]): CliArgs {
         process.exit(1);
       }
       args.uiPort = val;
+    } else if (arg === '--config' || arg === '-c') {
+      args.config = rest[++i];
+    } else if (arg?.startsWith('--config=')) {
+      args.config = arg.slice('--config='.length);
     } else if (arg === '--force-install') {
       args.forceInstall = true;
     } else if (arg === '--__tsx-reexec') {
@@ -455,12 +558,84 @@ function parseArgs(argv: string[]): CliArgs {
       args.command = arg;
     } else if (!arg.startsWith('-')) {
       args.files.push(arg);
+    } else {
+      console.error(red(`Unknown argument: ${arg}`));
+      process.exit(1);
     }
 
     i++;
   }
 
   return args;
+}
+
+/**
+ * Provision additional device serials for multi-worker iOS/Android modes.
+ * Returns the full list of device serials (including the primary), or
+ * undefined if fewer than 2 devices are available.
+ */
+async function provisionMultiWorkerDevices(
+  config: Awaited<ReturnType<typeof loadConfig>>,
+  modeName: string,
+  opts?: { quiet?: boolean },
+): Promise<{ deviceSerials: string[] | undefined; launched: LaunchedEmulator[] }> {
+  let launched: LaunchedEmulator[] = [];
+  if (config.workers <= 1) return { deviceSerials: undefined, launched };
+
+  let serials: string[];
+  if (config.platform === 'ios') {
+    const { listCompatibleBootedSimulators, provisionSimulators, cleanupStaleSimulators } = await import('./ios-simulator.js');
+    let reusableUdids: string[] = [];
+    if (config.simulator) {
+      const staleResult = cleanupStaleSimulators(config.simulator);
+      reusableUdids = staleResult.reusable;
+    }
+    const compatible = listCompatibleBootedSimulators(config.device!);
+    const others = compatible.filter((s) => s.udid !== config.device).slice(0, config.workers - 1);
+    for (const sim of others) {
+      process.stderr.write(
+        `${DIM}Reusing simulator ${sim.udid} (${sim.name}) from previous run.${RESET}\n`,
+      );
+    }
+    serials = [config.device!, ...others.map((s) => s.udid)].filter(Boolean);
+
+    if (serials.length < config.workers && config.simulator) {
+      const provision = provisionSimulators({
+        simulatorName: config.simulator,
+        workers: config.workers,
+        existingUdids: serials,
+        appPath: config.app ? path.resolve(config.rootDir, config.app) : undefined,
+        reusableUdids,
+      });
+      serials = provision.allUdids;
+    }
+  } else {
+    const allConnected = listConnectedDeviceSerials();
+    const others = allConnected.filter((s) => s !== config.device);
+    serials = [config.device!, ...others].filter(Boolean);
+
+    if (serials.length < config.workers && config.launchEmulators) {
+      const provision = await provisionEmulators({
+        existingSerials: serials,
+        occupiedSerials: allConnected,
+        workers: config.workers,
+        avd: config.avd,
+      });
+      launched = provision.launched;
+      serials = provision.allSerials;
+    }
+  }
+
+  if (serials.length < 2) {
+    if (!opts?.quiet) {
+      process.stderr.write(
+        `${YELLOW}Only ${serials.length} device(s) available. ${modeName} needs 2+ devices for parallel. Using single-worker mode.${RESET}\n`,
+      );
+    }
+    return { deviceSerials: undefined, launched };
+  }
+
+  return { deviceSerials: serials, launched };
 }
 
 function printHelp(): void {
@@ -472,24 +647,27 @@ ${bold('Usage:')}
   pilot test --watch              Watch test files and re-run on change
   pilot test --ui                 Open interactive UI mode
   pilot test --ui --ui-port 8080  UI mode on specific port
-  pilot test --device <serial>    Target specific device
+  pilot test --device <serial>    Target specific device/simulator
   pilot test --workers <n>        Run tests in parallel across n devices
   pilot test --shard=x/y          Run shard x of y (for CI)
   pilot test --trace <mode>       Record traces (on, retain-on-failure, etc.)
   pilot show-trace <file.zip>     Open trace viewer in browser
   pilot show-report [dir]         Open HTML test report
   pilot merge-reports [dir]       Merge blob reports from sharded runs
+  pilot setup-proxy               Allow iOS proxy access without a password
+  pilot remove-proxy-setup        Revert to per-session password prompts
   pilot --version                 Print version
   pilot --help                    Show this help
 
 ${bold('Options:')}
   -w, --watch              Watch test files and re-run on change
-  -d, --device <serial>    Target a specific device by serial
+  -d, --device <serial>    Target a specific device or simulator by serial/UDID
   -j, --workers <n>        Number of parallel workers (default: 1)
   --shard=x/y              Split tests across CI machines (e.g. --shard=1/4)
   --trace <mode>           Trace mode: off, on, on-first-retry, on-all-retries,
                            retain-on-failure, retain-on-first-failure
-  --force-install          Reinstall the APK even if already installed
+  -c, --config <path>      Path to config file (default: pilot.config.ts)
+  --force-install          Reinstall the app even if already installed
   -v, --version            Print version
   -h, --help               Show this help
 `);
@@ -555,13 +733,23 @@ async function main(): Promise<void> {
       process.exit(1);
     }
     const { mergeBlobs } = await import('./reporters/blob.js');
-    const config = await loadConfig();
+    const config = await loadConfig(undefined, args.config);
     const result = mergeBlobs(resolvedDir);
     const reporters = await createReporters(config.reporter ?? 'list');
     const dispatcher = new ReporterDispatcher(reporters);
     dispatcher.onRunStart(config, 0);
     await dispatcher.onRunEnd(result);
     return;
+  }
+
+  if (args.command === 'setup-proxy') {
+    const { setupProxy } = await import('./macos-proxy.js');
+    process.exit(setupProxy() ? 0 : 1);
+  }
+
+  if (args.command === 'remove-proxy-setup') {
+    const { removeProxySetup } = await import('./macos-proxy.js');
+    process.exit(removeProxySetup() ? 0 : 1);
   }
 
   if (args.command !== 'test') {
@@ -571,7 +759,7 @@ async function main(): Promise<void> {
   }
 
   // Load config
-  const config = await loadConfig();
+  const config = await loadConfig(undefined, args.config);
   if (args.device) {
     config.device = args.device;
   }
@@ -782,11 +970,13 @@ async function main(): Promise<void> {
 
     config.device = target.selectedSerial;
 
-    // Pre-flight: verify device is responsive before doing anything slow
-    await checkDeviceHealth(config.device);
+    // Pre-flight: verify device is responsive before doing anything slow (Android only)
+    if (config.platform !== 'ios') {
+      await checkDeviceHealth(config.device);
+    }
 
     // Connect to daemon
-    client = await ensureDaemonRunning(config.daemonAddress, config.daemonBin);
+    client = await ensureDaemonRunning(config.daemonAddress, config.daemonBin, config.platform);
     device = new Device(client, config);
 
     try {
@@ -798,47 +988,97 @@ async function main(): Promise<void> {
       return;
     }
 
-    // Wake and unlock device screen
-    try {
-      await device.wake();
-      await device.unlock();
-      console.log(dim('Device screen unlocked.'));
-    } catch {
-      // Non-fatal — device might already be awake/unlocked
-    }
+    // The selected device was just launched in this session if it appears in
+    // launchedEmulators. Freshly-launched devices may have a stale snapshot of
+    // the app under test pre-baked in (the package is "installed" but the bytes
+    // are out of date), so force a reinstall regardless of the skip-install
+    // optimization.
+    const deviceJustLaunched = launchedEmulators.some((e) => e.serial === config.device);
 
-    // Install app under test if APK path is configured and not already installed.
-    if (config.apk) {
-      const isInstalled = config.package
-        && config.device
-        && isPackageInstalled(config.device, config.package);
-
-      if (isInstalled && !args.forceInstall) {
-        console.log(dim(`App ${config.package} already installed, skipping APK install. Use --force-install to reinstall.`));
-      } else {
-        const resolvedApk = path.resolve(config.rootDir, config.apk);
+    if (config.platform === 'ios') {
+      // iOS: install and launch .app on simulator before starting the agent.
+      // The app must be running BEFORE the XCUITest agent starts so that
+      // XCUITest can establish its accessibility bridge to the target app.
+      if (config.app && config.device) {
         try {
-          if (isInstalled) {
-            console.log(dim(`Reinstalling app APK: ${path.basename(resolvedApk)}`));
+          const { installApp, isAppInstalled } = await import('./ios-simulator.js');
+          const resolvedApp = path.resolve(config.rootDir, config.app);
+          const alreadyInstalled = !deviceJustLaunched
+            && config.package
+            && isAppInstalled(config.device, config.package);
+
+          if (alreadyInstalled && !args.forceInstall) {
+            console.log(dim(`App ${config.package} already installed, skipping iOS app install. Use --force-install to reinstall.`));
+          } else {
+            if (alreadyInstalled) {
+              console.log(dim(`Reinstalling iOS app: ${path.basename(resolvedApp)}`));
+            }
+            installApp(config.device, resolvedApp);
+            console.log(dim(`Installed ${path.basename(resolvedApp)} on iOS simulator.`));
           }
-          await device.installApk(resolvedApk);
-          // Wait for package manager to index the new app
-          if (config.package && config.device) {
-            await waitForPackageIndexed(config.device, config.package);
-          }
-          console.log(dim(`Installed app APK: ${path.basename(resolvedApk)}`));
         } catch (err) {
-          console.error(red(`Failed to install app APK: ${err}`));
+          console.error(red(`Failed to install iOS app: ${err}`));
           sequentialExitCode = 1;
           return;
         }
       }
+      if (config.package && config.device) {
+        try {
+          const { execFileSync } = await import('node:child_process');
+          execFileSync('xcrun', ['simctl', 'launch', config.device, config.package]);
+          console.log(dim(`Launched ${config.package} on iOS simulator.`));
+        } catch {
+          // App may already be running
+        }
+      }
+    } else {
+      // Android: Wake and unlock device screen
+      try {
+        await device.wake();
+        await device.unlock();
+        console.log(dim('Device screen unlocked.'));
+      } catch {
+        // Non-fatal — device might already be awake/unlocked
+      }
+
+      // Install app under test if APK path is configured and not already installed.
+      if (config.apk) {
+        const isInstalled = !deviceJustLaunched
+          && config.package
+          && config.device
+          && isPackageInstalled(config.device, config.package);
+
+        if (isInstalled && !args.forceInstall) {
+          console.log(dim(`App ${config.package} already installed, skipping APK install. Use --force-install to reinstall.`));
+        } else {
+          const resolvedApk = path.resolve(config.rootDir, config.apk);
+          try {
+            if (isInstalled) {
+              console.log(dim(`Reinstalling app APK: ${path.basename(resolvedApk)}`));
+            }
+            await device.installApk(resolvedApk);
+            // Wait for package manager to index the new app
+            if (config.package && config.device) {
+              await waitForPackageIndexed(config.device, config.package);
+            }
+            console.log(dim(`Installed app APK: ${path.basename(resolvedApk)}`));
+          } catch (err) {
+            console.error(red(`Failed to install app APK: ${err}`));
+            sequentialExitCode = 1;
+            return;
+          }
+        }
+      }
     }
 
-    // If tracing with network capture, ensure adb root BEFORE starting agent
-    // so that the adbd restart doesn't disrupt UIAutomator2's accessibility service.
+    // Pre-acquire sudo for iOS proxy or adb root for Android BEFORE starting
+    // agent so setup time isn't attributed to the first test.
     const traceConfig = resolveTraceConfig(config.trace);
-    if (traceConfig.mode !== 'off' && traceConfig.network && config.device) {
+    if (config.platform === 'ios' && traceConfig.mode !== 'off' && traceConfig.network) {
+      const { ensureSudoAccess } = await import('./macos-proxy.js');
+      ensureSudoAccess();
+    }
+    if (config.platform !== 'ios' && traceConfig.mode !== 'off' && traceConfig.network && config.device) {
       const restarted = ensureAdbRoot(config.device);
       if (restarted) {
         console.log(dim('Enabled adb root for network capture.'));
@@ -852,21 +1092,31 @@ async function main(): Promise<void> {
     const resolvedAgentTestApk = config.agentTestApk
       ? path.resolve(config.rootDir, config.agentTestApk)
       : undefined;
+    const resolvedIosXctestrun = config.iosXctestrun
+      ? path.resolve(config.rootDir, config.iosXctestrun)
+      : undefined;
     try {
+      if (config.platform === 'ios') {
+        console.log(dim(`Starting iOS agent (xctestrun: ${resolvedIosXctestrun ? 'set' : 'NOT SET'})`));
+      }
       await device.startAgent(
-        '',
+        config.package ?? '',
         resolvedAgentApk,
         resolvedAgentTestApk,
+        resolvedIosXctestrun,
       );
-      await ensureSessionReady({
-        label: `Device ${config.device}`,
-        config,
-        device,
-        client,
-        agentApkPath: resolvedAgentApk,
-        agentTestApkPath: resolvedAgentTestApk,
-        deviceSerial: config.device,
-      }, 'startup');
+      if (config.platform !== 'ios') {
+        await ensureSessionReady({
+          label: `Device ${config.device}`,
+          config,
+          device,
+          client,
+          agentApkPath: resolvedAgentApk,
+          agentTestApkPath: resolvedAgentTestApk,
+          iosXctestrunPath: resolvedIosXctestrun,
+          deviceSerial: config.device,
+        }, 'startup');
+      }
       console.log(dim('Agent connected.'));
     } catch (err) {
       console.error(red(`Failed to start agent: ${err}`));
@@ -885,6 +1135,7 @@ async function main(): Promise<void> {
           client,
           agentApkPath: resolvedAgentApk,
           agentTestApkPath: resolvedAgentTestApk,
+          iosXctestrunPath: resolvedIosXctestrun,
           deviceSerial: config.device,
         }, 'startup');
         console.log(dim(`Launched ${config.package}`));
@@ -907,37 +1158,9 @@ async function main(): Promise<void> {
           ? path.resolve(config.rootDir, config.outputDir, 'screenshots')
           : undefined;
 
-      // Collect additional device serials for multi-worker mode.
-      // The CLI already set up the first device above; we find more.
-      // If launchEmulators is enabled, provision additional emulators to
-      // match the requested worker count (same as the dispatcher does).
-      let uiDeviceSerials: string[] | undefined;
-      if (config.workers > 1) {
-        const allConnected = listConnectedDeviceSerials();
-        // Put the already-configured device first, then add others
-        const others = allConnected.filter((s) => s !== config.device);
-        uiDeviceSerials = [config.device!, ...others].filter(Boolean);
-
-        if (uiDeviceSerials.length < config.workers && config.launchEmulators) {
-          const provision = await provisionEmulators({
-            existingSerials: uiDeviceSerials,
-            occupiedSerials: allConnected,
-            workers: config.workers,
-            avd: config.avd,
-          });
-          launchedEmulators = [...launchedEmulators, ...provision.launched];
-          uiDeviceSerials = provision.allSerials;
-        }
-
-        if (uiDeviceSerials.length < 2) {
-          if (args.tsxReexec) {
-            process.stderr.write(
-              `${YELLOW}Only ${uiDeviceSerials.length} device(s) available. UI mode needs 2+ devices for parallel. Using single-worker mode.${RESET}\n`,
-            );
-          }
-          uiDeviceSerials = undefined;
-        }
-      }
+      const uiProvision = await provisionMultiWorkerDevices(config, 'UI mode', { quiet: !args.tsxReexec });
+      const uiDeviceSerials = uiProvision.deviceSerials;
+      launchedEmulators = [...launchedEmulators, ...uiProvision.launched];
 
       const uiServer = await startUIServer({
         config,
@@ -957,8 +1180,15 @@ async function main(): Promise<void> {
       });
 
       // Keep alive until user exits
-      process.on('SIGINT', () => { uiServer.close(); process.exit(0); });
-      process.on('SIGTERM', () => { uiServer.close(); process.exit(0); });
+      const cleanupAndExit = () => {
+        uiServer.close();
+        if (spawnedDaemonProcess) {
+          try { spawnedDaemonProcess.kill(); } catch { /* already gone */ }
+        }
+        process.exit(0);
+      };
+      process.on('SIGINT', cleanupAndExit);
+      process.on('SIGTERM', cleanupAndExit);
       await new Promise<void>(() => { /* never resolves */ });
     }
 
@@ -974,33 +1204,9 @@ async function main(): Promise<void> {
           ? path.resolve(config.rootDir, config.outputDir, 'screenshots')
           : undefined;
 
-      // Collect additional device serials for multi-worker watch mode.
-      let watchDeviceSerials: string[] | undefined;
-      if (config.workers > 1) {
-        const allConnected = listConnectedDeviceSerials();
-        const others = allConnected.filter((s) => s !== config.device);
-        watchDeviceSerials = [config.device!, ...others].filter(Boolean);
-
-        if (watchDeviceSerials.length < config.workers && config.launchEmulators) {
-          const provision = await provisionEmulators({
-            existingSerials: watchDeviceSerials,
-            occupiedSerials: allConnected,
-            workers: config.workers,
-            avd: config.avd,
-          });
-          launchedEmulators = [...launchedEmulators, ...provision.launched];
-          watchDeviceSerials = provision.allSerials;
-        }
-
-        if (watchDeviceSerials.length < 2) {
-          if (args.tsxReexec) {
-            process.stderr.write(
-              `${YELLOW}Only ${watchDeviceSerials.length} device(s) available. Watch mode needs 2+ devices for parallel. Using single-worker mode.${RESET}\n`,
-            );
-          }
-          watchDeviceSerials = undefined;
-        }
-      }
+      const watchProvision = await provisionMultiWorkerDevices(config, 'Watch mode', { quiet: !args.tsxReexec });
+      const watchDeviceSerials = watchProvision.deviceSerials;
+      launchedEmulators = [...launchedEmulators, ...watchProvision.launched];
 
       await runWatchMode({
         config,
@@ -1091,13 +1297,24 @@ async function main(): Promise<void> {
 
           reporter.onTestFileStart(file);
 
-          const suiteResult = await runTestFile(file, {
+          const suiteResult = await runTestFileWithRecovery(file, {
             config,
             device,
+            client,
             screenshotDir,
             reporter,
             projectUseOptions: project.use,
             projectName: project.name !== 'default' ? project.name : undefined,
+            sessionContext: {
+              label: `Device ${config.device}`,
+              config,
+              device,
+              client,
+              agentApkPath: resolvedAgentApk,
+              agentTestApkPath: resolvedAgentTestApk,
+              iosXctestrunPath: resolvedIosXctestrun,
+              deviceSerial: config.device,
+            },
           });
 
           const fileResults = collectResults(suiteResult);
@@ -1132,11 +1349,73 @@ async function main(): Promise<void> {
   } finally {
     device?.close();
     client?.close();
+    if (spawnedDaemonProcess) {
+      try { spawnedDaemonProcess.kill(); } catch { /* already gone */ }
+    }
     // Leave emulators running for reuse by the next run.
     preserveEmulatorsForReuse(launchedEmulators);
   }
 
   process.exit(sequentialExitCode);
+}
+
+// ─── Infrastructure error recovery for single-worker mode ───
+
+/**
+ * Run a test file with automatic retry on infrastructure errors (agent
+ * disconnection, gRPC unavailability, etc.). Mirrors the recovery logic
+ * in worker-runner.ts for multi-worker mode.
+ */
+async function runTestFileWithRecovery(
+  file: string,
+  opts: {
+    config: PilotConfig
+    device: Device
+    client: PilotGrpcClient
+    screenshotDir: string | undefined
+    reporter: ReporterDispatcher
+    projectUseOptions?: Record<string, unknown>
+    projectName?: string
+    sessionContext: import('./session-preflight.js').SessionPreflightContext
+  },
+): Promise<SuiteResult> {
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const suite = await runTestFile(file, {
+        config: opts.config,
+        device: opts.device,
+        screenshotDir: opts.screenshotDir,
+        reporter: opts.reporter,
+        abortFileOnError: isRecoverableInfrastructureError,
+        projectUseOptions: opts.projectUseOptions,
+        projectName: opts.projectName,
+      });
+      const fileResults = collectResults(suite);
+      const infraFailure = fileResults.find(
+        (r) => r.status === 'failed' && r.error && isRecoverableInfrastructureError(r.error),
+      );
+      if (!infraFailure) {
+        return suite;
+      }
+      if (attempt === 2) {
+        return suite;
+      }
+      process.stderr.write(
+        dim(`Recovering session after infrastructure error in ${path.basename(file)}: ${infraFailure.error?.message ?? 'unknown'}\n`),
+      );
+      await launchConfiguredApp(opts.sessionContext, `recovery for ${path.basename(file)}`, { allowSoftReset: false });
+    } catch (err) {
+      if (!isRecoverableInfrastructureError(err) || attempt === 2) {
+        throw err;
+      }
+      process.stderr.write(
+        dim(`Recovering session after infrastructure error in ${path.basename(file)}: ${err instanceof Error ? err.message : err}\n`),
+      );
+      await launchConfiguredApp(opts.sessionContext, `recovery for ${path.basename(file)}`, { allowSoftReset: false });
+    }
+  }
+  // Unreachable — loop always returns or throws
+  throw new Error(`Exhausted recovery attempts for ${path.basename(file)}`);
 }
 
 main().catch((err) => {

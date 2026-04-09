@@ -1,0 +1,68 @@
+name: iOS Agent
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'ios-agent/**'
+      - 'packages/pilot-core/src/ios/**'
+      - 'packages/pilot-core/src/agent_comms.rs'
+      - '.github/workflows/ios.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'ios-agent/**'
+      - 'packages/pilot-core/src/ios/**'
+      - 'packages/pilot-core/src/agent_comms.rs'
+      - '.github/workflows/ios.yml'
+
+concurrency:
+  group: ios-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  ios:
+    name: iOS Agent
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: ios-agent
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen 2>/dev/null || true
+          ./create-xcode-project.sh
+
+      - name: Build for testing
+        run: |
+          xcodebuild build-for-testing \
+            -project PilotAgent.xcodeproj \
+            -scheme PilotAgentUITests \
+            -destination 'generic/platform=iOS Simulator' \
+            -quiet
+
+      - name: SwiftLint
+        run: |
+          if command -v swiftlint &>/dev/null; then
+            swiftlint lint --strict PilotAgent/
+          else
+            echo "SwiftLint not installed, skipping"
+          fi
+
+      # Run pilot-core's Rust tests on macOS so the macOS-gated iOS modules
+      # (patch_xctestrun, simctl/devicectl wrappers) actually get exercised in
+      # CI. The main ci.yml rust job runs on Linux and skips these tests.
+      - name: Install protoc
+        run: brew install protobuf
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/pilot-core
+      - name: Cargo test (pilot-core, macOS)
+        working-directory: packages/pilot-core
+        run: cargo test

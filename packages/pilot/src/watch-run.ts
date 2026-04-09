@@ -76,6 +76,12 @@ function configFromSerialized(s: SerializedConfig, daemonAddress: string): Pilot
     workers: 1,
     launchEmulators: false,
     trace: s.trace as PilotConfig['trace'],
+    platform: s.platform,
+    app: s.app,
+    iosXctestrun: s.iosXctestrun,
+    simulator: s.simulator,
+    resetAppDeepLink: s.resetAppDeepLink,
+    resetAppWaitMs: s.resetAppWaitMs,
   };
 }
 

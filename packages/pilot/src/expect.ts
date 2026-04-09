@@ -265,12 +265,12 @@ function wrapAssertionWithTrace(
     const selectorStr = selectorDescription(handle);
     const start = Date.now();
 
-    // Before capture
-    const { actionIndex, captures: beforeCaptures } =
-      await trace.collector.captureBeforeAction(
-        trace.takeScreenshot,
-        trace.captureHierarchy,
-      );
+    // Capture before-screenshot (bounds lookup happens after the assertion
+    // so the element is guaranteed to exist and be stable).
+    const { captures: beforeCaptures } = await trace.collector.captureBeforeAction(
+      trace.takeScreenshot,
+      trace.captureHierarchy,
+    );
 
     let passed = true;
     let error: string | undefined;
@@ -315,26 +315,26 @@ function wrapAssertionWithTrace(
       return;
     }
 
-    // After capture (success or failure)
+    // Snapshot duration before async capture so it reflects the actual
+    // assertion time, not assertion + screenshot overhead.
     const duration = Date.now() - start;
     const attempts = Math.max(1, Math.round(duration / POLL_INTERVAL_MS));
-    const afterCaptures = await trace.collector.captureAfterAction(
-      actionIndex,
-      trace.takeScreenshot,
-      trace.captureHierarchy,
-    );
 
-    // Best-effort element bounds lookup for screenshot overlay
+    // Look up element bounds after assertion completes — the element is
+    // guaranteed to exist (for passing assertions) and the screen is stable.
     let bounds: { left: number; top: number; right: number; bottom: number } | undefined;
-    try {
-      const res = await handle._client.findElement(handle._selector, 1000);
-      if (res.found && res.element?.bounds) {
-        bounds = res.element.bounds;
-      }
-    } catch {
-      // best-effort — element may not exist (e.g. not.toBeVisible)
+    if (passed) {
+      try {
+        const res = await handle._client.findElement(handle._selector, 100);
+        if (res.found && res.element?.bounds) {
+          bounds = res.element.bounds;
+        }
+      } catch { /* best-effort */ }
     }
 
+    // Emit event immediately so _actionIndex increments before the runner
+    // emits group-end boundaries.  No after-capture — the trace viewer uses
+    // the next action's before-screenshot as the "after" view.
     trace.collector.addAssertionEvent({
       assertion: (negated ? "not." : "") + name,
       selector: selectorStr,
@@ -347,9 +347,9 @@ function wrapAssertionWithTrace(
       bounds,
       sourceLocation,
       hasScreenshotBefore: !!beforeCaptures.screenshotBefore,
-      hasScreenshotAfter: !!afterCaptures.screenshotAfter,
+      hasScreenshotAfter: false,
       hasHierarchyBefore: !!beforeCaptures.hierarchyBefore,
-      hasHierarchyAfter: !!afterCaptures.hierarchyAfter,
+      hasHierarchyAfter: false,
     } as Parameters<typeof trace.collector.addAssertionEvent>[0]);
 
     if (caughtErr !== undefined) {

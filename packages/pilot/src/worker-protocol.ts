@@ -104,6 +104,12 @@ export const RECOVERABLE_INFRASTRUCTURE_PATTERNS = [
   'Not connected to agent',
   'Timed out connecting to agent socket',
   'Failed to connect to agent socket',
+  'Failed to reconnect to agent',
+  'Agent socket not reachable',
+  'Unable to lookup in current state',
+  'server died',
+  'xcodebuild exited with',
+  '4 DEADLINE_EXCEEDED',
   '14 UNAVAILABLE',
   'No connection established',
   'ECONNREFUSED',
@@ -134,6 +140,12 @@ export interface SerializedConfig {
   agentApk?: string
   agentTestApk?: string
   trace?: string | Record<string, unknown>
+  platform?: 'android' | 'ios'
+  app?: string
+  iosXctestrun?: string
+  simulator?: string
+  resetAppDeepLink?: string
+  resetAppWaitMs?: number
 }
 
 /** TestResult with Error serialized to plain object for IPC. */

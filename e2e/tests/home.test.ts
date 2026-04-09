@@ -17,10 +17,10 @@ describe("Home screen", () => {
     await expect(home.dialogsCard).toBeVisible()
   })
 
-  test("cards have descriptions", async ({ device }) => {
+  test("cards have accessible labels", async ({ device }) => {
     const home = new HomeScreen(device)
-    await expect(home.loginDescription).toBeVisible()
-    await expect(home.listDescription).toBeVisible()
+    await expect(home.loginCard).toHaveText("Login Form")
+    await expect(home.listCard).toHaveText("List")
   })
 
   test("header element exists and has text", async ({ device }) => {

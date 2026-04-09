@@ -152,7 +152,8 @@ function App() {
 
   const actionEvents = trace?.events.filter(
     (e): e is ActionTraceEvent | AssertionTraceEvent =>
-      e.type === 'action' || e.type === 'assertion'
+      (e.type === 'action' || e.type === 'assertion')
+      && !('action' in e && e.action === '__final_screenshot')
   ) ?? [];
 
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
@@ -277,6 +278,7 @@ function App() {
           event={selectedEvent}
           screenshots={trace.screenshots}
           highlightBounds={hierarchyHighlight}
+          devicePixelRatio={trace.metadata.device.devicePixelRatio}
         />
       </div>
       {/* Bottom: Detail tabs */}

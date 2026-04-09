@@ -29,6 +29,8 @@ interface Props {
   screenshots: Map<string, string>
   highlightBounds?: { left: number; top: number; right: number; bottom: number } | null
   onScreenshotClick?: (point: { x: number; y: number }) => void
+  /** Device pixel ratio — bounds are in logical points, screenshots in pixels. */
+  devicePixelRatio?: number
 }
 
 type ScreenshotTab = 'before' | 'after' | 'action'
@@ -38,10 +40,10 @@ interface NaturalSize {
   height: number
 }
 
-export function ScreenshotPanel({ event, screenshots, highlightBounds, onScreenshotClick }: Props) {
+export function ScreenshotPanel({ event, screenshots, highlightBounds, onScreenshotClick, devicePixelRatio }: Props) {
   injectStyles();
 
-  const [tab, setTab] = useState<ScreenshotTab>('after');
+  const [tab, setTab] = useState<ScreenshotTab>('action');
   const [scale, setScale] = useState(1);
   const [naturalSize, setNaturalSize] = useState<NaturalSize | null>(null);
   const imgRef = useRef<HTMLImageElement>(null);
@@ -84,7 +86,11 @@ export function ScreenshotPanel({ event, screenshots, highlightBounds, onScreens
 
   const pad = String(event.actionIndex).padStart(3, '0');
   const beforeUrl = screenshots.get(`screenshots/action-${pad}-before.png`);
-  const afterUrl = screenshots.get(`screenshots/action-${pad}-after.png`);
+  // "After" = the next action's before-screenshot (screen state after this action).
+  // This avoids capturing 2 screenshots per action through the agent.
+  const nextPad = String(event.actionIndex + 1).padStart(3, '0');
+  const afterUrl = screenshots.get(`screenshots/action-${nextPad}-before.png`)
+    ?? screenshots.get(`screenshots/action-${pad}-after.png`); // fallback for legacy traces
 
   const hasBefore = !!beforeUrl;
   const hasAfter = !!afterUrl;
@@ -102,8 +108,8 @@ export function ScreenshotPanel({ event, screenshots, highlightBounds, onScreens
 
   const bounds = (event.type === 'action' || event.type === 'assertion') ? event.bounds : undefined;
   const point = event.type === 'action' ? event.point : undefined;
-  // Show bounds overlay whenever bounds exist, on any tab
-  const showOverlay = !!bounds || (tab === 'action' && !!point);
+  // Show bounds + point overlay only on the "action" tab
+  const showOverlay = tab === 'action' && (!!bounds || !!point);
 
   return (
     <div class="screenshot-panel">
@@ -139,6 +145,7 @@ export function ScreenshotPanel({ event, screenshots, highlightBounds, onScreens
                 naturalSize={naturalSize}
                 renderedWidth={imgRef.current.clientWidth}
                 renderedHeight={imgRef.current.clientHeight}
+                devicePixelRatio={devicePixelRatio}
               />
             )}
             {highlightBounds && naturalSize && imgRef.current && (
@@ -147,6 +154,7 @@ export function ScreenshotPanel({ event, screenshots, highlightBounds, onScreens
                 naturalSize={naturalSize}
                 renderedWidth={imgRef.current.clientWidth}
                 renderedHeight={imgRef.current.clientHeight}
+                devicePixelRatio={devicePixelRatio}
               />
             )}
           </div>
@@ -166,13 +174,17 @@ interface BoundsOverlayProps {
   naturalSize: NaturalSize
   renderedWidth: number
   renderedHeight: number
+  devicePixelRatio?: number
 }
 
-function BoundsOverlay({ bounds, point, naturalSize, renderedWidth, renderedHeight }: BoundsOverlayProps) {
+function BoundsOverlay({ bounds, point, naturalSize, renderedWidth, renderedHeight, devicePixelRatio }: BoundsOverlayProps) {
   if (!bounds && !point) return null;
 
-  const scaleX = renderedWidth / naturalSize.width;
-  const scaleY = renderedHeight / naturalSize.height;
+  // Bounds are in logical points; screenshots are in pixels.
+  // Multiply by devicePixelRatio to convert points → pixels before scaling.
+  const dpr = devicePixelRatio ?? 1;
+  const scaleX = renderedWidth / naturalSize.width * dpr;
+  const scaleY = renderedHeight / naturalSize.height * dpr;
 
   return (
     <div
@@ -213,11 +225,13 @@ interface HierarchyHighlightProps {
   naturalSize: NaturalSize
   renderedWidth: number
   renderedHeight: number
+  devicePixelRatio?: number
 }
 
-function HierarchyHighlightOverlay({ bounds, naturalSize, renderedWidth, renderedHeight }: HierarchyHighlightProps) {
-  const scaleX = renderedWidth / naturalSize.width;
-  const scaleY = renderedHeight / naturalSize.height;
+function HierarchyHighlightOverlay({ bounds, naturalSize, renderedWidth, renderedHeight, devicePixelRatio }: HierarchyHighlightProps) {
+  const dpr = devicePixelRatio ?? 1;
+  const scaleX = renderedWidth / naturalSize.width * dpr;
+  const scaleY = renderedHeight / naturalSize.height * dpr;
 
   return (
     <div

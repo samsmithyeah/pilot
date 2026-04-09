@@ -192,7 +192,7 @@ export interface TraceMetadata {
   /** Fully qualified test name. */
   testName: string
   /** Test status. */
-  testStatus: 'passed' | 'failed' | 'skipped' | 'running'
+  testStatus: 'passed' | 'failed' | 'skipped' | 'running' | 'idle'
   /** Test duration in ms. */
   testDuration: number
   /** Test start timestamp (ms since epoch). */
@@ -222,6 +222,8 @@ export interface TraceDeviceInfo {
   screenResolution?: { width: number; height: number }
   isEmulator: boolean
   packageName?: string
+  /** Device pixel ratio (e.g. 3 for retina iOS). Bounds are in logical points; screenshots in pixels. */
+  devicePixelRatio?: number
 }
 
 export interface TraceConfigSnapshot {

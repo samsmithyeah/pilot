@@ -14,12 +14,21 @@ import type { TraceMode, TraceConfig } from './trace/types.js';
 
 export type ScreenshotMode = 'always' | 'only-on-failure' | 'never';
 export type DeviceStrategy = 'prefer-connected' | 'avd-only';
+export type Platform = 'android' | 'ios';
 
 export type { TraceMode, TraceConfig };
 
 export interface PilotConfig {
-  /** Path to the APK under test. */
+  /**
+   * Target platform. Required for iOS; defaults to Android behavior when unset.
+   */
+  platform?: Platform;
+
+  /** Path to the APK under test (Android). */
   apk?: string;
+
+  /** Path to the .app bundle under test (iOS simulator). */
+  app?: string;
 
   /**
    * Optional activity name to use when auto-launching the app under test.
@@ -75,6 +84,28 @@ export interface PilotConfig {
 
   /** Path to the Pilot agent test APK. Used for auto-install if agent is not on device. */
   agentTestApk?: string;
+
+  /** Path to the iOS agent .xctestrun file. Used for auto-launch of the iOS agent. */
+  iosXctestrun?: string;
+
+  /**
+   * Optional deep link used to soft-reset the app between files on platforms
+   * where hard restarts are slow or unstable. Intended for app-specific test
+   * hooks such as a reset route in a first-party test app.
+   */
+  resetAppDeepLink?: string;
+
+  /**
+   * How long to wait after opening `resetAppDeepLink` before continuing.
+   * Defaults to 750ms when the deep link is configured.
+   */
+  resetAppWaitMs?: number;
+
+  /**
+   * iOS simulator name or UDID. Analogous to `avd` for Android.
+   * Run `xcrun simctl list devices` to see available simulators.
+   */
+  simulator?: string;
 
   /**
    * Test reporter configuration.
@@ -206,8 +237,19 @@ export function resolveDeviceStrategy(
  * Load pilot.config.ts from the given directory (or cwd). Falls back to
  * defaults if no config file exists.
  */
-export async function loadConfig(dir?: string): Promise<PilotConfig> {
+export async function loadConfig(dir?: string, configFile?: string): Promise<PilotConfig> {
   const root = dir ?? process.cwd();
+
+  if (configFile) {
+    const configPath = path.resolve(root, configFile);
+    if (!fs.existsSync(configPath)) {
+      throw new Error(`Config file not found: ${configPath}`);
+    }
+    const mod = await import(configPath);
+    const raw: Partial<PilotConfig> = mod.default ?? mod;
+    return { ...DEFAULT_CONFIG, ...raw, rootDir: raw.rootDir ?? root };
+  }
+
   const candidates = ['pilot.config.ts', 'pilot.config.js', 'pilot.config.mjs'];
 
   for (const name of candidates) {

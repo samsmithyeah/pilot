@@ -46,36 +46,42 @@ export async function tracedAction(
   const selectorStr = selector ? JSON.stringify(selectorToProto(selector)) : undefined;
   const log: string[] = [];
 
-  // Best-effort element bounds lookup for trace overlay
+  // Run element bounds lookup and before-captures in parallel — both are
+  // best-effort and independent.  Short timeout on bounds since the element
+  // should already exist (we're about to act on it).
   let bounds: { left: number; top: number; right: number; bottom: number } | undefined;
   let point: { x: number; y: number } | undefined;
-  if (selector && ctx.findElement) {
-    const lookupStart = Date.now();
-    try {
-      const res = await ctx.findElement(selector, 500);
-      if (res.found && res.element?.bounds) {
-        bounds = res.element.bounds;
-        log.push(`Element found at [${bounds.left},${bounds.top}][${bounds.right},${bounds.bottom}] (${Date.now() - lookupStart}ms)`);
-        if (category === 'tap') {
-          point = {
-            x: (bounds.left + bounds.right) / 2,
-            y: (bounds.top + bounds.bottom) / 2,
-          };
-          log.push(`Tap target: (${point.x}, ${point.y})`);
-        }
-      } else {
-        log.push(`Element lookup returned no match (${Date.now() - lookupStart}ms)`);
-      }
-    } catch {
-      log.push(`Element lookup failed (${Date.now() - lookupStart}ms)`);
-    }
-  }
 
   log.push('Capturing before screenshot + hierarchy');
 
-  const { actionIndex, captures: beforeCaptures } = await ctx.collector.captureBeforeAction(
-    ctx.takeScreenshot, ctx.captureHierarchy,
-  );
+  const boundsPromise = (selector && ctx.findElement)
+    ? (async () => {
+        const lookupStart = Date.now();
+        try {
+          const res = await ctx.findElement!(selector, 100);
+          if (res.found && res.element?.bounds) {
+            bounds = res.element.bounds;
+            log.push(`Element found at [${bounds.left},${bounds.top}][${bounds.right},${bounds.bottom}] (${Date.now() - lookupStart}ms)`);
+            if (category === 'tap') {
+              point = {
+                x: (bounds.left + bounds.right) / 2,
+                y: (bounds.top + bounds.bottom) / 2,
+              };
+              log.push(`Tap target: (${point.x}, ${point.y})`);
+            }
+          } else {
+            log.push(`Element lookup returned no match (${Date.now() - lookupStart}ms)`);
+          }
+        } catch {
+          log.push(`Element lookup failed (${Date.now() - lookupStart}ms)`);
+        }
+      })()
+    : Promise.resolve();
+
+  const [, { captures: beforeCaptures }] = await Promise.all([
+    boundsPromise,
+    ctx.collector.captureBeforeAction(ctx.takeScreenshot, ctx.captureHierarchy),
+  ]);
 
   const start = Date.now();
   let success = true;
@@ -134,37 +140,20 @@ export async function tracedAction(
   // actual action time, not action + screenshot overhead.
   const duration = Date.now() - start;
 
-  // Fire-and-forget the after-action capture so the test can proceed
-  // immediately. This avoids consuming the visibility window of transient
-  // UI elements (toasts, animations) with screenshot overhead.
-  // The collector tracks pending captures and awaits them before packaging.
-  const afterCapturePromise = ctx.collector.captureAfterAction(
-    actionIndex, ctx.takeScreenshot, ctx.captureHierarchy,
-  ).then((afterCaptures) => {
-    ctx.collector.addActionEvent({
-      category, action, selector: selectorStr, inputValue: extra?.inputValue,
-      duration, success, error, errorStack,
-      bounds, point, log,
-      hasScreenshotBefore: !!beforeCaptures.screenshotBefore,
-      hasScreenshotAfter: !!afterCaptures.screenshotAfter,
-      hasHierarchyBefore: !!beforeCaptures.hierarchyBefore,
-      hasHierarchyAfter: !!afterCaptures.hierarchyAfter,
-      sourceLocation,
-    });
-  }).catch(() => {
-    // Best-effort: emit event without after-captures
-    ctx.collector.addActionEvent({
-      category, action, selector: selectorStr, inputValue: extra?.inputValue,
-      duration, success, error, errorStack,
-      bounds, point, log: [...log, 'After-action capture failed'],
-      hasScreenshotBefore: !!beforeCaptures.screenshotBefore,
-      hasScreenshotAfter: false,
-      hasHierarchyBefore: !!beforeCaptures.hierarchyBefore,
-      hasHierarchyAfter: false,
-      sourceLocation,
-    });
+  // Emit event immediately so _actionIndex increments before the runner
+  // emits group-end boundaries.  No after-capture — the trace viewer uses
+  // the next action's before-screenshot as the "after" view (like Playwright).
+  // This halves the screenshot overhead and avoids fire-and-forget reliability issues.
+  ctx.collector.addActionEvent({
+    category, action, selector: selectorStr, inputValue: extra?.inputValue,
+    duration, success, error, errorStack,
+    bounds, point, log,
+    hasScreenshotBefore: !!beforeCaptures.screenshotBefore,
+    hasScreenshotAfter: false,
+    hasHierarchyBefore: !!beforeCaptures.hierarchyBefore,
+    hasHierarchyAfter: false,
+    sourceLocation,
   });
-  ctx.collector.trackPendingCapture(afterCapturePromise);
 
   if (caughtErr !== undefined) {
     throw caughtErr instanceof Error ? caughtErr : new Error(String(caughtErr));

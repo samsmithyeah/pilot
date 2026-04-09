@@ -25,7 +25,7 @@ export default function ApiCallsScreen() {
     setError("")
     setPosts([])
     try {
-      const res = await fetch("http://jsonplaceholder.typicode.com/posts?_limit=3")
+      const res = await fetch("https://jsonplaceholder.typicode.com/posts?_limit=3")
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
       setPosts(data)
@@ -41,7 +41,7 @@ export default function ApiCallsScreen() {
     setError("")
     setUser(null)
     try {
-      const res = await fetch("http://jsonplaceholder.typicode.com/users/1")
+      const res = await fetch("https://jsonplaceholder.typicode.com/users/1")
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
       setUser(data)
@@ -56,7 +56,7 @@ export default function ApiCallsScreen() {
     setLoading("404")
     setError("")
     try {
-      const res = await fetch("http://jsonplaceholder.typicode.com/posts/99999")
+      const res = await fetch("https://jsonplaceholder.typicode.com/posts/99999")
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
     } catch (e) {
       setError(`Request failed: ${e instanceof Error ? e.message : e}`)
@@ -124,7 +124,9 @@ export default function ApiCallsScreen() {
       {/* Posts */}
       {posts.length > 0 && (
         <View>
-          <Text style={styles.sectionHeading}>Posts</Text>
+          <Text style={styles.sectionHeading} accessibilityRole="header">
+            Posts
+          </Text>
           {posts.map((post) => (
             <View key={post.id} style={styles.card}>
               <Text style={styles.cardTitle}>{post.title}</Text>
@@ -137,7 +139,9 @@ export default function ApiCallsScreen() {
       {/* User */}
       {user && (
         <View>
-          <Text style={styles.sectionHeading}>User</Text>
+          <Text style={styles.sectionHeading} accessibilityRole="header">
+            User
+          </Text>
           <View style={styles.card}>
             <Text style={styles.cardTitle}>{user.name}</Text>
             <Text style={styles.cardBody}>{user.email}</Text>

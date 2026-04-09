@@ -1722,6 +1722,7 @@ describe("wrapAssertionWithTrace", () => {
 
   function makeMockCollector() {
     return {
+      config: { screenshots: false, snapshots: false, sources: false, attachments: false, network: false, mode: 'on' as const },
       captureBeforeAction: vi.fn(async () => ({
         actionIndex: 0,
         captures: {},
@@ -1730,6 +1731,7 @@ describe("wrapAssertionWithTrace", () => {
       addAssertionEvent: vi.fn(),
       setPendingOperation: vi.fn(),
       clearPendingOperation: vi.fn(),
+      trackPendingCapture: vi.fn(),
     };
   }
 
@@ -1793,7 +1795,7 @@ describe("wrapAssertionWithTrace", () => {
     vitestExpect(event.passed).toBe(true);
   });
 
-  it("captures before and after screenshots", async () => {
+  it("captures before screenshot (no after — viewer uses next action's before)", async () => {
     const collector = makeMockCollector();
     const client = makeMockClient(async () => ({
       requestId: "1",
@@ -1806,6 +1808,6 @@ describe("wrapAssertionWithTrace", () => {
     await pilotExpect(handle).toBeVisible({ timeout: 50 });
 
     vitestExpect(collector.captureBeforeAction).toHaveBeenCalledTimes(1);
-    vitestExpect(collector.captureAfterAction).toHaveBeenCalledTimes(1);
+    vitestExpect(collector.captureAfterAction).not.toHaveBeenCalled();
   });
 });

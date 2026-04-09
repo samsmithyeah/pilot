@@ -3,6 +3,7 @@ package dev.pilot.agent
 import android.app.Instrumentation
 import android.os.Bundle
 import android.util.Log
+import androidx.test.uiautomator.Configurator
 import androidx.test.uiautomator.UiDevice
 import kotlinx.coroutines.runBlocking
 
@@ -32,6 +33,16 @@ class PilotAgent : Instrumentation() {
 
         // Initialize UiDevice — must pass the Instrumentation instance
         device = UiDevice.getInstance(this)
+
+        // Lower UIAutomator's default timeouts (10s each) which cause every
+        // action to block for the full duration on React Native apps (which
+        // are never truly "idle" due to JS bridge timers). 500ms is enough
+        // to let UIAutomator's internal accessibility event loop settle
+        // without penalizing every single operation.
+        Configurator.getInstance().apply {
+            waitForIdleTimeout = 500L
+            waitForSelectorTimeout = 500L
+        }
 
         val port = arguments?.getString(ARG_PORT)?.toIntOrNull() ?: DEFAULT_PORT
 

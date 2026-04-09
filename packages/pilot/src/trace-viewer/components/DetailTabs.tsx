@@ -145,6 +145,10 @@ function CallTab({ event }: { event: ActionTraceEvent | AssertionTraceEvent | un
       </span>
       <span class="call-label">Duration</span>
       <span class="call-value">{event.duration}ms ({event.attempts} attempt{event.attempts !== 1 ? 's' : ''})</span>
+      {event.bounds && <>
+        <span class="call-label">Bounds</span>
+        <span class="call-value">[{event.bounds.left}, {event.bounds.top}, {event.bounds.right}, {event.bounds.bottom}]</span>
+      </>}
       {event.error && <>
         <span class="call-label">Error</span>
         <span class="call-value error">{event.error}</span>

@@ -35,6 +35,18 @@ import {
   type DeviceHealthResult,
   type LaunchedEmulator,
 } from './emulator.js';
+import {
+  provisionSimulators,
+  cleanupStaleSimulators,
+  preserveSimulatorsForReuse,
+  forceCleanupSimulators,
+  filterHealthySimulators,
+  listCompatibleBootedSimulators,
+  type ClonedSimulator,
+} from './ios-simulator.js';
+import { resolveTraceConfig } from './trace/types.js';
+import { ensureSudoAccess } from './macos-proxy.js';
+import { freeStaleAgentPort, findPidsOnPort } from './port-utils.js';
 
 const DIM = '\x1b[2m';
 const YELLOW = '\x1b[33m';
@@ -78,22 +90,41 @@ const LAUNCHED_EMULATOR_INIT_TIMEOUT_MS = 180_000;
  */
 export async function runParallel(opts: DispatcherOptions): Promise<FullResult> {
   const { config, reporter, testFiles } = opts;
+  const isIos = config.platform === 'ios';
   const deviceStrategy = resolveDeviceStrategy(config);
 
-  const clearedOfflineEmulators = clearOfflineEmulatorTransports();
-  for (const serial of clearedOfflineEmulators) {
-    process.stderr.write(
-      `${YELLOW}Cleared stale offline emulator transport ${serial} before device discovery.${RESET}\n`,
-    );
-  }
+  // ─── Pre-discovery cleanup ───
+  let reusableSimulatorUdids: string[] = [];
 
-  // Reclaim healthy emulators from previous runs, kill unhealthy ones.
-  // cleanupStaleEmulators logs details about each action internally.
-  const staleResult = cleanupStaleEmulators(config.avd);
-  if (staleResult.killed.length > 0) {
-    process.stderr.write(
-      `${DIM}Cleaned up ${staleResult.killed.length} stale emulator(s).${RESET}\n`,
-    );
+  if (isIos) {
+    if (config.simulator) {
+      const staleResult = cleanupStaleSimulators(config.simulator);
+      reusableSimulatorUdids = staleResult.reusable;
+      if (staleResult.killed.length > 0) {
+        process.stderr.write(
+          `${DIM}Cleaned up ${staleResult.killed.length} stale simulator(s).${RESET}\n`,
+        );
+      }
+      if (staleResult.reusable.length > 0) {
+        process.stderr.write(
+          `${DIM}Reusing ${staleResult.reusable.length} simulator(s) from previous run.${RESET}\n`,
+        );
+      }
+    }
+  } else {
+    const clearedOfflineEmulators = clearOfflineEmulatorTransports();
+    for (const serial of clearedOfflineEmulators) {
+      process.stderr.write(
+        `${YELLOW}Cleared stale offline emulator transport ${serial} before device discovery.${RESET}\n`,
+      );
+    }
+
+    const staleResult = cleanupStaleEmulators(config.avd);
+    if (staleResult.killed.length > 0) {
+      process.stderr.write(
+        `${DIM}Cleaned up ${staleResult.killed.length} stale emulator(s).${RESET}\n`,
+      );
+    }
   }
 
   // Spawn the first worker daemon early so we can use it for device discovery.
@@ -108,10 +139,20 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
   const firstDaemonPort = baseDaemonPort + 1;
   const firstAgentPort = baseAgentPort + 1;
 
+  // Free the first agent host port from any leftover stale process before
+  // spawning firstDaemon. The common offender is a leftover iOS `PilotAgent`
+  // from a previous iOS run — its host-localhost socket squats on the port
+  // we want to use for `adb forward`, silently shadowing the Android agent
+  // so every command routes to the iOS simulator. Subsequent worker slots
+  // free their own agent port inline during slot allocation below, since
+  // the slot allocator may walk past `opts.workers` when daemon ports are
+  // occupied — freeing only `[0, opts.workers)` upfront would miss them.
+  freeStaleAgentPort(firstAgentPort);
+
   const firstDaemon = spawn(
     daemonBin,
     ['--port', String(firstDaemonPort), '--agent-port', String(firstAgentPort)],
-    { detached: true, stdio: 'ignore' },
+    { stdio: 'ignore' },
   );
   firstDaemon.unref();
   firstDaemon.on('error', () => {
@@ -130,6 +171,23 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
     throw new Error(`Failed to start worker daemon.${hint}`);
   }
 
+  // Verify the daemon we connected to is actually OUR firstDaemon and not a
+  // stale pilot-core left over from a previous run squatting on the same port.
+  // If our spawn failed to bind silently (firstDaemon.on('error') swallows it),
+  // waitForReady would have happily connected to the squatter, and the entire
+  // run would proceed against an incoherent daemon — wrong simulators, wrong
+  // worker config, mysterious test failures. Fail fast with a clear hint
+  // instead of autonomously killing the squatter (it might belong to another
+  // concurrent Pilot run, which the slot allocator would handle by walking).
+  const listenerPids = findPidsOnPort(firstDaemonPort);
+  if (firstDaemon.pid !== undefined && !listenerPids.includes(firstDaemon.pid)) {
+    firstDaemon.kill();
+    const squatterHint = listenerPids.length > 0
+      ? ` Port ${firstDaemonPort} is held by PID ${listenerPids.join(',')} — likely a stale pilot-core daemon from a previous run. If no other Pilot run is active, kill it with: kill ${listenerPids.join(' ')}`
+      : ` Port ${firstDaemonPort} is held by an unknown process. Try: lsof -ti tcp:${firstDaemonPort} | xargs kill`;
+    throw new Error(`Failed to start worker daemon: spawned process bound to a different port (likely failed to bind).${squatterHint}`);
+  }
+
   // Discover available devices
   const deviceList = await discoveryClient.listDevices();
   discoveryClient.close();
@@ -138,59 +196,116 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
     d.state === 'Discovered' || d.state === 'Active',
   );
 
-  const prefilteredOnline = prefilterDevicesForStrategy(
-    onlineDevices.map((d) => d.serial),
-    deviceStrategy,
-    config.avd,
-  );
-  warnSkippedDevices(prefilteredOnline.skippedDevices);
-  const healthyOnline = filterHealthyDevices(prefilteredOnline.candidateSerials);
-  warnUnhealthyDevices(healthyOnline.unhealthyDevices);
-  const selectedOnline = selectDevicesForStrategy(
-    healthyOnline.healthySerials,
-    deviceStrategy,
-    config.avd,
-  );
-  warnSkippedDevices(
-    selectedOnline.skippedDevices.filter(
-      (device) => !prefilteredOnline.skippedDevices.some((prefiltered) => prefiltered.serial === device.serial),
-    ),
-  );
-
-  // Auto-launch emulators if enabled and we don't have enough devices
   let launchedEmulators: LaunchedEmulator[] = [];
+  let clonedSimulators: ClonedSimulator[] = [];
+  let freshIosUdids = new Set<string>();
   let deviceSerials: string[];
 
-  if (
-    config.launchEmulators &&
-    selectedOnline.selectedSerials.length < Math.min(opts.workers, testFiles.length)
-  ) {
-    const provision = await provisionEmulators({
-      existingSerials: selectedOnline.selectedSerials,
-      // Even unhealthy connected emulators still occupy console/ADB ports.
-      // Treat every discovered online serial as occupied when choosing new ports.
-      occupiedSerials: onlineDevices.map((d) => d.serial),
-      workers: Math.min(opts.workers, testFiles.length),
-      avd: config.avd,
-    });
-    launchedEmulators = provision.launched;
-    const healthyProvisioned = filterHealthyDevices(provision.allSerials);
-    warnUnhealthyDevices(healthyProvisioned.unhealthyDevices);
-    const selectedProvisioned = selectDevicesForStrategy(
-      healthyProvisioned.healthySerials,
+  if (isIos) {
+    // ─── iOS device discovery & provisioning ───
+    // The daemon reports ALL booted iOS simulators. Filter to only those
+    // compatible with the primary — different runtimes cause xcodebuild
+    // test-without-building to fail since the xctestrun is OS-version-specific.
+    const iosDevices = onlineDevices.filter((d) => d.platform === 'ios');
+    let candidateUdids = iosDevices.map((d) => d.serial);
+    if (candidateUdids.length > 0) {
+      const compatible = listCompatibleBootedSimulators(candidateUdids[0]);
+      const compatibleSet = new Set(compatible.map((s) => s.udid));
+      candidateUdids = candidateUdids.filter((u) => compatibleSet.has(u));
+    }
+    const iosHealthy = filterHealthySimulators(candidateUdids);
+    for (const unhealthy of iosHealthy.unhealthySimulators) {
+      process.stderr.write(
+        `${YELLOW}Skipping unhealthy simulator ${unhealthy.udid}: ${unhealthy.reason}.${RESET}\n`,
+      );
+    }
+    deviceSerials = iosHealthy.healthyUdids;
+
+    const neededWorkers = Math.min(opts.workers, testFiles.length);
+    if (deviceSerials.length < neededWorkers && config.simulator) {
+      process.stderr.write(
+        `${DIM}Provisioning iOS simulators: have ${deviceSerials.length}, need ${neededWorkers}${RESET}\n`,
+      );
+      const provision = provisionSimulators({
+        simulatorName: config.simulator,
+        workers: neededWorkers,
+        existingUdids: deviceSerials,
+        appPath: config.app ? path.resolve(config.rootDir, config.app) : undefined,
+        reusableUdids: reusableSimulatorUdids,
+      });
+      clonedSimulators = provision.clonedSimulators;
+      freshIosUdids = provision.freshUdids;
+      deviceSerials = provision.allUdids;
+
+      if (clonedSimulators.length > 0) {
+        process.stderr.write(
+          `${DIM}Cloned ${clonedSimulators.length} simulator(s) for parallel workers.${RESET}\n`,
+        );
+      }
+
+      // Re-discover devices so the daemon sees newly booted simulators
+      if (provision.allUdids.length > iosDevices.length) {
+        // Give simulators a moment to register, then refresh
+        await new Promise((resolve) => setTimeout(resolve, 2_000));
+        const refreshClient = new PilotGrpcClient(`localhost:${firstDaemonPort}`);
+        await refreshClient.waitForReady(5_000);
+        await refreshClient.listDevices();
+        refreshClient.close();
+      }
+    }
+  } else {
+    // ─── Android device discovery & provisioning ───
+    const androidDevices = onlineDevices.filter((d) => d.platform !== 'ios');
+    const prefilteredOnline = prefilterDevicesForStrategy(
+      androidDevices.map((d) => d.serial),
       deviceStrategy,
       config.avd,
     );
-    warnSkippedDevices(selectedProvisioned.skippedDevices);
-    deviceSerials = selectedProvisioned.selectedSerials;
-  } else {
-    deviceSerials = selectedOnline.selectedSerials;
+    warnSkippedDevices(prefilteredOnline.skippedDevices);
+    const healthyOnline = filterHealthyDevices(prefilteredOnline.candidateSerials);
+    warnUnhealthyDevices(healthyOnline.unhealthyDevices);
+    const selectedOnline = selectDevicesForStrategy(
+      healthyOnline.healthySerials,
+      deviceStrategy,
+      config.avd,
+    );
+    warnSkippedDevices(
+      selectedOnline.skippedDevices.filter(
+        (device) => !prefilteredOnline.skippedDevices.some((prefiltered) => prefiltered.serial === device.serial),
+      ),
+    );
+
+    if (
+      config.launchEmulators &&
+      selectedOnline.selectedSerials.length < Math.min(opts.workers, testFiles.length)
+    ) {
+      const provision = await provisionEmulators({
+        existingSerials: selectedOnline.selectedSerials,
+        occupiedSerials: androidDevices.map((d) => d.serial),
+        workers: Math.min(opts.workers, testFiles.length),
+        avd: config.avd,
+      });
+      launchedEmulators = provision.launched;
+      const healthyProvisioned = filterHealthyDevices(provision.allSerials);
+      warnUnhealthyDevices(healthyProvisioned.unhealthyDevices);
+      const selectedProvisioned = selectDevicesForStrategy(
+        healthyProvisioned.healthySerials,
+        deviceStrategy,
+        config.avd,
+      );
+      warnSkippedDevices(selectedProvisioned.skippedDevices);
+      deviceSerials = selectedProvisioned.selectedSerials;
+    } else {
+      deviceSerials = selectedOnline.selectedSerials;
+    }
   }
 
   if (deviceSerials.length === 0) {
     throw new Error(
-      'No online devices found. Connect a device, start an emulator, ' +
-      'or set `launchEmulators: true` in your config.',
+      isIos
+        ? `No booted iOS simulators found.${config.simulator ? ` Boot a simulator matching '${config.simulator}', or add more simulators for parallel execution.` : ' Set `simulator` in your config and boot at least one.'}`
+        : 'No online devices found. Connect a device, start an emulator, ' +
+          'or set `launchEmulators: true` in your config.',
     );
   }
 
@@ -222,6 +337,9 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
     if (launchedEmulators.length > 0) {
       forceCleanupEmulators(launchedEmulators);
     }
+    if (clonedSimulators.length > 0) {
+      forceCleanupSimulators(clonedSimulators);
+    }
   };
   process.on('SIGINT', emergencyCleanup);
   process.on('SIGTERM', emergencyCleanup);
@@ -244,6 +362,15 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
       tsxBin = fs.existsSync(localTsx) ? localTsx : 'tsx';
     }
 
+    // iOS: pre-acquire sudo access for network capture in the main process
+    // so workers don't each independently prompt for a password.
+    if (isIos) {
+      const traceConfig = resolveTraceConfig(config.trace);
+      if (traceConfig.mode !== 'off' && traceConfig.network) {
+        ensureSudoAccess();
+      }
+    }
+
     // Serialize config for workers
     const serializedConfig: SerializedConfig = {
       timeout: config.timeout,
@@ -259,19 +386,51 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
       trace: typeof config.trace === 'string' || typeof config.trace === 'object'
         ? config.trace
         : undefined,
+      platform: config.platform,
+      app: config.app,
+      iosXctestrun: config.iosXctestrun,
+      simulator: config.simulator,
+      resetAppDeepLink: config.resetAppDeepLink,
+      resetAppWaitMs: config.resetAppWaitMs,
     };
 
     const launchedSerials = new Set(launchedEmulators.map((emu) => emu.serial));
 
+    // Pre-check port availability to avoid wasting time on occupied ports.
+    // Ports are baseDaemonPort+1+workerId; skip workers whose port is taken.
+    // For each candidate slot we also free any stale iOS PilotAgent squatting
+    // on the agent port — the slot loop may walk past opts.workers when daemon
+    // ports are occupied, so we cannot rely on a fixed-size upfront sweep.
+    // wid=0 is special: it reuses firstDaemon (already spawned), and its
+    // agent port (firstAgentPort) was freed before that spawn.
+    const availableWorkerSlots: Array<{ workerId: number; daemonPort: number; agentPort: number }> = [];
+    for (let wid = 0; availableWorkerSlots.length < maxUsefulWorkers && availableWorkerSlots.length < deviceSerials.length && wid < maxUsefulWorkers + 10; wid++) {
+      const port = baseDaemonPort + 1 + wid;
+      const agentPort = baseAgentPort + 1 + wid;
+      if (wid === 0) {
+        availableWorkerSlots.push({ workerId: availableWorkerSlots.length, daemonPort: port, agentPort });
+        continue;
+      }
+      freeStaleAgentPort(agentPort);
+      if (await isPortAvailable(port)) {
+        availableWorkerSlots.push({ workerId: availableWorkerSlots.length, daemonPort: port, agentPort });
+      } else {
+        process.stderr.write(
+          `${DIM}Skipping port ${port} (in use), trying next...${RESET}\n`,
+        );
+      }
+    }
+
     // Initialize all workers in parallel — each has its own daemon, device,
     // and agent so there are no shared resources during init.
     const initPromises: Promise<WorkerHandle>[] = [];
-    for (let workerId = 0; workerId < maxUsefulWorkers && workerId < deviceSerials.length; workerId++) {
-      const candidateSerial = deviceSerials[workerId];
-      const isFreshEmulator = launchedSerials.has(candidateSerial);
+
+    for (const slot of availableWorkerSlots) {
+      const candidateSerial = deviceSerials[slot.workerId];
+      const isFresh = launchedSerials.has(candidateSerial) || freshIosUdids.has(candidateSerial);
       initPromises.push(
         initializeWorker({
-          workerId,
+          workerId: slot.workerId,
           deviceSerial: candidateSerial,
           daemonBin,
           serializedConfig,
@@ -279,11 +438,13 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
           baseAgentPort,
           firstDaemon,
           resolvedScript,
-          initializationTimeoutMs: isFreshEmulator
+          initializationTimeoutMs: isFresh
             ? LAUNCHED_EMULATOR_INIT_TIMEOUT_MS
             : EXISTING_DEVICE_INIT_TIMEOUT_MS,
-          freshEmulator: isFreshEmulator,
+          freshEmulator: isFresh,
           tsxBin,
+          daemonPortOverride: slot.daemonPort,
+          agentPortOverride: slot.agentPort,
         }),
       );
     }
@@ -581,21 +742,27 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
       } catch { /* daemon may already be dead */ }
     }
 
-    // 3. Clean up ADB port forwards created by worker daemons.
-    // Each daemon set up `adb forward tcp:<agentPort> tcp:18700` on its device.
-    // Stale forwards break subsequent runs on the same device.
-    for (const worker of workers) {
-      try {
-        execFileSync('adb', ['-s', worker.deviceSerial, 'forward', '--remove', `tcp:${worker.agentPort}`], {
-          timeout: 5_000,
-          stdio: 'ignore',
-        });
-      } catch { /* forward may already be gone */ }
-    }
+    if (isIos) {
+      // 3. Preserve cloned simulators for reuse by the next run.
+      // They stay booted and in the manifest. Only emergency cleanup deletes them.
+      preserveSimulatorsForReuse(clonedSimulators);
+    } else {
+      // 3. Clean up ADB port forwards created by worker daemons.
+      // Each daemon set up `adb forward tcp:<agentPort> tcp:18700` on its device.
+      // Stale forwards break subsequent runs on the same device.
+      for (const worker of workers) {
+        try {
+          execFileSync('adb', ['-s', worker.deviceSerial, 'forward', '--remove', `tcp:${worker.agentPort}`], {
+            timeout: 5_000,
+            stdio: 'ignore',
+          });
+        } catch { /* forward may already be gone */ }
+      }
 
-    // 4. Leave emulators running for reuse by the next run.
-    // The PID manifest keeps them tracked. Only emergency cleanup kills them.
-    preserveEmulatorsForReuse(launchedEmulators);
+      // 4. Leave emulators running for reuse by the next run.
+      // The PID manifest keeps them tracked. Only emergency cleanup kills them.
+      preserveEmulatorsForReuse(launchedEmulators);
+    }
   }
 
   const totalDuration = Date.now() - totalStart;
@@ -641,6 +808,10 @@ interface InitializeWorkerOptions {
   initializationTimeoutMs: number
   freshEmulator: boolean
   tsxBin?: string
+  /** Override the daemon port instead of computing baseDaemonPort + 1 + workerId. */
+  daemonPortOverride?: number
+  /** Override the agent port instead of computing baseAgentPort + 1 + workerId. */
+  agentPortOverride?: number
 }
 
 async function initializeWorker(opts: InitializeWorkerOptions): Promise<WorkerHandle> {
@@ -657,8 +828,8 @@ async function initializeWorker(opts: InitializeWorkerOptions): Promise<WorkerHa
     tsxBin,
   } = opts;
 
-  const daemonPort = baseDaemonPort + 1 + workerId;
-  const agentPort = baseAgentPort + 1 + workerId;
+  const daemonPort = opts.daemonPortOverride ?? (baseDaemonPort + 1 + workerId);
+  const agentPort = opts.agentPortOverride ?? (baseAgentPort + 1 + workerId);
 
   let daemonProcess: ChildProcess | undefined;
   if (workerId === 0) {
@@ -667,7 +838,7 @@ async function initializeWorker(opts: InitializeWorkerOptions): Promise<WorkerHa
     daemonProcess = spawn(
       daemonBin,
       ['--port', String(daemonPort), '--agent-port', String(agentPort)],
-      { detached: true, stdio: 'ignore' },
+      { stdio: 'ignore' },
     );
     daemonProcess.unref();
     daemonProcess.on('error', (err) => {

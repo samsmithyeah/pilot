@@ -104,6 +104,10 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
     trace: typeof ctx.config.trace === 'string' || typeof ctx.config.trace === 'object'
       ? ctx.config.trace
       : undefined,
+    platform: ctx.config.platform,
+    app: ctx.config.app,
+    iosXctestrun: ctx.config.iosXctestrun,
+    simulator: ctx.config.simulator,
   };
 
   // Resolve tsx binary for forking TypeScript files
@@ -159,7 +163,6 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
       const deviceSerial = ctx.deviceSerials[i];
       const daemonPort = baseDaemonPort + 100 + i;
       const agentPort = baseAgentPort + 100 + i;
-
       try {
         const worker = await initOneWatchWorker(i, deviceSerial, daemonPort, agentPort, daemonBin);
         watchWorkers.push(worker);
@@ -189,8 +192,9 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
   ): Promise<WatchWorkerHandle> {
     const daemonProcess = spawn(
       daemonBin,
-      ['--port', String(daemonPort), '--agent-port', String(agentPort)],
-      { detached: true, stdio: 'ignore' },
+      ['--port', String(daemonPort), '--agent-port', String(agentPort),
+        ...(ctx.config.platform ? ['--platform', ctx.config.platform] : [])],
+      { stdio: 'ignore' },
     );
     daemonProcess.on('error', () => { /* handled by waitForReady */ });
 

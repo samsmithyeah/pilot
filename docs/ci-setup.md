@@ -1,17 +1,17 @@
 # CI Setup
 
-This guide covers running Pilot tests in continuous integration environments. The key challenge is setting up enough Android emulator capacity in a headless environment.
+This guide covers running Pilot tests in continuous integration environments.
 
 ## Overview
 
 To run Pilot tests in CI, you need:
 
-1. An Android emulator running in headless mode (no GPU/display required).
-2. ADB available on the PATH.
-3. Node.js 18+ installed.
-4. The Pilot daemon binary (installed automatically with `npm install pilot`).
+1. Node.js 18+ installed.
+2. The Pilot daemon binary (installed automatically with `npm install pilot`).
+3. **Android**: An Android emulator running in headless mode and ADB on the PATH.
+4. **iOS**: A macOS runner with Xcode installed (simulators are managed by Pilot).
 
-## GitHub Actions
+## GitHub Actions (Android)
 
 Here is a complete GitHub Actions workflow that builds your app, starts an emulator, and runs Pilot tests.
 
@@ -78,6 +78,61 @@ jobs:
 - **KVM acceleration** is required for acceptable emulator performance on Linux CI runners. The `Enable KVM` step configures this.
 - The `android-emulator-runner` action handles downloading the system image, creating the AVD, and starting the emulator. Your test command runs in the `script` parameter after the emulator boots.
 - The `if: always()` on the upload step ensures screenshots are uploaded even when tests fail.
+
+## GitHub Actions (iOS)
+
+iOS tests require a macOS runner with Xcode installed. Pilot manages simulator lifecycle automatically.
+
+```yaml
+name: iOS Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build app for simulator
+        run: |
+          xcodebuild build-for-testing \
+            -project MyApp.xcodeproj \
+            -scheme MyApp \
+            -destination 'platform=iOS Simulator,name=iPhone 17'
+
+      - name: Run Pilot tests
+        run: npx pilot test
+
+      - name: Upload test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pilot-results
+          path: pilot-results/
+          retention-days: 14
+```
+
+### Key Points
+
+- **macOS runner** is required for iOS simulators. GitHub provides `macos-latest` with Xcode pre-installed.
+- Pilot boots and manages simulators automatically -- no manual `xcrun simctl` setup needed.
+- Build your app for the iOS Simulator target (not a physical device) using `build-for-testing` or your existing build pipeline.
 
 ## General CI Tips
 

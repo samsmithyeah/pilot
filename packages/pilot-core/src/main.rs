@@ -2,8 +2,10 @@ mod adb;
 mod agent_comms;
 mod device;
 mod grpc_server;
+mod ios;
 mod mitm_ca;
 mod network_proxy;
+mod platform;
 mod screenshot;
 
 use std::net::SocketAddr;
@@ -17,6 +19,7 @@ use tracing::{info, warn};
 use crate::agent_comms::AgentConnection;
 use crate::device::DeviceManager;
 use crate::grpc_server::PilotServiceImpl;
+use crate::platform::Platform;
 
 pub mod proto {
     tonic::include_proto!("pilot");
@@ -27,11 +30,13 @@ struct CliArgs {
     port: u16,
     agent_port: Option<u16>,
     verbose: bool,
+    platform: Option<Platform>,
 }
 
 fn parse_args() -> CliArgs {
     let mut args = std::env::args().skip(1);
     let mut port: u16 = 50051;
+    let mut platform: Option<Platform> = None;
     let mut agent_port: Option<u16> = None;
     let mut verbose = false;
 
@@ -53,15 +58,30 @@ fn parse_args() -> CliArgs {
                     }));
                 }
             }
+            "--platform" => {
+                if let Some(val) = args.next() {
+                    platform = Some(match val.as_str() {
+                        "ios" => Platform::Ios,
+                        "android" => Platform::Android,
+                        _ => {
+                            eprintln!("Invalid platform: {val} (expected 'ios' or 'android')");
+                            std::process::exit(1);
+                        }
+                    });
+                }
+            }
             "--verbose" | "-v" => {
                 verbose = true;
             }
             "--help" | "-h" => {
-                eprintln!("Usage: pilot-core [--port PORT] [--agent-port PORT] [--verbose]");
+                eprintln!("Usage: pilot-core [--port PORT] [--agent-port PORT] [--platform PLATFORM] [--verbose]");
                 eprintln!();
                 eprintln!("Options:");
                 eprintln!("  --port PORT         gRPC listen port (default: 50051)");
                 eprintln!("  --agent-port PORT   Local port for ADB forwarding to on-device agent (default: 18700)");
+                eprintln!(
+                    "  --platform PLATFORM Only discover devices of this platform (ios or android)"
+                );
                 eprintln!("  --verbose           Enable debug logging");
                 std::process::exit(0);
             }
@@ -77,6 +97,7 @@ fn parse_args() -> CliArgs {
         port,
         agent_port,
         verbose,
+        platform,
     }
 }
 
@@ -102,13 +123,25 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    // Verify ADB is available
+    // Verify ADB is available (Android)
     match adb::find_adb().await {
         Ok(path) => info!(path = %path.display(), "Found ADB"),
-        Err(e) => warn!("ADB not found on PATH: {e}. Device operations will fail."),
+        Err(e) => {
+            warn!("ADB not found on PATH: {e}. Android device operations will not be available.")
+        }
     }
 
-    let device_manager = Arc::new(RwLock::new(DeviceManager::new()));
+    // Verify xcrun is available (iOS)
+    match ios::device::find_xcrun().await {
+        Ok(path) => info!(path = %path.display(), "Found xcrun"),
+        Err(e) => {
+            warn!("xcrun not found on PATH: {e}. iOS device operations will not be available.")
+        }
+    }
+
+    let device_manager = Arc::new(RwLock::new(DeviceManager::with_platform_filter(
+        args.platform,
+    )));
     let agent_connection = Arc::new(RwLock::new(match args.agent_port {
         Some(port) => AgentConnection::with_port(port),
         None => AgentConnection::new(),
