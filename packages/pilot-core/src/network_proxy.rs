@@ -52,10 +52,62 @@ pub struct CapturedEntry {
     pub is_https: bool,
 }
 
+/// A decoded HTTP request, structured for transformation hooks.
+///
+/// `raw_bytes` is the complete request bytes (headers + body) as received on
+/// the wire — forwarded upstream as-is when no transformation is applied.
+/// `body` is the body portion alone, for use in capture and by future
+/// modification handlers.
+#[derive(Debug, Clone)]
+pub(crate) struct ParsedRequest {
+    pub method: String,
+    pub path: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+    pub raw_bytes: Vec<u8>,
+}
+
+/// A decoded HTTP response, structured for transformation hooks.
+///
+/// Same `raw_bytes` / `body` split as [`ParsedRequest`].
+#[derive(Debug, Clone)]
+pub(crate) struct ParsedResponse {
+    pub status_code: i32,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+    pub raw_bytes: Vec<u8>,
+}
+
+/// Hook trait for request/response transformation and synthetic responses.
+///
+/// All methods have no-op defaults. PILOT-182 adds the insertion points but
+/// no actual handler implementations — request/response modification is a
+/// separate roadmap feature that will build on this scaffolding.
+#[async_trait::async_trait]
+pub(crate) trait NetworkHandler: Send + Sync {
+    /// Inspect (and optionally mutate) a request before it's forwarded to
+    /// upstream. If this returns `Some(resp)`, the upstream call is skipped
+    /// and `resp` is returned directly to the client — this is how synthetic
+    /// responses / route-stubbing will work in the future.
+    async fn on_request(&self, _req: &mut ParsedRequest) -> Option<ParsedResponse> {
+        None
+    }
+
+    /// Inspect (and optionally mutate) a response before it's written back
+    /// to the client. Used for header/body rewriting.
+    async fn on_response(&self, _req: &ParsedRequest, _resp: &mut ParsedResponse) {}
+}
+
 /// Shared state for the proxy server.
-struct ProxyState {
+pub(crate) struct ProxyState {
     entries: Vec<CapturedEntry>,
     tls_client_config: Arc<ClientConfig>,
+    /// Optional transformation handler. `None` today (PILOT-182); populated
+    /// later when request/response modification lands. The handler field is
+    /// read from inside `handle_mitm_http` — even though it's always `None`
+    /// at runtime, the code path exists and the types are exercised, so the
+    /// future roadmap work is a pure drop-in.
+    handler: Option<Arc<dyn NetworkHandler>>,
 }
 
 /// Handle to the running proxy. Dropping it stops the proxy.
@@ -86,6 +138,7 @@ impl NetworkProxy {
         let state = Arc::new(Mutex::new(ProxyState {
             entries: Vec::new(),
             tls_client_config,
+            handler: None,
         }));
 
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -125,6 +178,16 @@ impl NetworkProxy {
     /// The port the proxy is listening on.
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    /// Clone the shared `ProxyState` handle so modules like `ios_redirect`
+    /// can feed transparent-TCP flows into [`handle_transparent_tcp`] without
+    /// needing to wrap `NetworkProxy` itself in `Arc` (`stop(self)` still
+    /// consumes the outer handle cleanly). Only used on macOS — the Linux
+    /// build has no transparent-TCP entry point.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn state_handle(&self) -> Arc<Mutex<ProxyState>> {
+        self.state.clone()
     }
 
     /// Stop the proxy and return all captured entries.
@@ -308,188 +371,285 @@ async fn handle_connect(
         }
     };
 
-    // Both sides are now decrypted — proxy HTTP traffic and capture it
-    handle_mitm_http(client_tls, upstream_tls, &hostname, state).await;
+    // Both sides are now decrypted — proxy HTTP traffic and capture it.
+    // CONNECT-tunnel path is always HTTPS by definition.
+    handle_mitm_http(
+        client_tls,
+        upstream_tls,
+        &hostname,
+        state,
+        /* is_https */ true,
+    )
+    .await;
 }
 
-/// Proxy decrypted HTTP traffic between client and upstream TLS streams,
+/// Outcome of reading a request or response from a stream. `ConnectionClosed`
+/// is a clean EOF; `Error` is anything else (timeout, IO error, malformed
+/// bytes, oversized headers). Callers treat both as "stop this iteration".
+enum ReadOutcome<T> {
+    Ok(T),
+    ConnectionClosed,
+    Error,
+}
+
+/// Read a full HTTP/1.x request (headers + body) from a client stream,
+/// returning structured request data plus the raw bytes for forwarding.
+async fn read_request<R>(client: &mut R, hostname: &str) -> ReadOutcome<ParsedRequest>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut buf = Vec::new();
+    let mut tmp = vec![0u8; 8192];
+    loop {
+        match tokio::time::timeout(CLIENT_READ_TIMEOUT, client.read(&mut tmp)).await {
+            Ok(Ok(0)) => return ReadOutcome::ConnectionClosed,
+            Ok(Ok(n)) => {
+                buf.extend_from_slice(&tmp[..n]);
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+                if buf.len() > 65536 {
+                    debug!("MITM request headers too large for {hostname}");
+                    return ReadOutcome::Error;
+                }
+            }
+            Ok(Err(e)) => {
+                debug!("MITM read from client for {hostname}: {e}");
+                return ReadOutcome::Error;
+            }
+            Err(_) => {
+                debug!("MITM client header read timed out for {hostname}");
+                return ReadOutcome::Error;
+            }
+        }
+    }
+
+    let first_line_end = buf.iter().position(|&b| b == b'\n').unwrap_or(0);
+    let first_line_str = String::from_utf8_lossy(&buf[..first_line_end]);
+    let first_line = first_line_str.trim();
+    let parts: Vec<&str> = first_line.split_whitespace().collect();
+    if parts.len() < 3 {
+        debug!("Invalid MITM HTTP request line: {first_line}");
+        return ReadOutcome::Error;
+    }
+
+    let method = parts[0].to_string();
+    let path = parts[1].to_string();
+    let (headers, header_end) = parse_headers(&buf);
+
+    // Read request body if Content-Length is set (capped to prevent OOM).
+    let content_length: usize = get_header(&headers, "content-length")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
+        .min(MAX_PROXY_BODY);
+    let body_so_far = buf.len().saturating_sub(header_end);
+    if content_length > body_so_far {
+        let remaining = content_length - body_so_far;
+        let mut body_buf = vec![0u8; remaining];
+        if let Err(e) = client.read_exact(&mut body_buf).await {
+            debug!("MITM reading request body for {hostname}: {e}");
+            return ReadOutcome::Error;
+        }
+        buf.extend_from_slice(&body_buf);
+    }
+
+    let body = if header_end < buf.len() {
+        buf[header_end..].to_vec()
+    } else {
+        Vec::new()
+    };
+
+    ReadOutcome::Ok(ParsedRequest {
+        method,
+        path,
+        headers,
+        body,
+        raw_bytes: buf,
+    })
+}
+
+/// Read a full HTTP/1.x response from an upstream stream. Uses
+/// [`response_complete`] to detect the end of Content-Length, chunked, or
+/// no-body responses; also breaks on upstream EOF or `MAX_PROXY_BODY`.
+async fn read_response<R>(upstream: &mut R, hostname: &str) -> ReadOutcome<ParsedResponse>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut buf = Vec::new();
+    let mut tmp = vec![0u8; 8192];
+    loop {
+        match tokio::time::timeout(UPSTREAM_READ_TIMEOUT, upstream.read(&mut tmp)).await {
+            Ok(Ok(0)) => break,
+            Ok(Ok(n)) => {
+                buf.extend_from_slice(&tmp[..n]);
+                if response_complete(&buf) {
+                    break;
+                }
+                if buf.len() > MAX_PROXY_BODY {
+                    break;
+                }
+            }
+            Ok(Err(e)) => {
+                debug!("MITM read from upstream for {hostname}: {e}");
+                break;
+            }
+            Err(_) => {
+                debug!("MITM read from upstream timed out for {hostname}");
+                break;
+            }
+        }
+    }
+
+    if buf.is_empty() {
+        return ReadOutcome::ConnectionClosed;
+    }
+
+    let status_code = parse_status_code(&buf);
+    let (headers, header_end) = parse_headers(&buf);
+    let body = if header_end < buf.len() {
+        buf[header_end..].to_vec()
+    } else {
+        Vec::new()
+    };
+
+    ReadOutcome::Ok(ParsedResponse {
+        status_code,
+        headers,
+        body,
+        raw_bytes: buf,
+    })
+}
+
+/// Push a [`CapturedEntry`] into the shared state, truncating bodies to
+/// `MAX_BODY_SIZE`. Does not consume the parsed structs.
+async fn record_entry(
+    state: &Arc<Mutex<ProxyState>>,
+    req: &ParsedRequest,
+    resp: &ParsedResponse,
+    hostname: &str,
+    is_https: bool,
+    start_ms: u64,
+) {
+    let scheme = if is_https { "https" } else { "http" };
+    let url = format!("{scheme}://{hostname}{}", req.path);
+    let content_type = get_header(&resp.headers, "content-type")
+        .unwrap_or_default()
+        .to_string();
+    let duration = now_ms() - start_ms;
+
+    debug!(
+        method = req.method.as_str(),
+        url = url.as_str(),
+        status_code = resp.status_code,
+        duration_ms = duration,
+        "HTTP request captured (MITM)"
+    );
+
+    let truncate = |b: &[u8]| -> Vec<u8> {
+        if b.len() > MAX_BODY_SIZE {
+            b[..MAX_BODY_SIZE].to_vec()
+        } else {
+            b.to_vec()
+        }
+    };
+
+    state.lock().await.entries.push(CapturedEntry {
+        method: req.method.clone(),
+        url,
+        status_code: resp.status_code,
+        content_type,
+        request_size: req.body.len() as u64,
+        response_size: resp.body.len() as u64,
+        start_time_ms: start_ms,
+        duration_ms: duration,
+        request_headers: req.headers.clone(),
+        response_headers: resp.headers.clone(),
+        request_body: truncate(&req.body),
+        response_body: truncate(&resp.body),
+        is_https,
+    });
+}
+
+/// Proxy decrypted HTTP traffic between client and upstream streams,
 /// capturing each request/response pair. Handles HTTP/1.1 keep-alive by
 /// looping until the connection closes.
+///
+/// The `is_https` flag only affects the captured URL scheme and the
+/// `CapturedEntry::is_https` field — both TLS (post-handshake) and plain-TCP
+/// streams are handled identically inside the loop. This is what lets the
+/// same function serve the Android CONNECT-tunnel path (post TLS handshake,
+/// `is_https = true`) and the iOS transparent-TCP path (peek decides, either
+/// branch).
 async fn handle_mitm_http<C, U>(
     mut client_stream: C,
     mut upstream_stream: U,
     hostname: &str,
     state: Arc<Mutex<ProxyState>>,
+    is_https: bool,
 ) where
     C: AsyncRead + AsyncWrite + Unpin,
     U: AsyncRead + AsyncWrite + Unpin,
 {
+    // Snapshot the handler once per connection. A handler is configured
+    // before capture starts and doesn't change during a live connection, so
+    // there's no need to re-lock on every request iteration. Today this is
+    // always None and the two hook call-sites below are no-ops at runtime,
+    // but the code paths exist so the future modification feature is a pure
+    // drop-in replacement of `None` with `Some(handler)`.
+    let handler = state.lock().await.handler.clone();
+
     loop {
         let start = now_ms();
 
-        // Read HTTP request from client
-        let mut request_buf = Vec::new();
-        let mut tmp = vec![0u8; 8192];
-        loop {
-            match tokio::time::timeout(CLIENT_READ_TIMEOUT, client_stream.read(&mut tmp)).await {
-                Ok(Ok(0)) => return, // client closed
-                Ok(Ok(n)) => {
-                    request_buf.extend_from_slice(&tmp[..n]);
-                    // Check if we have a complete set of headers
-                    if request_buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                        break;
-                    }
-                    if request_buf.len() > 65536 {
-                        debug!("MITM request headers too large for {hostname}");
-                        return;
-                    }
-                }
-                Ok(Err(e)) => {
-                    debug!("MITM read from client for {hostname}: {e}");
+        let mut req = match read_request(&mut client_stream, hostname).await {
+            ReadOutcome::Ok(r) => r,
+            ReadOutcome::ConnectionClosed | ReadOutcome::Error => return,
+        };
+
+        // Request hook: optionally transform the request, and optionally
+        // short-circuit with a synthetic response (no upstream call at all).
+        if let Some(h) = handler.as_ref() {
+            if let Some(synth) = h.on_request(&mut req).await {
+                if client_stream.write_all(&synth.raw_bytes).await.is_err() {
                     return;
                 }
-                Err(_) => {
-                    debug!("MITM client header read timed out for {hostname}");
+                let close = get_header(&synth.headers, "connection")
+                    .map(|v| v.eq_ignore_ascii_case("close"))
+                    .unwrap_or(false);
+                record_entry(&state, &req, &synth, hostname, is_https, start).await;
+                if close {
                     return;
                 }
+                continue;
             }
         }
 
-        let first_line_end = request_buf.iter().position(|&b| b == b'\n').unwrap_or(0);
-        let first_line_str = String::from_utf8_lossy(&request_buf[..first_line_end]);
-        let first_line = first_line_str.trim();
-        let parts: Vec<&str> = first_line.split_whitespace().collect();
-
-        if parts.len() < 3 {
-            debug!("Invalid MITM HTTP request line: {first_line}");
+        if upstream_stream.write_all(&req.raw_bytes).await.is_err() {
             return;
         }
 
-        let method = parts[0].to_string();
-        let path = parts[1].to_string();
-        let url = format!("https://{hostname}{path}");
-
-        let (req_headers, header_end) = parse_headers(&request_buf);
-
-        // Read request body if Content-Length is set (capped to prevent OOM)
-        let content_length: usize = get_header(&req_headers, "content-length")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0)
-            .min(MAX_PROXY_BODY);
-
-        let body_so_far = if header_end < request_buf.len() {
-            request_buf[header_end..].len()
-        } else {
-            0
+        let mut resp = match read_response(&mut upstream_stream, hostname).await {
+            ReadOutcome::Ok(r) => r,
+            ReadOutcome::ConnectionClosed | ReadOutcome::Error => return,
         };
 
-        if content_length > body_so_far {
-            let remaining = content_length - body_so_far;
-            let mut body_buf = vec![0u8; remaining];
-            if let Err(e) = client_stream.read_exact(&mut body_buf).await {
-                debug!("MITM reading request body for {hostname}: {e}");
-                return;
-            }
-            request_buf.extend_from_slice(&body_buf);
+        // Response hook: optionally transform the response before forwarding.
+        if let Some(h) = handler.as_ref() {
+            h.on_response(&req, &mut resp).await;
         }
 
-        let request_body = if header_end < request_buf.len() {
-            request_buf[header_end..].to_vec()
-        } else {
-            Vec::new()
-        };
-
-        // Forward the complete request to upstream
-        if upstream_stream.write_all(&request_buf).await.is_err() {
+        if client_stream.write_all(&resp.raw_bytes).await.is_err() {
             return;
         }
 
-        // Read response from upstream (with per-read timeout)
-        let mut response_buf = Vec::new();
-        loop {
-            match tokio::time::timeout(UPSTREAM_READ_TIMEOUT, upstream_stream.read(&mut tmp)).await
-            {
-                Ok(Ok(0)) => break, // upstream closed
-                Ok(Ok(n)) => {
-                    response_buf.extend_from_slice(&tmp[..n]);
-                    if response_complete(&response_buf) {
-                        break;
-                    }
-                    if response_buf.len() > MAX_PROXY_BODY {
-                        break;
-                    }
-                }
-                Ok(Err(e)) => {
-                    debug!("MITM read from upstream for {hostname}: {e}");
-                    break;
-                }
-                Err(_) => {
-                    debug!("MITM read from upstream timed out for {hostname}");
-                    break;
-                }
-            }
-        }
-
-        if response_buf.is_empty() {
-            return;
-        }
-
-        // Forward response to client
-        if client_stream.write_all(&response_buf).await.is_err() {
-            return;
-        }
-
-        // Parse response for capture
-        let status_code = parse_status_code(&response_buf);
-        let (resp_headers, resp_header_end) = parse_headers(&response_buf);
-        let content_type = get_header(&resp_headers, "content-type")
-            .unwrap_or_default()
-            .to_string();
-        let response_body = if resp_header_end < response_buf.len() {
-            response_buf[resp_header_end..].to_vec()
-        } else {
-            Vec::new()
-        };
-
-        let duration = now_ms() - start;
-        debug!(
-            method = method.as_str(),
-            url = url.as_str(),
-            status_code,
-            duration_ms = duration,
-            "HTTPS request captured (MITM)"
-        );
-
-        // Check if the connection should stay alive (HTTP/1.1 keep-alive)
-        // Must extract before moving resp_headers into the entry.
-        let connection_close = get_header(&resp_headers, "connection")
+        // Extract keep-alive hint BEFORE recording so we can consume `resp`
+        // via borrow rather than move. Matches original semantics: only
+        // response's Connection: close is honored, request's is ignored.
+        let connection_close = get_header(&resp.headers, "connection")
             .map(|v| v.eq_ignore_ascii_case("close"))
             .unwrap_or(false);
 
-        let max_body = MAX_BODY_SIZE;
-        state.lock().await.entries.push(CapturedEntry {
-            method,
-            url,
-            status_code,
-            content_type,
-            request_size: request_body.len() as u64,
-            response_size: response_body.len() as u64,
-            start_time_ms: start,
-            duration_ms: duration,
-            request_headers: req_headers,
-            response_headers: resp_headers,
-            request_body: if request_body.len() > max_body {
-                request_body[..max_body].to_vec()
-            } else {
-                request_body
-            },
-            response_body: if response_body.len() > max_body {
-                response_body[..max_body].to_vec()
-            } else {
-                response_body
-            },
-            is_https: true,
-        });
+        record_entry(&state, &req, &resp, hostname, is_https, start).await;
 
         if connection_close {
             return;
@@ -743,6 +903,236 @@ async fn handle_http(
         },
         is_https: false,
     });
+}
+
+// ─── Transparent-TCP entry point (iOS Network Extension redirect) ───
+//
+// Used by the `ios_redirect` module to feed already-accepted client streams
+// into the MITM pipeline without a CONNECT preamble. The transparent-TCP
+// path is macOS-only because its only consumer (the iOS NE redirector) is
+// macOS-only; keeping the cfg gate avoids dead-code warnings on Linux.
+
+/// A stream adapter that reads from a pre-captured prefix buffer first,
+/// then delegates to an inner stream. Used by [`handle_transparent_tcp`] to
+/// "un-peek" the first bytes read during TLS/HTTP detection.
+#[cfg(target_os = "macos")]
+struct PrefixedStream<S> {
+    prefix: Vec<u8>,
+    prefix_pos: usize,
+    inner: S,
+}
+
+#[cfg(target_os = "macos")]
+impl<S> PrefixedStream<S> {
+    fn new(prefix: Vec<u8>, inner: S) -> Self {
+        Self {
+            prefix,
+            prefix_pos: 0,
+            inner,
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl<S: AsyncRead + Unpin> AsyncRead for PrefixedStream<S> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        if self.prefix_pos < self.prefix.len() {
+            let remaining = &self.prefix[self.prefix_pos..];
+            let n = remaining.len().min(buf.remaining());
+            buf.put_slice(&remaining[..n]);
+            self.prefix_pos += n;
+            return std::task::Poll::Ready(Ok(()));
+        }
+        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl<S: AsyncWrite + Unpin> AsyncWrite for PrefixedStream<S> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+/// Dial a TCP upstream with the shared connect timeout, logging on failure.
+#[cfg(target_os = "macos")]
+async fn dial_upstream(dst_host: &str, dst_port: u16) -> Option<TcpStream> {
+    let addr = format!("{dst_host}:{dst_port}");
+    match tokio::time::timeout(UPSTREAM_CONNECT_TIMEOUT, TcpStream::connect(&addr)).await {
+        Ok(Ok(s)) => Some(s),
+        Ok(Err(e)) => {
+            debug!("transparent-TCP failed to connect upstream {addr}: {e}");
+            None
+        }
+        Err(_) => {
+            debug!("transparent-TCP timeout connecting upstream {addr}");
+            None
+        }
+    }
+}
+
+/// Handle a transparent-TCP client stream from the iOS Network Extension
+/// redirector (or any other per-process redirect mechanism that produces an
+/// already-accepted, already-routed client stream).
+///
+/// Unlike [`handle_connect`], there's no `CONNECT host:port` preamble — the
+/// destination is known out-of-band (from the redirector's `NewFlow`). But
+/// the macOS Network Extension reports the **resolved IP** as `dst_host`,
+/// not the hostname the client was originally fetching. Using the IP as
+/// SNI would break TLS handshakes with name-based virtual-host servers
+/// (Cloudflare, Fastly, CDN-hosted APIs, ...) — they'd either reject the
+/// connection with HandshakeFailure or return a cert for a different name.
+///
+/// So we peek one byte to distinguish TLS from plain HTTP, then for TLS we
+/// use [`tokio_rustls::LazyConfigAcceptor`] to lazily parse the client's
+/// `ClientHello`, extract the **real hostname from the SNI extension**, and
+/// use that as the upstream `ServerName` + the per-host MITM cert CN. The
+/// client's TLS handshake is then resumed against the minted cert via
+/// [`tokio_rustls::StartHandshake::into_stream`]. Plain HTTP flows pass
+/// through to [`handle_mitm_http`] directly (no SNI needed).
+#[cfg(target_os = "macos")]
+pub(crate) async fn handle_transparent_tcp<S>(
+    mut client: S,
+    dst_host: String,
+    dst_port: u16,
+    state: Arc<Mutex<ProxyState>>,
+    mitm_ca: Arc<MitmAuthority>,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let mut first_byte = [0u8; 1];
+    if let Err(e) = client.read_exact(&mut first_byte).await {
+        debug!(%dst_host, dst_port, "transparent-TCP peek failed: {e}");
+        return;
+    }
+    let chained = PrefixedStream::new(first_byte.to_vec(), client);
+
+    // 0x16 is the TLS record type for a Handshake record — every TLS
+    // ClientHello starts with this byte. Anything else is plain HTTP.
+    if first_byte[0] == 0x16 {
+        handle_transparent_tls(chained, dst_host, dst_port, state, mitm_ca).await;
+    } else {
+        let Some(upstream_tcp) = dial_upstream(&dst_host, dst_port).await else {
+            return;
+        };
+        handle_mitm_http(
+            chained,
+            upstream_tcp,
+            &dst_host,
+            state,
+            /* is_https */ false,
+        )
+        .await;
+    }
+}
+
+/// Lazily read the client's TLS `ClientHello`, extract SNI, dial upstream
+/// with the real hostname as SNI, mint a matching cert, resume the client
+/// handshake, and hand both decrypted streams to [`handle_mitm_http`].
+#[cfg(target_os = "macos")]
+async fn handle_transparent_tls<S>(
+    chained: PrefixedStream<S>,
+    dst_host: String,
+    dst_port: u16,
+    state: Arc<Mutex<ProxyState>>,
+    mitm_ca: Arc<MitmAuthority>,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let start =
+        match tokio_rustls::LazyConfigAcceptor::new(rustls::server::Acceptor::default(), chained)
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                debug!(%dst_host, dst_port, "failed reading TLS ClientHello: {e}");
+                return;
+            }
+        };
+
+    // Prefer the SNI from the ClientHello — that's the hostname the app
+    // actually wanted. Fall back to `dst_host` (likely an IP) if the
+    // client didn't send SNI at all (rare; mostly very old TLS clients).
+    let sni = start
+        .client_hello()
+        .server_name()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| dst_host.clone());
+    debug!(
+        %dst_host, dst_port, %sni,
+        "transparent TLS: extracted SNI from ClientHello"
+    );
+
+    let Some(upstream_tcp) = dial_upstream(&dst_host, dst_port).await else {
+        return;
+    };
+
+    let tls_client_config = state.lock().await.tls_client_config.clone();
+    let server_name = match rustls::pki_types::ServerName::try_from(sni.clone()) {
+        Ok(sn) => sn,
+        Err(e) => {
+            debug!("invalid server name '{sni}': {e}");
+            return;
+        }
+    };
+    let upstream_tls = match TlsConnector::from(tls_client_config)
+        .connect(server_name, upstream_tcp)
+        .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            debug!("upstream TLS handshake failed for {sni}: {e}");
+            return;
+        }
+    };
+
+    // Mint a per-host cert signed by our MITM CA and resume the client
+    // handshake using the ClientHello bytes the acceptor already read.
+    let server_config = match mitm_ca.server_config_for_host(&sni).await {
+        Ok(c) => c,
+        Err(e) => {
+            debug!("cert mint failed for {sni}: {e}");
+            return;
+        }
+    };
+    let client_tls = match start.into_stream(server_config).await {
+        Ok(s) => s,
+        Err(e) => {
+            debug!("client TLS handshake failed for {sni}: {e}");
+            return;
+        }
+    };
+
+    handle_mitm_http(
+        client_tls,
+        upstream_tls,
+        &sni,
+        state,
+        /* is_https */ true,
+    )
+    .await;
 }
 
 /// Parse host and path from an absolute HTTP URL.

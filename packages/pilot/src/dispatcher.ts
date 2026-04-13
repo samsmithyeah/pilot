@@ -44,13 +44,37 @@ import {
   listCompatibleBootedSimulators,
   type ClonedSimulator,
 } from './ios-simulator.js';
-import { resolveTraceConfig } from './trace/types.js';
-import { ensureSudoAccess } from './macos-proxy.js';
 import { freeStaleAgentPort, findPidsOnPort } from './port-utils.js';
 
 const DIM = '\x1b[2m';
 const YELLOW = '\x1b[33m';
 const RESET = '\x1b[0m';
+
+/**
+ * Legacy sudoers file left behind by the pre-PILOT-182 macOS system-proxy
+ * approach. Pilot no longer uses `networksetup` for iOS network capture —
+ * iOS traffic routing is now handled by the macOS Network Extension
+ * redirector inside pilot-core. If this file is still present on the
+ * user's system, it's harmless dead weight; print a one-line deprecation
+ * notice so they know they can remove it.
+ */
+const LEGACY_SUDOERS_FILE = '/etc/sudoers.d/zzz-pilot-networksetup';
+let _legacySudoersNoticeShown = false;
+
+function notifyLegacySudoersIfPresent(): void {
+  if (_legacySudoersNoticeShown) return;
+  _legacySudoersNoticeShown = true;
+  try {
+    if (fs.existsSync(LEGACY_SUDOERS_FILE)) {
+      process.stderr.write(
+        `${YELLOW}[pilot]${RESET} ${DIM}Legacy sudoers file ${LEGACY_SUDOERS_FILE} is no longer used by Pilot.\n` +
+        `        Remove it with: ${RESET}sudo rm ${LEGACY_SUDOERS_FILE}${DIM}\n${RESET}`,
+      );
+    }
+  } catch {
+    // Best-effort — never block a test run over a deprecation hint.
+  }
+}
 
 interface TaggedFile {
   filePath: string
@@ -586,13 +610,12 @@ export async function runParallel(opts: DispatcherOptions, _portOffset = 0): Pro
       tsxBin = fs.existsSync(localTsx) ? localTsx : 'tsx';
     }
 
-    // iOS: pre-acquire sudo access for network capture in the main process
-    // so workers don't each independently prompt for a password.
+    // iOS network capture lifecycle is now fully owned by pilot-core via
+    // the macOS Network Extension redirector (PILOT-182). No host-side
+    // sudo, no `networksetup`, no per-worker collision. One-time legacy
+    // cleanup: warn if the old sudoers rule is still installed.
     if (isIos) {
-      const traceConfig = resolveTraceConfig(config.trace);
-      if (traceConfig.mode !== 'off' && traceConfig.network) {
-        ensureSudoAccess();
-      }
+      notifyLegacySudoersIfPresent();
     }
 
     // Serialize config for workers

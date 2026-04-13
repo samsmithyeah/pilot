@@ -23,7 +23,6 @@ import { shouldRecord, shouldRetain } from './trace/trace-mode.js';
 import { packageTrace } from './trace/trace-packager.js';
 import { TraceCollector, setActiveTraceCollector, withActiveTraceCollector } from './trace/trace-collector.js';
 import type { AnyTraceEvent } from './trace/types.js';
-import { setMacProxy, clearMacProxy } from './macos-proxy.js';
 import { getSimulatorScreenScale } from './ios-simulator.js';
 
 // ─── Result types ───
@@ -599,7 +598,6 @@ async function runSuiteContext(
     const attempt = 0; // TODO: wire up retry count when retries are implemented
     const recording = shouldRecord(traceConfig.mode, attempt);
     let traceCollector: TraceCollector | null = null;
-    let iosProxyService: string | null = null;
 
     if (recording && opts.device) {
       const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pilot-trace-'));
@@ -611,14 +609,12 @@ async function runSuiteContext(
         traceCollector.setActionIndexOffset(beforeAllActionCount);
       }
 
-      // Start network capture if configured
+      // Start network capture if configured. PILOT-182: iOS traffic
+      // routing is now fully owned by pilot-core via the macOS Network
+      // Extension redirector, so there's no CLI-side proxy setup.
       if (traceConfig.network) {
         try {
-          const { proxyPort } = await opts.device._startNetworkCapture();
-          // iOS: configure macOS system proxy (simulators share host network)
-          if (opts.config.platform === 'ios' && proxyPort > 0) {
-            iosProxyService = setMacProxy(proxyPort);
-          }
+          await opts.device._startNetworkCapture();
         } catch (err) {
           // Network capture is best-effort — log so failures aren't invisible
           console.warn(`[pilot] Network capture failed to start: ${err instanceof Error ? err.message : err}`);
@@ -791,12 +787,6 @@ async function runSuiteContext(
 
     // Finalize trace recording
     if (traceCollector && opts.device) {
-      // Clear macOS proxy before stopping capture
-      if (iosProxyService) {
-        clearMacProxy(iosProxyService);
-        iosProxyService = null;
-      }
-
       // Stop network capture and collect raw entries
       let rawNetworkEntries: Awaited<ReturnType<typeof opts.device._stopNetworkCapture>>['entries'] | undefined;
       if (traceConfig.network) {
