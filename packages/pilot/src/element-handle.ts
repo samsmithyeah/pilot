@@ -118,6 +118,22 @@ function boundsContain(
   );
 }
 
+/**
+ * Test whether an error thrown from `_resolveOne` / `_resolveAll` is a
+ * "no match yet" signal that auto-wait loops should swallow and retry,
+ * vs. a genuine infrastructure failure (gRPC error, daemon crash, etc.)
+ * that must propagate so the user sees the real cause.
+ *
+ * Keeps the list of pollable-error message prefixes in sync with the
+ * throw sites in `_resolveOne` and anything `_resolveAll` surfaces for
+ * empty/out-of-range matches.
+ */
+function isPollableNotFoundError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = err.message;
+  return msg.startsWith('Element not found:') || msg.startsWith('nth(');
+}
+
 export class ElementHandle {
   /** @internal */
   readonly _client: PilotGrpcClient;
@@ -447,6 +463,68 @@ export class ElementHandle {
   }
 
   /**
+   * @internal — Poll until the target element is enabled, matching Playwright's
+   * behavior of auto-waiting before actionable operations (tap, longPress).
+   *
+   * Returns an action timeout (milliseconds) for the caller to use when
+   * invoking the underlying action. The goal is to share the original user
+   * timeout across "wait for enabled" + "execute action" instead of doubling
+   * it, BUT with a `MIN_ACTION_BUDGET_MS` floor: if the element becomes
+   * enabled right at the deadline, we still hand the action at least 1 s so
+   * it has time to run. In that edge case the total wall-clock exceeds the
+   * original user timeout by up to `MIN_ACTION_BUDGET_MS`, which is preferred
+   * to reporting success on the wait and then instantly failing the action.
+   *
+   * When `this._timeoutMs === 0` the method skips polling entirely and
+   * returns 0, preserving the pre-auto-wait behavior for callers that
+   * explicitly opt out of the wait.
+   *
+   * Throws if the element is not found or still disabled after the timeout.
+   */
+  private async _waitForEnabled(): Promise<number> {
+    const timeoutMs = this._timeoutMs;
+    // timeoutMs === 0 means "no polling": behave like the pre-auto-wait code
+    // and hand the full zero budget straight to the action.
+    if (timeoutMs === 0) return 0;
+    const MIN_ACTION_BUDGET_MS = 1000;
+    const deadline = Date.now() + timeoutMs;
+    const POLL_MS = 250;
+    let everFound = false;
+    while (true) {
+      try {
+        const findBudget = Math.min(POLL_MS, Math.max(0, deadline - Date.now()));
+        const el = this._hasModifiers()
+          ? await this._resolveOne()
+          : (await this._client.findElement(this._selector, findBudget)).element;
+        if (el) {
+          everFound = true;
+          if (el.enabled) {
+            const remaining = Math.max(0, deadline - Date.now());
+            return Math.min(timeoutMs, Math.max(remaining, MIN_ACTION_BUDGET_MS));
+          }
+        }
+      } catch (err) {
+        // Only swallow "element not found" style errors from _resolveOne
+        // (which throws for empty matches, nth-out-of-range, and filter
+        // mismatches). Any other error — notably gRPC failures like a
+        // crashed daemon — must propagate so the user sees the real
+        // cause instead of a misleading "Element not found after Nms".
+        if (!isPollableNotFoundError(err)) throw err;
+      }
+      if (Date.now() >= deadline) {
+        const desc = this._describe();
+        throw new Error(
+          everFound
+            ? `Element ${desc} is disabled after waiting ${timeoutMs}ms`
+            : `Element ${desc} was not found after waiting ${timeoutMs}ms`,
+        );
+      }
+      const sleepMs = Math.min(POLL_MS, Math.max(0, deadline - Date.now()));
+      if (sleepMs > 0) await new Promise((r) => setTimeout(r, sleepMs));
+    }
+  }
+
+  /**
    * @internal — Get the selector to use for an action. For modified handles,
    * resolves the specific element first and returns a targeting selector.
    */
@@ -584,13 +662,15 @@ export class ElementHandle {
   }
 
   async tap(): Promise<void> {
+    const remaining = await this._waitForEnabled();
     const sel = await this._actionSelector();
-    return this._tracedAction('tap', 'tap', () => this._client.tap(sel, this._timeoutMs), 'Tap failed');
+    return this._tracedAction('tap', 'tap', () => this._client.tap(sel, remaining), 'Tap failed');
   }
 
   async longPress(durationMs?: number): Promise<void> {
+    const remaining = await this._waitForEnabled();
     const sel = await this._actionSelector();
-    return this._tracedAction('longPress', 'tap', () => this._client.longPress(sel, durationMs, this._timeoutMs), 'Long press failed');
+    return this._tracedAction('longPress', 'tap', () => this._client.longPress(sel, durationMs, remaining), 'Long press failed');
   }
 
   async type(text: string): Promise<void> {

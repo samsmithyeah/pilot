@@ -66,6 +66,42 @@ export interface WatchModeContext {
   workers?: number
   /** Device serials for multi-worker mode. */
   deviceSerials?: string[]
+  /**
+   * Per-bucket maps for multi-device-target projects. When set, each
+   * device serial is paired with its bucket's serialized config and
+   * worker dispatch routes files to workers in the matching bucket.
+   */
+  configByDevice?: Map<string, SerializedConfig>
+  bucketByDevice?: Map<string, string>
+  bucketByProject?: Map<string, string>
+}
+
+/**
+ * Update `failedFiles` from the files that actually ran in a single watch-run
+ * and the subset that failed. Exported for unit testing — used by
+ * `executeWaveRunParallel` after all waves complete.
+ *
+ * Invariant: a file that was **not** in `ranFiles` is untouched. This matters
+ * for two cases:
+ *   (a) a file that got skipped because its project's dependency failed — its
+ *       prior failed-state must persist until it actually re-runs;
+ *   (b) a file that isn't part of the current subset at all (e.g. a single
+ *       changed file re-run) — unrelated files' fail state is preserved.
+ *
+ * Cross-wave semantics: when the same file runs in multiple projects in the
+ * same overall run (e.g. Android + iOS), a fail in either wave is sticky —
+ * the call site passes the union of failed paths across all waves, so a pass
+ * on one platform cannot clear a fail on another.
+ */
+export function reconcileFailedFiles(
+  failedFiles: Set<string>,
+  ranFiles: Iterable<string>,
+  failedFilePaths: ReadonlySet<string>,
+): void {
+  for (const f of ranFiles) {
+    if (failedFilePaths.has(f)) failedFiles.add(f);
+    else failedFiles.delete(f);
+  }
 }
 
 // ─── Watch mode coordinator ───
@@ -75,20 +111,24 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
     knownFiles: new Set(ctx.testFiles),
     failedFiles: new Set<string>(),
     lastRunFiles: [] as string[],
-    isInitialRun: true,
     watcher: null as FSWatcher | null,
     activeChild: null as ChildProcess | null,
   };
 
-  // Build file → project lookup for re-runs
-  const fileToProject = new Map<string, ResolvedProject>();
+  // Build file → projects lookup for re-runs. A file can belong to multiple
+  // projects (e.g. Android + iOS sharing `**/*.test.ts`), so we collect all
+  // matching projects per file.
+  const fileToProjects = new Map<string, ResolvedProject[]>();
   if (ctx.projects) {
     for (const project of ctx.projects) {
       for (const file of project.testFiles) {
-        fileToProject.set(file, project);
+        const existing = fileToProjects.get(file);
+        if (existing) existing.push(project);
+        else fileToProjects.set(file, [project]);
       }
     }
   }
+
 
   const serializedConfig: SerializedConfig = {
     timeout: ctx.config.timeout,
@@ -140,6 +180,7 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
     daemonProcess?: ChildProcess
     busy: boolean
     retired?: boolean
+    bucketSignature?: string
   }
 
   const multiWorker = (ctx.workers ?? 1) > 1 && (ctx.deviceSerials?.length ?? 0) > 1;
@@ -158,6 +199,23 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
 
     const numWorkers = Math.min(ctx.workers ?? 2, ctx.deviceSerials.length);
     process.stderr.write(`${DIM}Initializing ${numWorkers} watch worker(s)...${RESET}\n`);
+
+    // Kill stale daemons from a previous watch session that may still be
+    // listening on the worker ports. Without this, waitForReady connects to
+    // the old daemon instead of the freshly spawned one, which means daemon
+    // binary updates (e.g. bug fixes) don't take effect until the user
+    // manually kills the old processes.
+    const daemonPorts = Array.from({ length: numWorkers }, (_, i) => baseDaemonPort + 100 + i);
+    for (const port of daemonPorts) {
+      try {
+        const { execFileSync } = await import('node:child_process');
+        const out = execFileSync('lsof', ['-iTCP:' + port, '-sTCP:LISTEN', '-t'], { encoding: 'utf-8' }).trim();
+        for (const pid of out.split('\n').filter(Boolean)) {
+          try { process.kill(Number(pid), 'SIGTERM'); } catch { /* already gone */ }
+        }
+        if (out) await new Promise((r) => setTimeout(r, 500));
+      } catch { /* no listener — nothing to kill */ }
+    }
 
     for (let i = 0; i < numWorkers; i++) {
       const deviceSerial = ctx.deviceSerials[i];
@@ -190,10 +248,12 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
     agentPort: number,
     daemonBin: string,
   ): Promise<WatchWorkerHandle> {
+    const workerConfig = ctx.configByDevice?.get(deviceSerial) ?? serializedConfig;
+    const workerBucketSig = ctx.bucketByDevice?.get(deviceSerial);
     const daemonProcess = spawn(
       daemonBin,
       ['--port', String(daemonPort), '--agent-port', String(agentPort),
-        ...(ctx.config.platform ? ['--platform', ctx.config.platform] : [])],
+        ...(workerConfig.platform ? ['--platform', workerConfig.platform] : [])],
       { stdio: 'ignore' },
     );
     daemonProcess.on('error', () => { /* handled by waitForReady */ });
@@ -217,6 +277,7 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
 
     const worker: WatchWorkerHandle = {
       id, process: child, deviceSerial, daemonPort, agentPort, daemonProcess, busy: false,
+      bucketSignature: workerBucketSig,
     };
 
     await new Promise<void>((resolve, reject) => {
@@ -251,7 +312,7 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
         workerId: id,
         deviceSerial,
         daemonPort,
-        config: serializedConfig,
+        config: workerConfig,
         screenshotDir: ctx.screenshotDir,
       } satisfies UIWorkerMessage);
     });
@@ -272,10 +333,11 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
   async function dispatchParallel(
     files: TaggedFile[],
     reporter: PilotReporter,
-  ): Promise<{ results: TestResult[]; suites: SuiteResult[] }> {
+  ): Promise<{ results: TestResult[]; suites: SuiteResult[]; failedFilePaths: Set<string> }> {
     const fileQueue = [...files];
     const allResults: TestResult[] = [];
     const allSuites: SuiteResult[] = [];
+    const failedFilePaths = new Set<string>();
     const activeWorkers = watchWorkers.filter((w) => !w.retired);
 
     // Track per-dispatch listeners so we can remove them without
@@ -300,7 +362,20 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
 
         function dispatchNext(worker: WatchWorkerHandle): void {
           if (worker.retired) return;
-          const next = fileQueue.shift();
+          // Multi-bucket: only take a file whose project's bucket matches this worker.
+          let next: TaggedFile | undefined;
+          if (worker.bucketSignature && ctx.bucketByProject) {
+            const matchIdx = fileQueue.findIndex((f) => {
+              if (!f.projectName) return true;
+              const sig = ctx.bucketByProject!.get(f.projectName);
+              return !sig || sig === worker.bucketSignature;
+            });
+            if (matchIdx >= 0) {
+              next = fileQueue.splice(matchIdx, 1)[0];
+            }
+          } else {
+            next = fileQueue.shift();
+          }
           if (!next) {
             worker.busy = false;
             maybeResolve();
@@ -348,6 +423,9 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
                 const suite = deserializeSuiteResult(msg.suite);
                 allResults.push(...results);
                 allSuites.push(suite);
+                if (results.some((r) => r.status === 'failed')) {
+                  failedFilePaths.add(msg.filePath);
+                }
                 reporter.onTestFileEnd?.(msg.filePath, results);
                 dispatchNext(worker);
                 break;
@@ -382,7 +460,7 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
       for (const fn of cleanups) fn();
     }
 
-    return { results: allResults, suites: allSuites };
+    return { results: allResults, suites: allSuites, failedFilePaths };
   }
 
   function cleanupWatchWorkers(): void {
@@ -420,9 +498,7 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
     queue.notifyRunStarted();
     state.lastRunFiles = [...state.knownFiles];
 
-    if (!state.isInitialRun) {
-      process.stdout.write('\x1b[2J\x1b[H'); // clear visible area, cursor to top
-    }
+    process.stdout.write('\x1b[H\x1b[2J\x1b[3J'); // clear screen + scroll-back, cursor to top
 
     const runStart = Date.now();
     const allResults: TestResult[] = [];
@@ -432,7 +508,12 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
     const reporter = new ReporterDispatcher(reporters);
 
     const totalFiles = [...state.knownFiles].length;
-    reporter.onRunStart(ctx.config, totalFiles);
+    // Pass the actual worker count to the reporter so it shows worker/project
+    // tags and suppresses file headers when running in parallel.
+    const reporterConfig = useParallel()
+      ? { ...ctx.config, workers: watchWorkers.length }
+      : ctx.config;
+    reporter.onRunStart(reporterConfig, totalFiles);
 
     if (useParallel()) {
       // Parallel wave-based execution across workers
@@ -532,6 +613,11 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
   ): Promise<void> {
     if (ctx.projectWaves && ctx.projects) {
       const failedProjects = new Set<string>();
+      // Files that ran (across all waves) and files that failed (across all
+      // waves). Used to reconcile state.failedFiles once at the end so a
+      // pass in wave A cannot clobber a fail in wave B.
+      const filesRanThisRun = new Set<string>();
+      const filesFailedThisRun = new Set<string>();
 
       for (const wave of ctx.projectWaves) {
         const waveFiles: TaggedFile[] = [];
@@ -546,6 +632,11 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
               reporter.onTestEnd?.(result);
             }
             failedProjects.add(project.name);
+            // Intentionally not adding these files to `filesRanThisRun`: they
+            // were skipped because their dependency failed, not because they
+            // passed. We must not reconcile their `state.failedFiles` entry.
+            // A file that was already marked failed stays marked failed until
+            // it actually re-runs and we have fresh signal on it.
             continue;
           }
           for (const file of project.testFiles) {
@@ -558,12 +649,11 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
         }
 
         if (waveFiles.length > 0) {
-          const { results, suites } = await dispatchParallel(waveFiles, reporter);
+          const { results, suites, failedFilePaths } = await dispatchParallel(waveFiles, reporter);
           allResults.push(...results);
           allSuites.push(...suites);
-          for (const r of results) {
-            if (r.status === 'failed') state.failedFiles.add(r.fullName);
-          }
+          for (const entry of waveFiles) filesRanThisRun.add(entry.filePath);
+          for (const f of failedFilePaths) filesFailedThisRun.add(f);
           // Track project-level failures
           for (const project of wave) {
             if (failedProjects.has(project.name)) continue;
@@ -573,18 +663,17 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
           }
         }
       }
+
+      reconcileFailedFiles(state.failedFiles, filesRanThisRun, filesFailedThisRun);
     } else {
       // No projects — dispatch all files at once
       const files: TaggedFile[] = [...state.knownFiles].map((f) => ({ filePath: f }));
-      const { results, suites } = await dispatchParallel(files, reporter);
+      const { results, suites, failedFilePaths } = await dispatchParallel(files, reporter);
       allResults.push(...results);
       allSuites.push(...suites);
-      for (const r of results) {
-        if (r.status === 'failed') {
-          state.failedFiles.add(r.fullName);
-        } else {
-          state.failedFiles.delete(r.fullName);
-        }
+      for (const f of state.knownFiles) {
+        if (failedFilePaths.has(f)) state.failedFiles.add(f);
+        else state.failedFiles.delete(f);
       }
     }
   }
@@ -595,7 +684,7 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
     queue.notifyRunStarted();
     state.lastRunFiles = files;
 
-    process.stdout.write('\x1b[2J\x1b[H'); // clear visible area, cursor to top
+    process.stdout.write('\x1b[H\x1b[2J\x1b[3J'); // clear screen + scroll-back, cursor to top
 
     const runStart = Date.now();
     const allResults: TestResult[] = [];
@@ -604,52 +693,62 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
     const reporters = await createReporters(ctx.config.reporter);
     const reporter = new ReporterDispatcher(reporters);
 
-    reporter.onRunStart(ctx.config, files.length);
+    // Expand each file into one TaggedFile per matching project. A single
+    // changed file may belong to both Android and iOS projects and needs to
+    // re-run on both devices.
+    const tagged: TaggedFile[] = [];
+    for (const f of files) {
+      const projects = fileToProjects.get(f);
+      if (projects && projects.length > 0) {
+        for (const project of projects) {
+          tagged.push({
+            filePath: f,
+            projectUseOptions: project.use as RunFileUseOptions | undefined,
+            projectName: project.name !== 'default' ? project.name : undefined,
+          });
+        }
+      } else {
+        tagged.push({ filePath: f });
+      }
+    }
 
-    if (useParallel() && files.length > 1) {
-      // Dispatch multiple changed/failed files across workers
-      const tagged: TaggedFile[] = files.map((f) => {
-        const project = fileToProject.get(f);
-        return {
-          filePath: f,
-          projectUseOptions: project?.use as RunFileUseOptions | undefined,
-          projectName: project && project.name !== 'default' ? project.name : undefined,
-        };
-      });
-      const { results, suites } = await dispatchParallel(tagged, reporter);
+    const reporterConfig = useParallel()
+      ? { ...ctx.config, workers: watchWorkers.length }
+      : ctx.config;
+    reporter.onRunStart(reporterConfig, files.length);
+
+    if (useParallel() && tagged.length > 1) {
+      // Dispatch across persistent workers (parallel)
+      const { results, suites, failedFilePaths } = await dispatchParallel(tagged, reporter);
       allResults.push(...results);
       allSuites.push(...suites);
-      for (const r of results) {
-        if (r.status === 'failed') state.failedFiles.add(r.fullName);
-        else state.failedFiles.delete(r.fullName);
+      for (const f of files) {
+        if (failedFilePaths.has(f)) state.failedFiles.add(f);
+        else state.failedFiles.delete(f);
       }
     } else {
-      // Single file or single-worker — sequential
-      for (const file of files) {
-        const project = fileToProject.get(file);
-        const useOptions = project?.use as RunFileUseOptions | undefined;
-        const projectName = project && project.name !== 'default' ? project.name : undefined;
-
-        reporter.onTestFileStart?.(file);
+      // Single entry or single-worker — sequential
+      for (const entry of tagged) {
+        reporter.onTestFileStart?.(entry.filePath);
 
         try {
-          const { results, suite } = await runFileInChild(file, reporter, useOptions, projectName);
+          const { results, suite } = await runFileInChild(entry.filePath, reporter, entry.projectUseOptions, entry.projectName);
           allResults.push(...results);
           allSuites.push(suite);
-          reporter.onTestFileEnd?.(file, results);
+          reporter.onTestFileEnd?.(entry.filePath, results);
 
           if (results.some((r) => r.status === 'failed')) {
-            state.failedFiles.add(file);
+            state.failedFiles.add(entry.filePath);
           } else {
-            state.failedFiles.delete(file);
+            state.failedFiles.delete(entry.filePath);
           }
         } catch (err) {
-          const { result, suite } = makeErrorResult(file, err, projectName);
+          const { result, suite } = makeErrorResult(entry.filePath, err, entry.projectName);
           allResults.push(result);
           allSuites.push(suite);
           reporter.onTestEnd?.(result);
-          reporter.onTestFileEnd?.(file, [result]);
-          state.failedFiles.add(file);
+          reporter.onTestFileEnd?.(entry.filePath, [result]);
+          state.failedFiles.add(entry.filePath);
         }
       }
     }
@@ -674,7 +773,6 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
     await reporter.onRunEnd(fullResult);
     printStatusLine(allResults, totalDuration);
 
-    state.isInitialRun = false;
     queue.notifyRunFinished();
   }
 
@@ -963,8 +1061,8 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
   process.on('SIGINT', cleanup);
   process.on('SIGTERM', cleanup);
 
-  // Run initial test suite
-  await executeWaveRun();
+  // Don't run tests on startup — wait for a file change or keypress.
+  printStatusLine();
 
   // Keep alive forever — cleaned up via `cleanup()` on quit/signal.
   await new Promise<void>(() => { /* never resolves */ });

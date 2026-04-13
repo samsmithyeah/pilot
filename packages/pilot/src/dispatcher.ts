@@ -79,19 +79,231 @@ export interface DispatcherOptions {
   projects?: import('./project.js').ResolvedProject[]
   /** Pre-sorted project waves from topologicalSort(). Required when `projects` is set. */
   projectWaves?: import('./project.js').ResolvedProject[][]
+  /**
+   * When set, this `runParallel` call is one bucket of a multi-bucket run.
+   * Suppresses the per-bucket "Running N test files across M workers" log
+   * line (the parent prints an aggregated summary instead).
+   */
+  bucketLabel?: string
+  /**
+   * Offset added to local worker indices when reporting test results, so
+   * worker IDs stay globally unique across concurrent buckets.
+   */
+  workerIndexBase?: number
 }
 
 const EXISTING_DEVICE_INIT_TIMEOUT_MS = 90_000;
 const LAUNCHED_EMULATOR_INIT_TIMEOUT_MS = 180_000;
 
 /**
+ * Module-level Ctrl-C coordination. Multi-bucket runs have two concurrent
+ * `runParallel` invocations, each registering its own SIGINT handler. They
+ * share this flag so:
+ *   - the "Interrupted. Shutting down..." message is printed exactly once
+ *   - each bucket's handler can skip its own noise-suppression logic
+ *   - the process exits ONCE, after all handlers have had a chance to run
+ *     their cleanup (emulators, simulators, daemons, workers).
+ *
+ * We defer the actual `process.exit` via `setImmediate` so any other SIGINT
+ * handlers registered for the same event get a chance to finish before the
+ * process terminates. Synchronous `process.exit` inside the first handler
+ * would leak the second bucket's devices.
+ */
+let dispatcherIsShuttingDown = false;
+let shutdownExitScheduled = false;
+function scheduleShutdownExit(signal?: NodeJS.Signals): void {
+  if (shutdownExitScheduled) return;
+  shutdownExitScheduled = true;
+  const code = signal === 'SIGTERM' ? 143 : 130;
+  setImmediate(() => process.exit(code));
+}
+
+/**
+ * True when a SIGINT/SIGTERM handler fired inside any runParallel
+ * invocation. The top-level CLI catch reads this to suppress the
+ * "Fatal error: All workers became unavailable" message when the real
+ * cause was a user-initiated shutdown.
+ */
+export function isDispatcherShuttingDown(): boolean {
+  return dispatcherIsShuttingDown;
+}
+
+/**
+ * Add a base offset to a deserialized test result's workerIndex so concurrent
+ * buckets produce globally-unique worker IDs. No-op when base is undefined/0.
+ */
+function applyWorkerIndexBase<T extends { workerIndex?: number }>(
+  result: T,
+  base: number | undefined,
+): T {
+  if (!base || result.workerIndex == null) return result;
+  return { ...result, workerIndex: result.workerIndex + base };
+}
+
+function applyWorkerIndexBaseToSuite(
+  suite: import('./runner.js').SuiteResult,
+  base: number | undefined,
+): import('./runner.js').SuiteResult {
+  if (!base) return suite;
+  return {
+    ...suite,
+    tests: suite.tests.map((t) => applyWorkerIndexBase(t, base)),
+    suites: suite.suites.map((s) => applyWorkerIndexBaseToSuite(s, base)),
+  };
+}
+
+/**
+ * How many ports each bucket reserves. Big enough to cover any reasonable
+ * worker count without colliding with the next bucket's range.
+ */
+export const PORTS_PER_BUCKET = 50;
+
+/**
+ * A scheduled bucket: one parallel execution on a specific device signature.
+ * `portOffset` ensures each bucket's worker port range doesn't collide with
+ * other buckets running concurrently.
+ */
+export interface BucketPlan {
+  portOffset: number
+  bucketOpts: DispatcherOptions
+}
+
+/**
+ * Pure planning step for multi-bucket dispatch. Partitions projects by
+ * deviceSignature, allocates workers per bucket, filters projectWaves to
+ * each bucket's projects, and assigns each bucket a non-overlapping port
+ * range. Kept side-effect-free so it can be unit-tested without spawning
+ * workers.
+ */
+export function planMultiBucket(
+  opts: DispatcherOptions,
+  allocation: Map<string, number>,
+): BucketPlan[] {
+  const projects = opts.projects ?? [];
+  const bucketsBySig = new Map<string, import('./project.js').ResolvedProject[]>();
+  for (const p of projects) {
+    const arr = bucketsBySig.get(p.deviceSignature) ?? [];
+    arr.push(p);
+    bucketsBySig.set(p.deviceSignature, arr);
+  }
+  const buckets = [...bucketsBySig.values()];
+
+  const plans: BucketPlan[] = [];
+  let workerIndexBase = 0;
+  buckets.forEach((bucketProjects, idx) => {
+    const signature = `${idx}-${bucketProjects[0].deviceSignature}`;
+    const workersForBucket = allocation.get(signature) ?? 0;
+    if (workersForBucket === 0) return;
+
+    const bucketFiles = bucketProjects.flatMap((p) => p.testFiles);
+    const bucketSignature = bucketProjects[0].deviceSignature;
+    const bucketEffective = bucketProjects[0].effectiveConfig;
+
+    // Filter the global wave list to only this bucket's projects, preserving
+    // dependency order. Dependencies that cross bucket boundaries are not
+    // supported — each bucket has its own independent dependency graph.
+    const bucketWaves = (opts.projectWaves ?? [])
+      .map((wave) => wave.filter((p) => p.deviceSignature === bucketSignature))
+      .filter((wave) => wave.length > 0);
+
+    // Short human label for log lines: "android Pixel_6" / "ios iPhone 17".
+    const bucketLabel = bucketSignature.split('|').slice(0, 2).join(' ').trim();
+
+    plans.push({
+      portOffset: idx * PORTS_PER_BUCKET,
+      bucketOpts: {
+        ...opts,
+        config: bucketEffective,
+        testFiles: bucketFiles,
+        workers: workersForBucket,
+        projects: bucketProjects,
+        projectWaves: bucketWaves,
+        bucketLabel,
+        workerIndexBase,
+      },
+    });
+    workerIndexBase += workersForBucket;
+  });
+  return plans;
+}
+
+/**
+ * Merge FullResults from concurrent bucket runs into a single aggregated
+ * result. Wall-time uses max() because buckets ran in parallel; tests and
+ * suites are flat-concatenated in bucket order.
+ */
+export function mergeBucketResults(results: FullResult[]): FullResult {
+  return {
+    status: results.some((r) => r.status === 'failed') ? 'failed' : 'passed',
+    duration: Math.max(...results.map((r) => r.duration), 0),
+    setupDuration: Math.max(...results.map((r) => r.setupDuration ?? 0), 0),
+    tests: results.flatMap((r) => r.tests),
+    suites: results.flatMap((r) => r.suites),
+  };
+}
+
+/**
+ * Split projects by device signature and run each bucket as an independent
+ * parallel execution. Buckets execute concurrently — Android and iOS test
+ * suites can run side-by-side, each with their own daemons and devices.
+ */
+async function runMultiBucket(opts: DispatcherOptions): Promise<FullResult> {
+  const projects = opts.projects ?? [];
+  const bucketsBySig = new Map<string, import('./project.js').ResolvedProject[]>();
+  for (const p of projects) {
+    const arr = bucketsBySig.get(p.deviceSignature) ?? [];
+    arr.push(p);
+    bucketsBySig.set(p.deviceSignature, arr);
+  }
+  const buckets = [...bucketsBySig.values()];
+
+  const { allocateBucketWorkers } = await import('./project.js');
+  const bucketEntries = buckets.map((bucketProjects, i) => ({
+    signature: `${i}-${bucketProjects[0].deviceSignature}`,
+    projects: bucketProjects,
+  }));
+  const allocation = allocateBucketWorkers(opts.workers, bucketEntries);
+  const bucketWorkers = bucketEntries.map((b) => allocation.get(b.signature) ?? 0);
+
+  const totalWorkersAcrossBuckets = bucketWorkers.reduce((s, n) => s + n, 0);
+  process.stderr.write(
+    `${DIM}Running ${opts.testFiles.length} test file(s) across ${totalWorkersAcrossBuckets} worker(s) in ${buckets.length} device bucket(s): ${
+      buckets.map((b, i) => `${b[0].deviceSignature.split('|').slice(0, 2).join(' ')} (${bucketWorkers[i]}w)`).join(', ')
+    }${RESET}\n`,
+  );
+
+  const plans = planMultiBucket(opts, allocation);
+  const results = await Promise.all(
+    plans.map((plan) => runParallel(plan.bucketOpts, plan.portOffset)),
+  );
+  return mergeBucketResults(results);
+}
+
+/**
  * Run test files in parallel across multiple workers/devices.
+ *
+ * When `opts.projects` contains multiple distinct device signatures,
+ * runParallel forks one execution per bucket, each with its own port
+ * range, and runs them concurrently. Results are merged.
+ *
  * Returns a FullResult aggregating all worker results.
  */
-export async function runParallel(opts: DispatcherOptions): Promise<FullResult> {
+export async function runParallel(opts: DispatcherOptions, _portOffset = 0): Promise<FullResult> {
+  // ─── Multi-bucket dispatch: split projects by deviceSignature ───
+  if (opts.projects && opts.projects.length > 0 && _portOffset === 0) {
+    const signatures = new Set(opts.projects.map((p) => p.deviceSignature));
+    if (signatures.size > 1) {
+      return runMultiBucket(opts);
+    }
+  }
+
   const { config, reporter, testFiles } = opts;
   const isIos = config.platform === 'ios';
   const deviceStrategy = resolveDeviceStrategy(config);
+
+  // Display IDs for log lines: globally unique across concurrent buckets.
+  // Internal worker.id stays local (it's tied to daemon-port assignment).
+  const displayWorkerId = (id: number): number => id + (opts.workerIndexBase ?? 0);
 
   // ─── Pre-discovery cleanup ───
   let reusableSimulatorUdids: string[] = [];
@@ -136,8 +348,8 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
     ? path.resolve(config.rootDir, rawBin)
     : rawBin;
 
-  const firstDaemonPort = baseDaemonPort + 1;
-  const firstAgentPort = baseAgentPort + 1;
+  const firstDaemonPort = baseDaemonPort + 1 + _portOffset;
+  const firstAgentPort = baseAgentPort + 1 + _portOffset;
 
   // Free the first agent host port from any leftover stale process before
   // spawning firstDaemon. The common offender is a leftover iOS `PilotAgent`
@@ -325,8 +537,19 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
   let firstDaemonAssigned = false;
 
   // Register signal handlers to ensure cleanup on SIGINT/SIGTERM.
-  // Without this, Ctrl-C leaves orphaned daemons and emulators.
-  const emergencyCleanup = () => {
+  // Without this, Ctrl-C leaves orphaned daemons and emulators. Multi-bucket
+  // runs install one handler per bucket; they coordinate via the module-
+  // level `dispatcherIsShuttingDown` flag so the "Interrupted" message
+  // prints exactly once and the process exits exactly once — but only
+  // AFTER every bucket's cleanup has had a chance to run (see
+  // scheduleShutdownExit). Local cleanup below is idempotent so re-entry
+  // from a second SIGINT is safe.
+  const emergencyCleanup = (signal?: NodeJS.Signals) => {
+    const firstEntry = !dispatcherIsShuttingDown;
+    dispatcherIsShuttingDown = true;
+    if (firstEntry) {
+      process.stderr.write(`\n${DIM}Interrupted. Shutting down...${RESET}\n`);
+    }
     for (const worker of workers) {
       try { worker.process?.kill(); } catch { /* already dead */ }
       try { worker.daemonProcess?.kill(); } catch { /* already dead */ }
@@ -340,9 +563,10 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
     if (clonedSimulators.length > 0) {
       forceCleanupSimulators(clonedSimulators);
     }
+    scheduleShutdownExit(signal);
   };
-  process.on('SIGINT', emergencyCleanup);
-  process.on('SIGTERM', emergencyCleanup);
+  process.on('SIGINT', () => emergencyCleanup('SIGINT'));
+  process.on('SIGTERM', () => emergencyCleanup('SIGTERM'));
 
   try {
     // Fork worker processes.
@@ -405,8 +629,8 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
     // agent port (firstAgentPort) was freed before that spawn.
     const availableWorkerSlots: Array<{ workerId: number; daemonPort: number; agentPort: number }> = [];
     for (let wid = 0; availableWorkerSlots.length < maxUsefulWorkers && availableWorkerSlots.length < deviceSerials.length && wid < maxUsefulWorkers + 10; wid++) {
-      const port = baseDaemonPort + 1 + wid;
-      const agentPort = baseAgentPort + 1 + wid;
+      const port = baseDaemonPort + 1 + _portOffset + wid;
+      const agentPort = baseAgentPort + 1 + _portOffset + wid;
       if (wid === 0) {
         availableWorkerSlots.push({ workerId: availableWorkerSlots.length, daemonPort: port, agentPort });
         continue;
@@ -445,6 +669,7 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
           tsxBin,
           daemonPortOverride: slot.daemonPort,
           agentPortOverride: slot.agentPort,
+          displayWorkerId: displayWorkerId(slot.workerId),
         }),
       );
     }
@@ -481,9 +706,14 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
 
     setupDuration = Date.now() - totalStart;
 
-    process.stderr.write(
-      `${DIM}Running ${testFiles.length} test file(s) across ${workerCount} worker(s)${RESET}\n`,
-    );
+    // Top-level (non-bucket) runs print their own "Running N test files
+    // across M workers" line. When this call is one of N concurrent buckets,
+    // the parent runMultiBucket prints an aggregated line and we stay quiet.
+    if (!opts.bucketLabel) {
+      process.stderr.write(
+        `${DIM}Running ${testFiles.length} test file(s) across ${workerCount} worker(s)${RESET}\n`,
+      );
+    }
 
     // ─── Wave-based work-stealing dispatch ───
     // Build tagged file entries for dispatch. When projects are configured,
@@ -565,6 +795,13 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
 
         function retireWorker(worker: WorkerHandle, reason: string): void {
           if (worker.retired) return;
+          // On Ctrl-C we killed these workers ourselves — don't spam the
+          // user with "became unavailable" warnings that are a consequence
+          // of our own cleanup. emergencyCleanup will force-exit shortly.
+          if (dispatcherIsShuttingDown) {
+            worker.retired = true;
+            return;
+          }
 
           worker.retired = true;
           const inFlightFile = worker.currentFile;
@@ -576,11 +813,11 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
           if (inFlightFile) {
             fileQueue.unshift(inFlightFile);
             process.stderr.write(
-              `${YELLOW}Worker ${worker.id} (${worker.deviceSerial}) became unavailable: ${reason}. Requeueing ${path.basename(inFlightFile.filePath)} and continuing with remaining workers.${RESET}\n`,
+              `${YELLOW}Worker ${displayWorkerId(worker.id)} (${worker.deviceSerial}) became unavailable: ${reason}. Requeueing ${path.basename(inFlightFile.filePath)} and continuing with remaining workers.${RESET}\n`,
             );
           } else {
             process.stderr.write(
-              `${YELLOW}Worker ${worker.id} (${worker.deviceSerial}) became unavailable: ${reason}. Continuing with remaining workers.${RESET}\n`,
+              `${YELLOW}Worker ${displayWorkerId(worker.id)} (${worker.deviceSerial}) became unavailable: ${reason}. Continuing with remaining workers.${RESET}\n`,
             );
           }
 
@@ -612,7 +849,10 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
 
             switch (msg.type) {
               case 'test-end': {
-                const result = deserializeTestResult(msg.result);
+                const result = applyWorkerIndexBase(
+                  deserializeTestResult(msg.result),
+                  opts.workerIndexBase,
+                );
                 reporter.onTestEnd?.(result);
                 break;
               }
@@ -620,8 +860,13 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
                 break;
               case 'file-done': {
                 worker.currentFile = undefined;
-                const results = msg.results.map(deserializeTestResult);
-                const suite = deserializeSuiteResult(msg.suite);
+                const results = msg.results
+                  .map(deserializeTestResult)
+                  .map((r) => applyWorkerIndexBase(r, opts.workerIndexBase));
+                const suite = applyWorkerIndexBaseToSuite(
+                  deserializeSuiteResult(msg.suite),
+                  opts.workerIndexBase,
+                );
                 allResults.push(...results);
                 allSuites.push(suite);
 
@@ -638,6 +883,7 @@ export async function runParallel(opts: DispatcherOptions): Promise<FullResult> 
           });
 
           worker.process.on('exit', (code) => {
+            if (dispatcherIsShuttingDown) return;
             if (code !== 0 && !hasError && !worker.retired) {
               retireWorker(worker, `exited unexpectedly with code ${code}`);
             }
@@ -812,6 +1058,8 @@ interface InitializeWorkerOptions {
   daemonPortOverride?: number
   /** Override the agent port instead of computing baseAgentPort + 1 + workerId. */
   agentPortOverride?: number
+  /** Globally-unique worker ID used in user-facing log lines. */
+  displayWorkerId?: number
 }
 
 async function initializeWorker(opts: InitializeWorkerOptions): Promise<WorkerHandle> {
@@ -901,8 +1149,9 @@ async function initializeWorker(opts: InitializeWorkerOptions): Promise<WorkerHa
           cleanup();
           resolve();
         } else if (msg.type === 'progress' && msg.workerId === worker.id) {
+          const displayId = opts.displayWorkerId ?? worker.id;
           process.stderr.write(
-            `${DIM}  Worker ${worker.id} (${worker.deviceSerial}): ${msg.message}${RESET}\n`,
+            `${DIM}  Worker ${displayId} (${worker.deviceSerial}): ${msg.message}${RESET}\n`,
           );
         } else if (msg.type === 'error' && msg.workerId === worker.id) {
           clearTimeout(timeout);

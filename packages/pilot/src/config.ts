@@ -175,14 +175,60 @@ export interface PilotConfig {
 
 // ─── Per-scope option overrides ───
 
-/** Options that can be overridden per-describe via `test.use()` or per-project via `projects[].use`. */
-export type UseOptions = Partial<Pick<PilotConfig, 'timeout' | 'screenshot' | 'retries' | 'trace'>> & {
+/**
+ * Options that can be overridden per-describe via `test.use()` or per-project
+ * via `projects[].use`.
+ *
+ * Device-shaping fields (`platform`, `avd`, `simulator`, `app`, `apk`, etc.)
+ * may only be overridden at the project level — they have no effect from
+ * `test.use()` since the device is bound to the worker before any test runs.
+ */
+export type UseOptions = Partial<Pick<PilotConfig,
+  | 'timeout'
+  | 'screenshot'
+  | 'retries'
+  | 'trace'
+  | 'platform'
+  | 'device'
+  | 'avd'
+  | 'simulator'
+  | 'apk'
+  | 'app'
+  | 'package'
+  | 'activity'
+  | 'agentApk'
+  | 'agentTestApk'
+  | 'iosXctestrun'
+  | 'deviceStrategy'
+  | 'launchEmulators'
+  | 'resetAppDeepLink'
+  | 'resetAppWaitMs'
+>> & {
   /**
    * Path to a saved app state archive (created by `device.saveAppState()`).
    * When set, the runner restores this state before running tests in the scope,
    * mirroring Playwright's `storageState` pattern for reusable auth.
    */
   appState?: string;
+}
+
+/**
+ * Merge a project's `use` options over the root config to produce the
+ * effective configuration for running that project's tests. Undefined
+ * project values are skipped so they don't clobber root defaults.
+ */
+export function effectiveConfigForProject(
+  config: PilotConfig,
+  project: { use?: UseOptions } | undefined,
+): PilotConfig {
+  if (!project?.use) return config;
+  const merged = { ...config } as unknown as Record<string, unknown>;
+  for (const [key, value] of Object.entries(project.use)) {
+    if (value !== undefined) {
+      merged[key] = value;
+    }
+  }
+  return merged as unknown as PilotConfig;
 }
 
 // ─── Projects ───
@@ -198,6 +244,19 @@ export interface ProjectConfig {
   dependencies?: string[];
   /** Per-project option overrides applied as a base layer under file-level `test.use()`. */
   use?: UseOptions;
+  /**
+   * Number of parallel workers (devices) for this project. When unset,
+   * the global `workers` budget is split proportionally across projects
+   * that don't specify a count. Explicit values are additive — they don't
+   * consume from the global budget.
+   *
+   * @example
+   * projects: [
+   *   { name: 'android', workers: 2, use: { platform: 'android', avd: 'Pixel_6' } },
+   *   { name: 'ios',     workers: 1, use: { platform: 'ios', simulator: 'iPhone 16' } },
+   * ]
+   */
+  workers?: number;
 }
 
 const DEFAULT_CONFIG: PilotConfig = {
@@ -216,7 +275,10 @@ const DEFAULT_CONFIG: PilotConfig = {
  * Define a Pilot configuration. Merges the provided overrides with defaults.
  */
 export function defineConfig(overrides: Partial<PilotConfig> = {}): PilotConfig {
-  return { ...DEFAULT_CONFIG, ...overrides };
+  return withExplicitWorkers(
+    { ...DEFAULT_CONFIG, ...overrides },
+    overrides.workers !== undefined,
+  );
 }
 
 /**
@@ -237,6 +299,50 @@ export function resolveDeviceStrategy(
  * Load pilot.config.ts from the given directory (or cwd). Falls back to
  * defaults if no config file exists.
  */
+/**
+ * Hidden symbol marking whether `workers` was explicitly set by the user
+ * (in the config file or via CLI). Used by the multi-bucket budget warning
+ * to distinguish "user asked for N" from "default of 1".
+ */
+export const EXPLICIT_WORKERS = Symbol.for('pilot.explicitWorkers');
+
+function withExplicitWorkers(config: PilotConfig, explicit: boolean): PilotConfig {
+  Object.defineProperty(config, EXPLICIT_WORKERS, {
+    value: explicit,
+    enumerable: false,
+    writable: true,
+    configurable: true,
+  });
+  return config;
+}
+
+export function isExplicitWorkers(config: PilotConfig): boolean {
+  return (config as unknown as Record<symbol, boolean>)[EXPLICIT_WORKERS] === true;
+}
+
+/**
+ * A user's raw config was "explicit" about workers if either (a) it went
+ * through `defineConfig` which stamped the EXPLICIT_WORKERS symbol, or (b)
+ * it's a plain object literal that directly set `workers`.
+ *
+ * Subtlety: we must check whether the symbol is *present* on `raw`, not
+ * just its value. `defineConfig()` without a `workers` override stamps the
+ * symbol to `false` AND populates `raw.workers = 1` from the default merge.
+ * A naive `symbolValue || workers !== undefined` check would then treat
+ * every `defineConfig({})` without a workers field as explicit — reintroducing
+ * the spurious budget warning the symbol was designed to prevent.
+ *
+ * So: if the symbol is present at all on `raw`, trust its value (defineConfig
+ * already did the right thing). Only fall back to "workers is defined on
+ * raw" when the symbol is missing entirely — meaning the user exported a
+ * raw object literal instead of using defineConfig.
+ */
+function rawHasExplicitWorkers(raw: Partial<PilotConfig>): boolean {
+  const symbolPresent = Object.getOwnPropertySymbols(raw).includes(EXPLICIT_WORKERS);
+  if (symbolPresent) return isExplicitWorkers(raw as PilotConfig);
+  return raw.workers !== undefined;
+}
+
 export async function loadConfig(dir?: string, configFile?: string): Promise<PilotConfig> {
   const root = dir ?? process.cwd();
 
@@ -247,7 +353,10 @@ export async function loadConfig(dir?: string, configFile?: string): Promise<Pil
     }
     const mod = await import(configPath);
     const raw: Partial<PilotConfig> = mod.default ?? mod;
-    return { ...DEFAULT_CONFIG, ...raw, rootDir: raw.rootDir ?? root };
+    return withExplicitWorkers(
+      { ...DEFAULT_CONFIG, ...raw, rootDir: raw.rootDir ?? root },
+      rawHasExplicitWorkers(raw),
+    );
   }
 
   const candidates = ['pilot.config.ts', 'pilot.config.js', 'pilot.config.mjs'];
@@ -259,12 +368,15 @@ export async function loadConfig(dir?: string, configFile?: string): Promise<Pil
         // For .ts files we rely on tsx / ts-node being available at runtime.
         const mod = await import(configPath);
         const raw: Partial<PilotConfig> = mod.default ?? mod;
-        return { ...DEFAULT_CONFIG, ...raw, rootDir: raw.rootDir ?? root };
+        return withExplicitWorkers(
+          { ...DEFAULT_CONFIG, ...raw, rootDir: raw.rootDir ?? root },
+          rawHasExplicitWorkers(raw),
+        );
       } catch (err) {
         console.warn(`Warning: failed to load ${configPath}: ${err}`);
       }
     }
   }
 
-  return { ...DEFAULT_CONFIG, rootDir: root };
+  return withExplicitWorkers({ ...DEFAULT_CONFIG, rootDir: root }, false);
 }
