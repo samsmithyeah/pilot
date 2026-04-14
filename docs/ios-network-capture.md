@@ -144,7 +144,7 @@ Not supported yet. The NE redirector only intercepts traffic originating on the 
 
 ## Security and privacy
 
-- The Pilot CA is generated once per machine and stored under `~/.pilot/ca.pem`. It is installed into the simulator's trust store at the start of each capture session and removed at the end.
+- The Pilot CA is generated once per machine and stored under `~/.pilot/ca.pem`. It is installed into the simulator's trust store at the start of the first capture session and **persists** there across subsequent runs. Pilot does not currently remove the CA at session end — to wipe it, `xcrun simctl erase <udid>` (erases the simulator) or remove the cert manually from the simulator's keychain.
 - Only traffic from the simulator's process tree (as reported by `ps`) is routed through the proxy. Host browsers, IDEs, and other apps are unaffected.
 - The macOS system proxy (`networksetup -setwebproxy`) is never modified. Pilot's PILOT-182 architecture removed all host-level proxy configuration.
 - Request and response bodies are truncated to 1 MiB each in the captured trace to prevent runaway memory usage.

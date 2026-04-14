@@ -1126,11 +1126,12 @@ async fn handle_mitm_http<C, U>(
         // Request hook: optionally transform the request, and optionally
         // short-circuit with a synthetic response (no upstream call at all).
         // After the hook runs we re-serialize `raw_bytes` from the (possibly
-        // mutated) structured fields so downstream writes see the new shape.
+        // mutated) structured fields so the upstream write below sees the
+        // new shape. The synthetic-response branch never forwards upstream,
+        // so we skip the re-encode there — it's wasted work (`record_entry`
+        // reads structured fields, not `raw_bytes`).
         if let Some(h) = handler.as_ref() {
-            let maybe_synth = h.on_request(&mut req).await;
-            req.raw_bytes = reencode_request(&req);
-            if let Some(mut synth) = maybe_synth {
+            if let Some(mut synth) = h.on_request(&mut req).await {
                 if synth.raw_bytes.is_empty() {
                     synth.raw_bytes = reencode_response(&synth);
                 }
@@ -1144,6 +1145,9 @@ async fn handle_mitm_http<C, U>(
                 }
                 continue;
             }
+            // Non-synthetic path: the handler may have mutated `req`, so
+            // reserialize before forwarding upstream.
+            req.raw_bytes = reencode_request(&req);
         }
 
         if upstream_stream.write_all(&req.raw_bytes).await.is_err() {

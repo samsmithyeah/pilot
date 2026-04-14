@@ -375,14 +375,20 @@ impl PilotServiceImpl {
     /// cert, and stop the proxy. Called during graceful shutdown to ensure the
     /// device isn't left with a dangling proxy configuration.
     pub async fn cleanup_network_proxy(&self) {
-        // Drop the iOS redirect handle BEFORE stopping the proxy. Drop
-        // closes the SE control channel (removing this worker's PID
-        // filter), aborts the accept/refresh/launcher tasks, and aborts
-        // any in-flight per-flow handlers. Without this, those background
-        // tasks would keep dispatching new flows into the proxy state
-        // we're about to tear down.
+        // Take the iOS redirect handle out of its slot now so we can
+        // deterministically drop it BEFORE `proxy.stop()` runs below.
+        // Dropping the handle closes the SE control channel (removing
+        // this worker's PID filter), aborts the accept/refresh/launcher
+        // tasks, and aborts any in-flight per-flow handlers. Without
+        // this ordering, those background tasks would keep dispatching
+        // new flows into the proxy state we're about to tear down.
+        //
+        // Note: `let _ios_redirect = ...` would drop at end-of-scope
+        // (after `proxy.stop()`) because Rust drops locals in reverse
+        // declaration order. We rely on an explicit `drop()` call below
+        // to get the right ordering.
         #[cfg(target_os = "macos")]
-        let _ios_redirect = self.ios_redirect.write().await.take();
+        let ios_redirect = self.ios_redirect.write().await.take();
         let proxy = self.network_proxy.write().await.take();
         let serial = self.proxy_device_serial.write().await.take();
         let platform = self.proxy_platform.write().await.take();
@@ -412,6 +418,11 @@ impl PilotServiceImpl {
                 }
             }
         }
+
+        // Explicit drop BEFORE `proxy.stop()` — see comment above. On
+        // non-macOS this no-ops because `ios_redirect` doesn't exist.
+        #[cfg(target_os = "macos")]
+        drop(ios_redirect);
 
         if let Some(proxy) = proxy {
             let _ = proxy.stop().await;
