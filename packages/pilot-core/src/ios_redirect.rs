@@ -55,6 +55,24 @@ const PID_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 /// only a few bytes; this cap rejects anything pathological.
 const NEW_FLOW_MAX_LEN: usize = 64 * 1024;
 
+/// How long to wait for the System Extension to send each part of a flow's
+/// NewFlow handshake (length prefix and proto body). Bounds slow-loris flow
+/// attempts: a connection that the SE accepts but never writes the
+/// handshake on would otherwise pin a flow handler task forever.
+const NEW_FLOW_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Backoff before retrying after a transient `accept()` failure on the
+/// flow listener (e.g. `ConnectionAborted`, `EMFILE`). Short enough that
+/// the loop doesn't add user-visible latency, long enough to give the
+/// kernel a chance to recover under fd pressure.
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
+
+/// How many consecutive `accept()` failures the flow listener tolerates
+/// before giving up. Below this threshold we back off and retry; above
+/// it, the listener is presumed wedged and we tear down the task. With
+/// `ACCEPT_BACKOFF = 50ms` this is roughly 1.5 seconds of solid failures.
+const MAX_CONSECUTIVE_ACCEPT_FAILURES: u32 = 32;
+
 /// How long to wait for the System Extension to connect back to our
 /// listener after spawning the launcher binary.
 const CONTROL_CHANNEL_TIMEOUT: Duration = Duration::from_secs(10);
@@ -245,12 +263,19 @@ impl IosRedirect {
         // its exit here — we wait for the SE to connect back to our listener,
         // which is the real signal that the session is alive. The handle is
         // tracked so `Drop` can abort it if we're torn down before it exits.
+        //
+        // `kill_on_drop(true)` ensures the child process dies if the
+        // tokio task is aborted (via `IosRedirect::drop`) before the
+        // launcher has had a chance to exit on its own — without it,
+        // aborting the task would leave the OS-level child process
+        // orphaned (visible in `ps` as a stranded "Mitmproxy Redirector").
         let launcher_path = listener_path.clone();
         let launcher_handle = tokio::spawn(async move {
             let out = Command::new(&redirector_bin)
                 .arg(&launcher_path)
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true)
                 .output()
                 .await;
             match out {
@@ -418,8 +443,16 @@ async fn pid_refresh_loop(
 /// handle is tracked in `flow_tasks` so [`IosRedirect::drop`] can abort
 /// in-flight handlers during teardown.
 ///
-/// Exits when the listener is dropped by `IosRedirect::drop` (the aborted
-/// task's owned values are released on panic, which drops the listener).
+/// **Transient errors are recoverable.** A single `accept()` failure
+/// (typically `ConnectionAborted` if the SE peer closed before accept
+/// completed, or `EMFILE`/`ENFILE` under fd pressure) used to bring down
+/// the entire capture session — the task exited and no future flow was
+/// ever picked up. We now back off briefly and continue, only giving up
+/// after [`MAX_CONSECUTIVE_ACCEPT_FAILURES`] failures in a row, which
+/// indicates the listener itself is unrecoverable.
+///
+/// The expected exit path is task-abort by `IosRedirect::drop`; a return
+/// from this function only happens for genuinely unrecoverable failures.
 async fn accept_flow_loop(
     listener: UnixListener,
     proxy_state: Arc<Mutex<ProxyState>>,
@@ -427,9 +460,11 @@ async fn accept_flow_loop(
     flow_tasks: FlowTaskList,
 ) {
     let mut accepts_since_gc: usize = 0;
+    let mut consecutive_failures: u32 = 0;
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
+                consecutive_failures = 0;
                 let state = proxy_state.clone();
                 let ca = mitm_ca.clone();
                 let handle = tokio::spawn(async move {
@@ -451,8 +486,16 @@ async fn accept_flow_loop(
                 }
             }
             Err(e) => {
-                debug!("flow accept loop exiting: {e}");
-                return;
+                consecutive_failures += 1;
+                if consecutive_failures >= MAX_CONSECUTIVE_ACCEPT_FAILURES {
+                    error!(
+                        consecutive_failures,
+                        "iOS redirect accept loop giving up after repeated failures: {e}"
+                    );
+                    return;
+                }
+                warn!("iOS redirect accept failed (will retry): {e}");
+                tokio::time::sleep(ACCEPT_BACKOFF).await;
             }
         }
     }
@@ -469,16 +512,23 @@ async fn handle_flow(
 ) -> Result<()> {
     // Manual u32_be + read_exact (not Framed::into_inner) — avoids the
     // codec-buffer-leftover hazard. After this, `stream` is positioned
-    // exactly at the first TCP byte with nothing buffered.
-    let len = stream.read_u32().await.context("reading NewFlow length")? as usize;
+    // exactly at the first TCP byte with nothing buffered. Both reads
+    // are bounded by NEW_FLOW_READ_TIMEOUT so a misbehaving SE that
+    // dials in but never writes the handshake cannot park this task.
+    let len = match timeout(NEW_FLOW_READ_TIMEOUT, stream.read_u32()).await {
+        Ok(r) => r.context("reading NewFlow length")? as usize,
+        Err(_) => bail!("timed out reading NewFlow length"),
+    };
     if len > NEW_FLOW_MAX_LEN {
         bail!("NewFlow handshake too large: {len} bytes");
     }
     let mut buf = vec![0u8; len];
-    stream
-        .read_exact(&mut buf)
-        .await
-        .context("reading NewFlow body")?;
+    match timeout(NEW_FLOW_READ_TIMEOUT, stream.read_exact(&mut buf)).await {
+        Ok(r) => {
+            r.context("reading NewFlow body")?;
+        }
+        Err(_) => bail!("timed out reading NewFlow body"),
+    }
     let new_flow = ipc::NewFlow::decode(&*buf).context("decoding NewFlow")?;
 
     let Some(msg) = new_flow.message else {

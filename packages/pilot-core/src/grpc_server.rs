@@ -30,8 +30,6 @@ pub struct PilotServiceImpl {
     proxy_reverse_port: Arc<RwLock<Option<u16>>>,
     /// On-device path of the installed CA cert (for cleanup, Android only).
     proxy_ca_cert_path: Arc<RwLock<Option<String>>>,
-    /// macOS network service name used for proxy (for cleanup, iOS only).
-    proxy_network_service: Arc<RwLock<Option<String>>>,
     /// iOS Network Extension redirector session (for cleanup, iOS simulators only).
     #[cfg(target_os = "macos")]
     ios_redirect: Arc<RwLock<Option<crate::ios_redirect::IosRedirect>>>,
@@ -59,7 +57,6 @@ impl PilotServiceImpl {
             proxy_platform: Arc::new(RwLock::new(None)),
             proxy_reverse_port: Arc::new(RwLock::new(None)),
             proxy_ca_cert_path: Arc::new(RwLock::new(None)),
-            proxy_network_service: Arc::new(RwLock::new(None)),
             #[cfg(target_os = "macos")]
             ios_redirect: Arc::new(RwLock::new(None)),
             ios_agent_config: Arc::new(RwLock::new(None)),
@@ -378,12 +375,19 @@ impl PilotServiceImpl {
     /// cert, and stop the proxy. Called during graceful shutdown to ensure the
     /// device isn't left with a dangling proxy configuration.
     pub async fn cleanup_network_proxy(&self) {
+        // Drop the iOS redirect handle BEFORE stopping the proxy. Drop
+        // closes the SE control channel (removing this worker's PID
+        // filter), aborts the accept/refresh/launcher tasks, and aborts
+        // any in-flight per-flow handlers. Without this, those background
+        // tasks would keep dispatching new flows into the proxy state
+        // we're about to tear down.
+        #[cfg(target_os = "macos")]
+        let _ios_redirect = self.ios_redirect.write().await.take();
         let proxy = self.network_proxy.write().await.take();
         let serial = self.proxy_device_serial.write().await.take();
         let platform = self.proxy_platform.write().await.take();
         let reverse_port = self.proxy_reverse_port.write().await.take();
         let ca_cert_path = self.proxy_ca_cert_path.write().await.take();
-        let _network_service = self.proxy_network_service.write().await.take();
 
         if let Some(serial) = &serial {
             match platform {
@@ -2730,6 +2734,14 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
                 // of a global system proxy. Per-PID filtering gives each
                 // worker daemon full isolation from other concurrent
                 // workers (and from the user's host traffic).
+                //
+                // If the redirector fails to start (SE not approved, brew
+                // missing, launcher binary unreachable, …), there is NO
+                // path for traffic to reach the proxy — capture is
+                // effectively dead. Early-return `success: false` so the
+                // runner prints "Network capture disabled" instead of the
+                // misleading "warning". The local `proxy` is dropped at
+                // end of scope, releasing the TCP listener.
                 #[cfg(target_os = "macos")]
                 {
                     match crate::ios_redirect::IosRedirect::start(
@@ -2747,19 +2759,26 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
                             );
                         }
                         Err(e) => {
-                            let msg = format!(
-                                "Failed to start iOS Network Extension redirector: {e} — iOS network capture will not work"
-                            );
+                            let msg =
+                                format!("Failed to start iOS Network Extension redirector: {e}");
                             error!("{msg}");
-                            warning = Some(msg);
+                            return Ok(Response::new(proto::StartNetworkCaptureResponse {
+                                request_id,
+                                success: false,
+                                proxy_port: 0,
+                                error_message: msg,
+                            }));
                         }
                     }
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
-                    let msg = "iOS network capture requires macOS".to_string();
-                    error!("{msg}");
-                    warning = Some(msg);
+                    return Ok(Response::new(proto::StartNetworkCaptureResponse {
+                        request_id,
+                        success: false,
+                        proxy_port: 0,
+                        error_message: "iOS network capture requires macOS".to_string(),
+                    }));
                 }
                 let _ = host_port; // hint to Linux: don't complain about unused var
             }
@@ -2821,7 +2840,6 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         let platform = self.proxy_platform.write().await.take();
         let reverse_port = self.proxy_reverse_port.write().await.take();
         let ca_cert_path = self.proxy_ca_cert_path.write().await.take();
-        let _network_service = self.proxy_network_service.write().await.take();
         if let Some(serial) = &serial {
             match platform {
                 Some(Platform::Ios) => {

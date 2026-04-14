@@ -1276,10 +1276,25 @@ pub(crate) async fn handle_transparent_tcp<S>(
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    // Bounded peek read: a redirected client that opens a TCP connection
+    // and then never sends bytes (slow-loris, broken keep-alive probe,
+    // background URLSession idle slot) would otherwise park this task
+    // forever — and every parked task pins an entry in
+    // `IosRedirect::flow_tasks`. The CONNECT-tunnel handlers use
+    // CLIENT_READ_TIMEOUT for the same reason; the transparent path
+    // must not silently drop it.
     let mut peek = [0u8; 3];
-    if let Err(e) = client.read_exact(&mut peek).await {
-        debug!(%dst_host, dst_port, "transparent-TCP peek failed: {e}");
-        return;
+    let peek_res = tokio::time::timeout(CLIENT_READ_TIMEOUT, client.read_exact(&mut peek)).await;
+    match peek_res {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => {
+            debug!(%dst_host, dst_port, "transparent-TCP peek failed: {e}");
+            return;
+        }
+        Err(_) => {
+            debug!(%dst_host, dst_port, "transparent-TCP peek timed out");
+            return;
+        }
     }
     // Validate the full 3-byte TLS record prefix:
     //   peek[0] = 0x16 → TLS ContentType.Handshake
@@ -1320,16 +1335,25 @@ async fn handle_transparent_tls<S>(
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let start =
-        match tokio_rustls::LazyConfigAcceptor::new(rustls::server::Acceptor::default(), chained)
-            .await
-        {
-            Ok(s) => s,
-            Err(e) => {
-                debug!(%dst_host, dst_port, "failed reading TLS ClientHello: {e}");
-                return;
-            }
-        };
+    // Bounded ClientHello read for the same reason as the peek above:
+    // a client that sends `0x16 0x03 0x01` and then stalls mid-handshake
+    // would park this task indefinitely.
+    let start = match tokio::time::timeout(
+        CLIENT_READ_TIMEOUT,
+        tokio_rustls::LazyConfigAcceptor::new(rustls::server::Acceptor::default(), chained),
+    )
+    .await
+    {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            debug!(%dst_host, dst_port, "failed reading TLS ClientHello: {e}");
+            return;
+        }
+        Err(_) => {
+            debug!(%dst_host, dst_port, "timed out reading TLS ClientHello");
+            return;
+        }
+    };
 
     // Prefer the SNI from the ClientHello — that's the hostname the app
     // actually wanted. Fall back to `dst_host` (likely an IP) if the
