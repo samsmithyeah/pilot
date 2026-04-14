@@ -408,6 +408,33 @@ fn find_header_terminator(buf: &[u8], scan_cursor: usize) -> Option<usize> {
         .map(|pos| start + pos + 4)
 }
 
+/// Returns true if any `Transfer-Encoding` header carries `chunked` as
+/// one of its comma-separated transfer codings. Walks every matching
+/// header (HTTP/1.1 allows multiple), splits each on `,`, trims, and
+/// compares each token case-insensitively against exactly `chunked`.
+///
+/// Strict token matching defends against header-smuggling tricks that
+/// exploit a substring search: `Transfer-Encoding: notchunked` or
+/// `Transfer-Encoding: chunkedz` would have matched a naive
+/// `contains("chunked")` check. See PILOT-182 review #5 finding SF3.
+fn is_chunked_transfer_encoding(headers: &[(String, String)]) -> bool {
+    headers
+        .iter()
+        .filter(|(k, _)| k.eq_ignore_ascii_case("transfer-encoding"))
+        .flat_map(|(_, v)| v.split(','))
+        .any(|token| token.trim().eq_ignore_ascii_case("chunked"))
+}
+
+/// Returns true if the headers carry a `Content-Length`. Used alongside
+/// [`is_chunked_transfer_encoding`] to detect the smuggling-bait case
+/// where both framing headers are present — RFC 7230 §3.3.3 requires
+/// servers to reject such messages.
+fn has_content_length(headers: &[(String, String)]) -> bool {
+    headers
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+}
+
 /// Read a full HTTP/1.x request (headers + body) from a client stream,
 /// returning structured request data plus the raw bytes for forwarding.
 ///
@@ -418,6 +445,9 @@ fn find_header_terminator(buf: &[u8], scan_cursor: usize) -> Option<usize> {
 ///     If `N > MAX_PROXY_BODY`, the connection is rejected (closing) rather
 ///     than silently truncating, which would desync the connection.
 ///   - Neither header → no body (matches GET/HEAD/OPTIONS/DELETE without body).
+///
+/// Requests carrying BOTH `Transfer-Encoding: chunked` AND `Content-Length`
+/// are rejected as smuggling-bait per RFC 7230 §3.3.3.
 async fn read_request<R>(client: &mut R, hostname: &str) -> ReadOutcome<ParsedRequest>
 where
     R: AsyncRead + Unpin,
@@ -465,10 +495,21 @@ where
     // recompute here to get the structured Vec<(String, String)>.
     let (headers, _) = parse_headers(&buf[..header_end]);
 
-    // RFC 7230: Transfer-Encoding: chunked takes precedence over Content-Length.
-    let is_chunked = headers.iter().any(|(k, v)| {
-        k.eq_ignore_ascii_case("transfer-encoding") && v.to_lowercase().contains("chunked")
-    });
+    let is_chunked = is_chunked_transfer_encoding(&headers);
+    let has_cl = has_content_length(&headers);
+
+    // RFC 7230 §3.3.3: reject messages bearing BOTH Transfer-Encoding and
+    // Content-Length. An upstream that interprets one header while we
+    // interpret the other is a request-smuggling vector — forwarding the
+    // original conflicting headers verbatim turns this proxy into a
+    // smuggling relay. (PILOT-182 review #5 finding SF1.)
+    if is_chunked && has_cl {
+        debug!(
+            "MITM rejecting request with both Transfer-Encoding and Content-Length \
+             for {hostname} (RFC 7230 §3.3.3)"
+        );
+        return ReadOutcome::Error;
+    }
 
     if is_chunked {
         if let Err(e) = read_chunked_body(client, &mut buf, header_end, hostname).await {
@@ -592,6 +633,17 @@ where
 
     /// Helper: ensure buf contains a complete `\r\n`-terminated line starting
     /// at `cursor`. Returns the index of the byte AFTER the terminator.
+    ///
+    /// **Reads exactly one byte at a time** (via `read_u8`) rather than
+    /// pulling a larger chunk off the stream. This is slow per-byte but
+    /// correct: it guarantees we never pull bytes belonging to a subsequent
+    /// pipelined request into our buffer. Chunk-size lines and trailer
+    /// lines are short (typically <20 bytes total per chunked body), so
+    /// the extra syscalls are negligible in the PILOT-182 use case.
+    ///
+    /// A prior implementation used a 256-byte buffered read here, which
+    /// silently over-read into the next pipelined request on a keep-alive
+    /// connection. See PILOT-182 review #5 finding "MUST FIX".
     async fn read_line<R>(
         client: &mut R,
         buf: &mut Vec<u8>,
@@ -605,15 +657,18 @@ where
             if let Some(p) = buf[cursor..].windows(2).position(|w| w == b"\r\n") {
                 return Ok(cursor + p + 2);
             }
-            // Need more bytes — read one more chunk.
+            // Need more bytes. Read exactly one to preserve the "no over-read"
+            // invariant: the next pipelined request's bytes must stay in the
+            // kernel socket buffer, not our Vec<u8>.
             if buf.len() > MAX_PROXY_BODY {
                 debug!("chunked control line too long for {hostname}");
                 return Err("chunked control line too long");
             }
-            let mut chunk = [0u8; 256];
-            match tokio::time::timeout(CLIENT_READ_TIMEOUT, client.read(&mut chunk)).await {
-                Ok(Ok(0)) => return Err("client closed mid-chunked-control-line"),
-                Ok(Ok(n)) => buf.extend_from_slice(&chunk[..n]),
+            match tokio::time::timeout(CLIENT_READ_TIMEOUT, client.read_u8()).await {
+                Ok(Ok(b)) => buf.push(b),
+                Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    return Err("client closed mid-chunked-control-line");
+                }
                 Ok(Err(_)) => return Err("read error mid-chunked-control-line"),
                 Err(_) => return Err("chunked control line read timed out"),
             }
@@ -642,14 +697,31 @@ where
                 }
                 cursor = trailer_end;
             }
-            // Mark end of body; let the caller observe `buf` past `cursor`
-            // as zero (no over-read).
-            let _ = cursor;
+            // Truncate any over-read tail that the caller's header-phase
+            // read pulled off the wire past `cursor`. The outer header
+            // reader uses an 8 KB buffered read, so when headers are
+            // found in the initial read, `buf` may contain bytes past the
+            // `\r\n\r\n` terminator — for a chunked request, those bytes
+            // are either part of the chunked body (consumed above as
+            // cursor advances) or part of a subsequent pipelined request
+            // (rare in Pilot's mobile-test use case — ordinary URLSession /
+            // fetch / axios clients don't pipeline chunked uploads).
+            //
+            // After this truncate, `req.raw_bytes` written upstream
+            // contains exactly the first request's bytes, with no garbage
+            // tail. Any pipelined next-request bytes are dropped
+            // (documented limitation) rather than leaked upstream.
+            buf.truncate(cursor);
             return Ok(());
         }
 
-        // Read `chunk_size` data bytes + the trailing CRLF.
-        let need_until = cursor + chunk_size + 2;
+        // Read `chunk_size` data bytes + the trailing CRLF, using checked
+        // arithmetic to reject attacker-supplied `chunk_size == usize::MAX`
+        // from wrapping. (PILOT-182 review #5 finding SF2.)
+        let need_until = cursor
+            .checked_add(chunk_size)
+            .and_then(|v| v.checked_add(2))
+            .ok_or("chunk size overflow")?;
         ensure_at_least(client, buf, need_until, hostname).await?;
         // Sanity-check the trailing CRLF is actually CRLF.
         if &buf[need_until - 2..need_until] != b"\r\n" {
@@ -711,14 +783,22 @@ where
                         let status = parse_status_code(&buf);
                         cached_status = status;
 
-                        let is_chunked = headers.iter().any(|(k, v)| {
-                            k.eq_ignore_ascii_case("transfer-encoding")
-                                && v.to_lowercase().contains("chunked")
-                        });
+                        let is_chunked = is_chunked_transfer_encoding(&headers);
                         let content_length: Option<usize> = headers
                             .iter()
                             .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
                             .and_then(|(_, v)| v.trim().parse::<usize>().ok());
+
+                        // RFC 7230 §3.3.3: reject responses with both framing
+                        // headers — smuggling vector the same way as requests.
+                        // (PILOT-182 review #5 finding SF1.)
+                        if is_chunked && content_length.is_some() {
+                            debug!(
+                                "MITM rejecting response with both Transfer-Encoding \
+                                 and Content-Length for {hostname} (RFC 7230 §3.3.3)"
+                            );
+                            return ReadOutcome::Error;
+                        }
 
                         cached_headers = headers;
 
@@ -1108,10 +1188,14 @@ fn response_complete(buf: &[u8]) -> bool {
     let header_str = String::from_utf8_lossy(header_bytes);
     let header_lower = header_str.to_lowercase();
 
-    // Check for chunked transfer encoding
-    let is_chunked = header_lower
-        .lines()
-        .any(|line| line.starts_with("transfer-encoding:") && line.contains("chunked"));
+    // Check for chunked transfer encoding (strict token matching — see
+    // [`is_chunked_transfer_encoding`] for the precise-match rationale).
+    let is_chunked = header_lower.lines().any(|line| {
+        line.strip_prefix("transfer-encoding:").is_some_and(|rest| {
+            rest.split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("chunked"))
+        })
+    });
 
     if is_chunked {
         // Chunked terminator: "0\r\n" final chunk + optional trailers + "\r\n\r\n".
@@ -2201,5 +2285,196 @@ mod tests {
         let mut server = server_side;
         let outcome = read_response(&mut server, "example.com").await;
         assert!(matches!(outcome, ReadOutcome::Error));
+    }
+
+    // ─── Review #5 fixes: TE/CL smuggling, overflow, precise chunked match ───
+
+    #[test]
+    fn is_chunked_transfer_encoding_basic() {
+        let h = vec![("Transfer-Encoding".to_string(), "chunked".to_string())];
+        assert!(is_chunked_transfer_encoding(&h));
+    }
+
+    #[test]
+    fn is_chunked_transfer_encoding_case_insensitive() {
+        let h = vec![("transfer-encoding".to_string(), "Chunked".to_string())];
+        assert!(is_chunked_transfer_encoding(&h));
+        let h = vec![("TRANSFER-ENCODING".to_string(), "CHUNKED".to_string())];
+        assert!(is_chunked_transfer_encoding(&h));
+    }
+
+    #[test]
+    fn is_chunked_transfer_encoding_rejects_substring_tricks() {
+        // Regression tests for PILOT-182 review #5 finding SF3: the old
+        // `contains("chunked")` check accepted these.
+        let h = vec![("Transfer-Encoding".to_string(), "notchunked".to_string())];
+        assert!(!is_chunked_transfer_encoding(&h));
+        let h = vec![("Transfer-Encoding".to_string(), "chunkedz".to_string())];
+        assert!(!is_chunked_transfer_encoding(&h));
+        let h = vec![("Transfer-Encoding".to_string(), "Xchunked".to_string())];
+        assert!(!is_chunked_transfer_encoding(&h));
+    }
+
+    #[test]
+    fn is_chunked_transfer_encoding_handles_multiple_codings() {
+        // Per RFC 7230 §3.3.1, chunked must be the final coding when
+        // present, but any `chunked` token in any comma-separated list
+        // is treated as chunked framing for our MITM purposes.
+        let h = vec![("Transfer-Encoding".to_string(), "gzip, chunked".to_string())];
+        assert!(is_chunked_transfer_encoding(&h));
+        let h = vec![("Transfer-Encoding".to_string(), "chunked, gzip".to_string())];
+        assert!(is_chunked_transfer_encoding(&h));
+        let h = vec![("Transfer-Encoding".to_string(), "gzip".to_string())];
+        assert!(!is_chunked_transfer_encoding(&h));
+    }
+
+    #[test]
+    fn is_chunked_transfer_encoding_walks_multiple_headers() {
+        // HTTP/1.1 allows multiple TE headers; any of them containing
+        // `chunked` signals chunked framing.
+        let h = vec![
+            ("Transfer-Encoding".to_string(), "gzip".to_string()),
+            ("Transfer-Encoding".to_string(), "chunked".to_string()),
+        ];
+        assert!(is_chunked_transfer_encoding(&h));
+    }
+
+    #[tokio::test]
+    async fn read_request_rejects_te_and_cl_conflict() {
+        // Regression test for PILOT-182 review #5 finding SF1 (HTTP
+        // request smuggling via conflicting framing headers).
+        let wire = b"POST /api HTTP/1.1\r\n\
+                     Host: example.com\r\n\
+                     Transfer-Encoding: chunked\r\n\
+                     Content-Length: 5\r\n\
+                     \r\n\
+                     0\r\n\r\n";
+        let outcome = read_request_outcome(wire).await;
+        assert!(
+            matches!(outcome, ReadOutcome::Error),
+            "expected Error for TE+CL conflict",
+        );
+    }
+
+    #[tokio::test]
+    async fn read_response_rejects_te_and_cl_conflict() {
+        let wire = b"HTTP/1.1 200 OK\r\n\
+                     Transfer-Encoding: chunked\r\n\
+                     Content-Length: 5\r\n\
+                     \r\n\
+                     0\r\n\r\n";
+        use tokio::io::AsyncWriteExt;
+        let (mut client_side, server_side) = tokio::io::duplex(8192);
+        client_side.write_all(wire).await.unwrap();
+        client_side.shutdown().await.unwrap();
+        drop(client_side);
+        let mut server = server_side;
+        let outcome = read_response(&mut server, "example.com").await;
+        assert!(matches!(outcome, ReadOutcome::Error));
+    }
+
+    #[tokio::test]
+    async fn read_request_rejects_notchunked_transfer_encoding() {
+        // Regression test for PILOT-182 review #5 finding SF3: the old
+        // substring match treated `notchunked` as chunked, which is both
+        // wrong on the wire and a potential smuggling gadget. With the
+        // precise token match, `notchunked` isn't a recognised coding, so
+        // the request falls through to the non-chunked path and — because
+        // there's no Content-Length and this isn't a recognised coding —
+        // is read as a zero-byte body.
+        let wire = b"POST /api HTTP/1.1\r\n\
+                     Host: example.com\r\n\
+                     Transfer-Encoding: notchunked\r\n\
+                     \r\n";
+        let req = read_request_once(wire).await;
+        assert!(req.body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_request_chunked_with_compression_coding() {
+        // `Transfer-Encoding: gzip, chunked` — valid per RFC 7230. The
+        // body should be parsed as chunked (we don't decompress).
+        let wire = b"POST /api HTTP/1.1\r\n\
+                     Host: example.com\r\n\
+                     Transfer-Encoding: gzip, chunked\r\n\
+                     \r\n\
+                     5\r\nhello\r\n\
+                     0\r\n\r\n";
+        let req = read_request_once(wire).await;
+        assert_eq!(req.method, "POST");
+        assert_eq!(req.body, b"5\r\nhello\r\n0\r\n\r\n");
+    }
+
+    #[tokio::test]
+    async fn read_request_chunked_overflow_size_rejected() {
+        // Regression test for PILOT-182 review #5 finding SF2: a chunk
+        // size of usize::MAX in hex would have wrapped `cursor +
+        // chunk_size + 2` in release builds. With checked_add, this is
+        // now rejected with an explicit "chunk size overflow" error.
+        let wire = b"POST /api HTTP/1.1\r\n\
+                     Transfer-Encoding: chunked\r\n\
+                     \r\n\
+                     ffffffffffffffff\r\n";
+        let outcome = read_request_outcome(wire).await;
+        assert!(matches!(outcome, ReadOutcome::Error));
+    }
+
+    #[tokio::test]
+    async fn read_request_chunked_does_not_leak_pipelined_tail_into_body() {
+        // Regression test for PILOT-182 review #5 MUST FIX.
+        //
+        // Before the fix, `read_chunked_body::read_line` used a 256-byte
+        // buffered read, and before that the header-phase read of
+        // `read_request` could pull bytes from the next pipelined
+        // request into `buf`. Those bytes ended up in `req.body` and
+        // were forwarded upstream as garbage tail after the first
+        // request's body — a request-smuggling / desync symptom.
+        //
+        // With the `buf.truncate(cursor)` fix at the end of
+        // `read_chunked_body`, `req.body` and `req.raw_bytes` contain
+        // exactly the first request's bytes with no pipelined leakage.
+        //
+        // Note: in Pilot's use case (mobile-test MITM proxy, URLSession /
+        // fetch / axios clients) HTTP/1.1 pipelining of chunked uploads
+        // is extraordinarily rare — the pipelined second request being
+        // dropped from the wire is a documented acceptable limitation.
+        // This test locks in the "no garbage forwarded upstream" invariant.
+        use tokio::io::AsyncWriteExt;
+        let first_req =
+            b"POST /first HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n\
+              0\r\n\r\n";
+        let second_req = b"GET /second HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let mut wire = Vec::new();
+        wire.extend_from_slice(first_req);
+        wire.extend_from_slice(second_req);
+
+        let (mut client_side, server_side) = tokio::io::duplex(8192);
+        client_side.write_all(&wire).await.unwrap();
+        client_side.shutdown().await.unwrap();
+        drop(client_side);
+        let mut server = server_side;
+        let first = match read_request(&mut server, "example.com").await {
+            ReadOutcome::Ok(r) => r,
+            other => panic!(
+                "first request outcome: {:?}",
+                std::mem::discriminant(&other)
+            ),
+        };
+        assert_eq!(first.method, "POST");
+        assert_eq!(first.path, "/first");
+        // The body must contain EXACTLY the chunked terminator.
+        assert_eq!(first.body, b"0\r\n\r\n");
+        // Neither the body nor the raw forwarded bytes may contain any
+        // trace of the second pipelined request.
+        assert!(
+            !first.body.windows(4).any(|w| w == b"GET "),
+            "second request bytes leaked into first.body",
+        );
+        assert!(
+            !first.raw_bytes.windows(4).any(|w| w == b"GET "),
+            "second request bytes leaked into first.raw_bytes",
+        );
+        // raw_bytes must end with the chunked terminator, nothing more.
+        assert!(first.raw_bytes.ends_with(b"0\r\n\r\n"));
     }
 }
