@@ -583,8 +583,19 @@ where
                     }) => {
                         let he = *header_end;
                         let start = (*chunked_scan_cursor).saturating_sub(4).max(he);
-                        let done = buf[start..].windows(5).any(|w| w == b"\r\n0\r\n")
-                            && buf.ends_with(b"\r\n\r\n");
+                        // Chunked terminator is a `0\r\n` final-size chunk followed
+                        // by zero or more trailers and a final `\r\n`. The `0\r\n`
+                        // marker can appear either at the start of the body (an
+                        // empty-body chunked response such as a 200 to a HEAD-ish
+                        // poll endpoint) OR preceded by the final `\r\n` of the
+                        // previous data chunk (the common case). The starts_with
+                        // check is load-bearing — `windows(5)` on `b"\r\n0\r\n"`
+                        // alone misses the empty-body case because there's no
+                        // leading `\r\n` before the `0`.
+                        let body = &buf[he..];
+                        let has_zero_chunk = body.starts_with(b"0\r\n")
+                            || buf[start..].windows(5).any(|w| w == b"\r\n0\r\n");
+                        let done = has_zero_chunk && buf.ends_with(b"\r\n\r\n");
                         *chunked_scan_cursor = buf.len();
                         done
                     }
@@ -637,22 +648,73 @@ where
     })
 }
 
+/// RFC 7230 token char check for HTTP header names. Used to defend against
+/// header-injection smuggling when re-encoding requests/responses after a
+/// `NetworkHandler` hook has mutated them.
+fn is_valid_header_name(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    name.bytes().all(|b| {
+        matches!(b,
+            b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+' | b'-' | b'.'
+            | b'^' | b'_' | b'`' | b'|' | b'~'
+            | b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z'
+        )
+    })
+}
+
+/// Append a header to the wire-format buffer with injection-safe sanitisation.
+///
+/// Headers with names containing non-token characters are dropped (logged at
+/// debug level). CR and LF in values are replaced with a single space, which
+/// preserves the value's visible content while preventing a malicious handler
+/// from smuggling additional headers or a second request via embedded
+/// `\r\n` sequences.
+fn write_header_sanitised(out: &mut Vec<u8>, name: &str, value: &str) {
+    if !is_valid_header_name(name) {
+        debug!(name = %name, "dropping header with invalid name characters");
+        return;
+    }
+    out.extend_from_slice(name.as_bytes());
+    out.extend_from_slice(b": ");
+    for &b in value.as_bytes() {
+        if b == b'\r' || b == b'\n' {
+            out.push(b' ');
+        } else {
+            out.push(b);
+        }
+    }
+    out.extend_from_slice(b"\r\n");
+}
+
+/// Replace CR/LF bytes in a request-line component (method or path) with a
+/// single space. Defends `reencode_request` against handler-injected
+/// `\r\n` sequences in those fields.
+fn sanitise_request_line_component(s: &str) -> Vec<u8> {
+    s.bytes()
+        .map(|b| if b == b'\r' || b == b'\n' { b' ' } else { b })
+        .collect()
+}
+
 /// Re-serialize a [`ParsedRequest`] back to HTTP/1.1 wire format. Called
 /// after a `NetworkHandler::on_request` hook mutates `method` / `path` /
 /// `headers` / `body`, so that the `raw_bytes` forwarded upstream stays in
 /// sync with the structured fields. The no-handler hot path never calls
 /// this — the original upstream bytes are forwarded verbatim.
+///
+/// All structured fields are sanitised against HTTP request smuggling: CR/LF
+/// in `method`, `path`, and header values are replaced with spaces, and
+/// headers with invalid names are dropped. This means a misbehaving handler
+/// cannot use this re-encoder as a smuggling vector.
 fn reencode_request(req: &ParsedRequest) -> Vec<u8> {
     let mut out = Vec::with_capacity(req.raw_bytes.len().max(256));
-    out.extend_from_slice(req.method.as_bytes());
+    out.extend_from_slice(&sanitise_request_line_component(&req.method));
     out.push(b' ');
-    out.extend_from_slice(req.path.as_bytes());
+    out.extend_from_slice(&sanitise_request_line_component(&req.path));
     out.extend_from_slice(b" HTTP/1.1\r\n");
     for (k, v) in &req.headers {
-        out.extend_from_slice(k.as_bytes());
-        out.extend_from_slice(b": ");
-        out.extend_from_slice(v.as_bytes());
-        out.extend_from_slice(b"\r\n");
+        write_header_sanitised(&mut out, k, v);
     }
     out.extend_from_slice(b"\r\n");
     out.extend_from_slice(&req.body);
@@ -664,6 +726,9 @@ fn reencode_request(req: &ParsedRequest) -> Vec<u8> {
 /// `headers` / `body`, or when a handler returns a synthetic response that
 /// left `raw_bytes` empty, so the bytes written back to the client stay in
 /// sync with the structured fields.
+///
+/// Headers are sanitised the same way as in [`reencode_request`] — see
+/// [`write_header_sanitised`].
 fn reencode_response(resp: &ParsedResponse) -> Vec<u8> {
     let reason = match resp.status_code {
         100 => "Continue",
@@ -687,10 +752,7 @@ fn reencode_response(resp: &ParsedResponse) -> Vec<u8> {
     let mut out = Vec::with_capacity(resp.raw_bytes.len().max(256));
     out.extend_from_slice(format!("HTTP/1.1 {} {reason}\r\n", resp.status_code).as_bytes());
     for (k, v) in &resp.headers {
-        out.extend_from_slice(k.as_bytes());
-        out.extend_from_slice(b": ");
-        out.extend_from_slice(v.as_bytes());
-        out.extend_from_slice(b"\r\n");
+        write_header_sanitised(&mut out, k, v);
     }
     out.extend_from_slice(b"\r\n");
     out.extend_from_slice(&resp.body);
@@ -1561,5 +1623,235 @@ mod tests {
         let raw = b"POST /api HTTP/1.1\r\nContent-Length: 13\r\n\r\n{\"key\":\"val\"}";
         let (_, offset) = parse_headers(raw);
         assert_eq!(&raw[offset..], b"{\"key\":\"val\"}");
+    }
+
+    #[test]
+    fn find_header_terminator_detects_basic_case() {
+        let buf = b"GET / HTTP/1.1\r\nHost: a\r\n\r\nbody";
+        assert_eq!(find_header_terminator(buf, 0), Some(27));
+    }
+
+    #[test]
+    fn find_header_terminator_handles_3_byte_overlap() {
+        // The first read ends with "\r\n\r" and the second read delivers
+        // the final "\n" — the scan cursor must overlap 3 bytes back to
+        // catch the terminator across the read boundary.
+        let first_read_end = b"GET / HTTP/1.1\r\nHost: a\r\n\r";
+        assert_eq!(find_header_terminator(first_read_end, 0), None);
+
+        let mut buf = first_read_end.to_vec();
+        let prev_len = buf.len();
+        buf.extend_from_slice(b"\n");
+        // Scan cursor is prev_len; with the 3-byte overlap the function
+        // should still find the terminator that straddles the boundary.
+        assert_eq!(find_header_terminator(&buf, prev_len), Some(buf.len()));
+    }
+
+    // ─── read_response: round-trip tests via tokio::io::duplex ───
+
+    async fn read_response_once(upstream_bytes: &[u8]) -> ParsedResponse {
+        use tokio::io::AsyncWriteExt;
+        let (mut client_side, server_side) = tokio::io::duplex(8192);
+        client_side.write_all(upstream_bytes).await.unwrap();
+        client_side.shutdown().await.unwrap();
+        drop(client_side); // signal EOF to reader
+        let mut server = server_side;
+        match read_response(&mut server, "example.com").await {
+            ReadOutcome::Ok(resp) => resp,
+            ReadOutcome::ConnectionClosed => panic!("unexpected ConnectionClosed"),
+            ReadOutcome::Error => panic!("unexpected Error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn read_response_chunked_with_body() {
+        let wire = b"HTTP/1.1 200 OK\r\n\
+                     Transfer-Encoding: chunked\r\n\
+                     \r\n\
+                     5\r\nhello\r\n\
+                     0\r\n\r\n";
+        let resp = read_response_once(wire).await;
+        assert_eq!(resp.status_code, 200);
+        assert_eq!(resp.body, b"5\r\nhello\r\n0\r\n\r\n");
+    }
+
+    #[tokio::test]
+    async fn read_response_chunked_empty_body() {
+        // Regression: the rewritten BodyFraming::Chunked check used to
+        // require a leading `\r\n` before the `0\r\n` terminator, which
+        // broke empty-body chunked responses (the terminator starts at
+        // body offset 0 with no prior chunk). Fixed by also testing
+        // body.starts_with(b"0\r\n").
+        let wire = b"HTTP/1.1 200 OK\r\n\
+                     Transfer-Encoding: chunked\r\n\
+                     \r\n\
+                     0\r\n\r\n";
+        let resp = read_response_once(wire).await;
+        assert_eq!(resp.status_code, 200);
+        assert_eq!(resp.body, b"0\r\n\r\n");
+    }
+
+    #[tokio::test]
+    async fn read_response_content_length_body() {
+        let wire = b"HTTP/1.1 200 OK\r\n\
+                     Content-Length: 5\r\n\
+                     \r\n\
+                     hello";
+        let resp = read_response_once(wire).await;
+        assert_eq!(resp.status_code, 200);
+        assert_eq!(resp.body, b"hello");
+    }
+
+    #[tokio::test]
+    async fn read_response_no_body_204() {
+        let wire = b"HTTP/1.1 204 No Content\r\n\r\n";
+        let resp = read_response_once(wire).await;
+        assert_eq!(resp.status_code, 204);
+        assert!(resp.body.is_empty());
+    }
+
+    // ─── Header injection hardening (reencode_*) ───
+
+    #[test]
+    fn is_valid_header_name_accepts_token_chars() {
+        assert!(is_valid_header_name("Content-Type"));
+        assert!(is_valid_header_name("X-Custom-Header"));
+        assert!(is_valid_header_name("Set-Cookie"));
+        assert!(is_valid_header_name("a"));
+        assert!(is_valid_header_name("X-!#$%&'*+-.^_`|~0123"));
+    }
+
+    #[test]
+    fn is_valid_header_name_rejects_invalid_chars() {
+        assert!(!is_valid_header_name(""));
+        assert!(!is_valid_header_name("X-Bad Header")); // space
+        assert!(!is_valid_header_name("X-Bad\r\nHeader")); // CR/LF
+        assert!(!is_valid_header_name("X:Bad")); // colon
+        assert!(!is_valid_header_name("X-(Bad)")); // parens
+        assert!(!is_valid_header_name("X-{Bad}")); // braces
+    }
+
+    #[test]
+    fn write_header_sanitised_replaces_crlf_in_value() {
+        let mut out = Vec::new();
+        write_header_sanitised(&mut out, "X-Smuggled", "value\r\nInjected: header");
+        let written = String::from_utf8(out).unwrap();
+        assert_eq!(written, "X-Smuggled: value  Injected: header\r\n");
+        assert!(!written.contains("\r\nInjected"));
+    }
+
+    #[test]
+    fn write_header_sanitised_drops_invalid_name() {
+        let mut out = Vec::new();
+        write_header_sanitised(&mut out, "Bad Name", "value");
+        assert!(out.is_empty());
+
+        let mut out = Vec::new();
+        write_header_sanitised(&mut out, "X-Bad\r\n", "value");
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn reencode_request_resists_header_value_smuggling() {
+        let req = ParsedRequest {
+            method: "GET".to_string(),
+            path: "/".to_string(),
+            headers: vec![(
+                "X-Custom".to_string(),
+                "ok\r\nX-Injected: smuggled\r\nContent-Length: 0".to_string(),
+            )],
+            body: vec![],
+            raw_bytes: vec![],
+        };
+        let out = reencode_request(&req);
+        // parse_headers skips line 0 (the request line) and parses the rest.
+        // A successful smuggling attempt would have produced two headers
+        // (X-Custom + X-Injected), or three (+ Content-Length).
+        let (headers, _) = parse_headers(&out);
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].0, "X-Custom");
+        // CR/LF collapsed to spaces inside the value.
+        assert_eq!(headers[0].1, "ok  X-Injected: smuggled  Content-Length: 0");
+    }
+
+    #[test]
+    fn reencode_request_drops_header_with_invalid_name() {
+        let req = ParsedRequest {
+            method: "GET".to_string(),
+            path: "/".to_string(),
+            headers: vec![
+                ("X-Good".to_string(), "fine".to_string()),
+                ("Bad Name".to_string(), "value".to_string()),
+                ("X-Bad\r\nX-Injected".to_string(), "value".to_string()),
+            ],
+            body: vec![],
+            raw_bytes: vec![],
+        };
+        let out = reencode_request(&req);
+        let s = std::str::from_utf8(&out).unwrap();
+        assert!(s.contains("X-Good: fine\r\n"));
+        assert!(!s.contains("Bad Name"));
+        assert!(!s.contains("X-Injected"));
+    }
+
+    #[test]
+    fn reencode_request_sanitises_method_and_path_crlf() {
+        let req = ParsedRequest {
+            method: "GET\r\nX-Injected: yes".to_string(),
+            path: "/foo\r\nX-Path-Injected: yes".to_string(),
+            headers: vec![],
+            body: vec![],
+            raw_bytes: vec![],
+        };
+        let out = reencode_request(&req);
+        // The request line must be a single line — the first \r\n in the
+        // output is the request-line terminator.
+        let request_line_end = out.windows(2).position(|w| w == b"\r\n").unwrap();
+        let request_line = std::str::from_utf8(&out[..request_line_end]).unwrap();
+        // CR/LF in method and path collapsed to spaces, no header breaks.
+        assert!(request_line.starts_with("GET  X-Injected: yes /foo  X-Path-Injected: yes "));
+        assert!(request_line.ends_with("HTTP/1.1"));
+        // parse_headers skips line 0 (the request line) — what's left must
+        // contain no headers, because the smuggled lines are folded into
+        // line 0 by the sanitiser.
+        let (headers, _) = parse_headers(&out);
+        assert_eq!(headers.len(), 0);
+    }
+
+    #[test]
+    fn reencode_response_resists_header_value_smuggling() {
+        let resp = ParsedResponse {
+            status_code: 200,
+            headers: vec![(
+                "X-Custom".to_string(),
+                "ok\r\nX-Injected: smuggled".to_string(),
+            )],
+            body: vec![],
+            raw_bytes: vec![],
+        };
+        let out = reencode_response(&resp);
+        // parse_headers skips line 0 (the status line) and parses the rest.
+        // A successful smuggling attempt would have produced two headers.
+        let (headers, _) = parse_headers(&out);
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].0, "X-Custom");
+        assert_eq!(headers[0].1, "ok  X-Injected: smuggled");
+    }
+
+    #[test]
+    fn reencode_response_drops_header_with_invalid_name() {
+        let resp = ParsedResponse {
+            status_code: 200,
+            headers: vec![
+                ("Content-Type".to_string(), "text/plain".to_string()),
+                ("Bad Name".to_string(), "value".to_string()),
+            ],
+            body: vec![],
+            raw_bytes: vec![],
+        };
+        let out = reencode_response(&resp);
+        let s = std::str::from_utf8(&out).unwrap();
+        assert!(s.contains("Content-Type: text/plain\r\n"));
+        assert!(!s.contains("Bad Name"));
     }
 }

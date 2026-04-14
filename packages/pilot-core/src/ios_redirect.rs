@@ -15,7 +15,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -30,6 +30,15 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tracing::{debug, error, info, warn};
+
+/// Shared list of in-flight per-flow handler tasks. The accept loop pushes
+/// every newly-spawned handler here so [`IosRedirect::drop`] can abort them
+/// during teardown — without this, a slow upstream could leave a flow task
+/// running long after the daemon thinks capture has stopped, and the
+/// listener path would be unlinked from under it. Wrapped in a `std::sync`
+/// `Mutex` (not `tokio::sync::Mutex`) because `Drop` runs synchronously and
+/// can't `.await`.
+type FlowTaskList = Arc<StdMutex<Vec<JoinHandle<()>>>>;
 
 use crate::ios::simulator_processes;
 use crate::ipc;
@@ -109,11 +118,13 @@ async fn check_se_status() -> SeStatus {
 }
 
 /// Handle to a running redirector session. Dropping it aborts the
-/// background tasks and unlinks the Unix socket file.
+/// background tasks (including any in-flight per-flow handlers) and unlinks
+/// the Unix socket file.
 pub struct IosRedirect {
     accept_handle: JoinHandle<()>,
     refresh_handle: JoinHandle<()>,
     launcher_handle: JoinHandle<()>,
+    flow_tasks: FlowTaskList,
     listener_path: PathBuf,
 }
 
@@ -283,15 +294,19 @@ impl IosRedirect {
         });
 
         // Accept task owns the listener and spawns one per-flow handler
-        // task for every intercepted connection from the SE.
+        // task for every intercepted connection from the SE. Each handler's
+        // JoinHandle is tracked in `flow_tasks` so Drop can abort them.
+        let flow_tasks: FlowTaskList = Arc::new(StdMutex::new(Vec::new()));
+        let flow_tasks_for_accept = flow_tasks.clone();
         let accept_handle = tokio::spawn(async move {
-            accept_flow_loop(listener, proxy_state, mitm_ca).await;
+            accept_flow_loop(listener, proxy_state, mitm_ca, flow_tasks_for_accept).await;
         });
 
         Ok(Self {
             accept_handle,
             refresh_handle,
             launcher_handle,
+            flow_tasks,
             listener_path,
         })
     }
@@ -302,6 +317,16 @@ impl Drop for IosRedirect {
         self.accept_handle.abort();
         self.refresh_handle.abort();
         self.launcher_handle.abort();
+        // Abort every in-flight per-flow handler. The lock is held for a
+        // short, bounded critical section (no I/O, no `.await`) — Drop is
+        // sync and can't await, which is why we use std::sync::Mutex here.
+        // `JoinHandle::abort` is non-blocking: it signals the task to stop
+        // at its next yield point, then returns immediately.
+        if let Ok(mut tasks) = self.flow_tasks.lock() {
+            for handle in tasks.drain(..) {
+                handle.abort();
+            }
+        }
         if let Err(e) = std::fs::remove_file(&self.listener_path) {
             if e.kind() != std::io::ErrorKind::NotFound {
                 debug!(
@@ -389,7 +414,9 @@ async fn pid_refresh_loop(
 }
 
 /// Loop forever: accept new Unix socket connections from the SE (each is
-/// one intercepted flow) and spawn a per-flow handler task.
+/// one intercepted flow) and spawn a per-flow handler task. Each spawned
+/// handle is tracked in `flow_tasks` so [`IosRedirect::drop`] can abort
+/// in-flight handlers during teardown.
 ///
 /// Exits when the listener is dropped by `IosRedirect::drop` (the aborted
 /// task's owned values are released on panic, which drops the listener).
@@ -397,17 +424,31 @@ async fn accept_flow_loop(
     listener: UnixListener,
     proxy_state: Arc<Mutex<ProxyState>>,
     mitm_ca: Arc<MitmAuthority>,
+    flow_tasks: FlowTaskList,
 ) {
+    let mut accepts_since_gc: usize = 0;
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
                 let state = proxy_state.clone();
                 let ca = mitm_ca.clone();
-                tokio::spawn(async move {
+                let handle = tokio::spawn(async move {
                     if let Err(e) = handle_flow(stream, state, ca).await {
                         debug!("flow handler error: {e:#}");
                     }
                 });
+                if let Ok(mut tasks) = flow_tasks.lock() {
+                    tasks.push(handle);
+                    // Reap finished handles every 32 accepts so the vec
+                    // doesn't grow unbounded under sustained traffic. Cheap:
+                    // `is_finished` is a single atomic load per handle, and
+                    // the lock is already held on the hot path.
+                    accepts_since_gc += 1;
+                    if accepts_since_gc >= 32 {
+                        tasks.retain(|h| !h.is_finished());
+                        accepts_since_gc = 0;
+                    }
+                }
             }
             Err(e) => {
                 debug!("flow accept loop exiting: {e}");
