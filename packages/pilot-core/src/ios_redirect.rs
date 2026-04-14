@@ -209,8 +209,16 @@ impl IosRedirect {
         let listener = UnixListener::bind(&listener_path)
             .with_context(|| format!("binding listener at {}", listener_path.display()))?;
 
-        let redirector_bin =
-            resolve_redirector_path().context("locating Mitmproxy Redirector.app")?;
+        // `resolve_redirector_path` does synchronous filesystem work
+        // (exists checks, directory creation, tar extraction via a blocking
+        // `tar` child process) and can take ~1–3s when we have to extract
+        // the brew cask on first launch. Offload to a blocking thread so we
+        // don't stall the tokio worker this task is scheduled on. One-time
+        // cost per daemon lifetime.
+        let redirector_bin = tokio::task::spawn_blocking(resolve_redirector_path)
+            .await
+            .context("resolve_redirector_path task panicked")?
+            .context("locating Mitmproxy Redirector.app")?;
 
         // Fast-fail if the Network Extension is registered but not yet
         // approved by the user. Without this check we'd still spawn the
@@ -630,11 +638,17 @@ fn resolve_redirector_path() -> Result<PathBuf> {
         }
     }
 
-    let home = dirs::home_dir().unwrap_or_default();
-    let cache_hint = home
-        .join(".pilot/redirector/Mitmproxy Redirector.app")
-        .display()
-        .to_string();
+    // For the error-message hint only, fall back to a `~/...` placeholder
+    // when `home_dir()` returns None — otherwise `unwrap_or_default()` would
+    // produce a misleading relative path (`.pilot/redirector/...`) that
+    // depends on whatever the daemon's cwd happens to be.
+    let cache_hint = dirs::home_dir()
+        .map(|h| {
+            h.join(".pilot/redirector/Mitmproxy Redirector.app")
+                .display()
+                .to_string()
+        })
+        .unwrap_or_else(|| "~/.pilot/redirector/Mitmproxy Redirector.app".to_string());
     bail!(
         "Mitmproxy Redirector.app not found. Pilot searched (in order):\n\
          \n\

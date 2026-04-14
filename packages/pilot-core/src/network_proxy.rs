@@ -435,6 +435,21 @@ fn has_content_length(headers: &[(String, String)]) -> bool {
         .any(|(k, _)| k.eq_ignore_ascii_case("content-length"))
 }
 
+/// Returns true if any `Connection` header contains the `close` token.
+///
+/// `Connection` is a comma-separated list (RFC 7230 §6.1), so
+/// `Connection: keep-alive, close` and multiple `Connection` headers both
+/// need to match `close`. Matches tokens strictly (`eq_ignore_ascii_case`
+/// after trim) so tricks like `Connection: closed` or `Connection: not-close`
+/// don't false-positive.
+fn has_connection_close(headers: &[(String, String)]) -> bool {
+    headers
+        .iter()
+        .filter(|(k, _)| k.eq_ignore_ascii_case("connection"))
+        .flat_map(|(_, v)| v.split(','))
+        .any(|token| token.trim().eq_ignore_ascii_case("close"))
+}
+
 /// Read a full HTTP/1.x request (headers + body) from a client stream,
 /// returning structured request data plus the raw bytes for forwarding.
 ///
@@ -1122,9 +1137,7 @@ async fn handle_mitm_http<C, U>(
                 if client_stream.write_all(&synth.raw_bytes).await.is_err() {
                     return;
                 }
-                let close = get_header(&synth.headers, "connection")
-                    .map(|v| v.eq_ignore_ascii_case("close"))
-                    .unwrap_or(false);
+                let close = has_connection_close(&synth.headers);
                 record_entry(&state, &req, &synth, hostname, is_https, start).await;
                 if close {
                     return;
@@ -1157,9 +1170,7 @@ async fn handle_mitm_http<C, U>(
         // Extract keep-alive hint BEFORE recording so we can consume `resp`
         // via borrow rather than move. Matches original semantics: only
         // response's Connection: close is honored, request's is ignored.
-        let connection_close = get_header(&resp.headers, "connection")
-            .map(|v| v.eq_ignore_ascii_case("close"))
-            .unwrap_or(false);
+        let connection_close = has_connection_close(&resp.headers);
 
         record_entry(&state, &req, &resp, hostname, is_https, start).await;
 
@@ -2337,6 +2348,56 @@ mod tests {
             ("Transfer-Encoding".to_string(), "chunked".to_string()),
         ];
         assert!(is_chunked_transfer_encoding(&h));
+    }
+
+    #[test]
+    fn has_connection_close_single_token() {
+        let h = vec![("Connection".to_string(), "close".to_string())];
+        assert!(has_connection_close(&h));
+        let h = vec![("connection".to_string(), "Close".to_string())];
+        assert!(has_connection_close(&h));
+    }
+
+    #[test]
+    fn has_connection_close_mixed_with_keep_alive() {
+        // RFC 7230 §6.1: Connection is a comma-separated list. A client or
+        // upstream can legally send `keep-alive, close` — we must still
+        // close the connection after this message.
+        let h = vec![("Connection".to_string(), "keep-alive, close".to_string())];
+        assert!(has_connection_close(&h));
+        let h = vec![("Connection".to_string(), "close, keep-alive".to_string())];
+        assert!(has_connection_close(&h));
+    }
+
+    #[test]
+    fn has_connection_close_walks_multiple_headers() {
+        // HTTP/1.1 allows multiple Connection headers; any of them containing
+        // `close` signals end-of-connection.
+        let h = vec![
+            ("Connection".to_string(), "keep-alive".to_string()),
+            ("Connection".to_string(), "close".to_string()),
+        ];
+        assert!(has_connection_close(&h));
+    }
+
+    #[test]
+    fn has_connection_close_rejects_substring_tricks() {
+        // Must match the token `close` strictly, not substrings — otherwise
+        // `Connection: closed` or `Connection: not-close` would false-positive.
+        let h = vec![("Connection".to_string(), "closed".to_string())];
+        assert!(!has_connection_close(&h));
+        let h = vec![("Connection".to_string(), "not-close".to_string())];
+        assert!(!has_connection_close(&h));
+        let h = vec![("Connection".to_string(), "keep-alive".to_string())];
+        assert!(!has_connection_close(&h));
+    }
+
+    #[test]
+    fn has_connection_close_absent_header() {
+        let h: Vec<(String, String)> = vec![];
+        assert!(!has_connection_close(&h));
+        let h = vec![("Content-Length".to_string(), "0".to_string())];
+        assert!(!has_connection_close(&h));
     }
 
     #[tokio::test]
