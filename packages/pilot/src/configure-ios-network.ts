@@ -120,34 +120,70 @@ function printWalkthrough(opts: Options, result: {
   console.log('  ' + dim('port:     ') + result.port);
   console.log('  ' + dim('SSID:     ') + result.ssid);
   console.log();
+
+  // Reveal the .mobileconfig in Finder so the user can right-click → Share
+  // → AirDrop without hunting through the filesystem. Best-effort — we
+  // ignore failures (e.g. running over SSH) and the printed instructions
+  // still work.
+  revealInFinder(result.profilePath);
+
   if (opts.mode === 'refresh') {
     console.log(bold('To apply the refreshed profile:'));
     console.log();
     console.log(`  1) On the device, open ${bold('Settings → General → VPN & Device Management')}`);
     console.log('     and remove the existing "Pilot Network Capture" profile.');
-  } else {
-    console.log(bold('To install on the device:'));
     console.log();
-    console.log('  1) Send the profile to the device:');
-    console.log(`     ${dim('•')} AirDrop (recommended): right-click ${result.profilePath}`);
-    console.log(`       in Finder and AirDrop it to your iPhone.`);
-    console.log(`     ${dim('•')} Or email / Messages the .mobileconfig as an attachment.`);
+    console.log('  2) AirDrop the new profile from the Finder window we just opened,');
+    console.log('     then ' + bold('Install') + ' it from Settings as before.');
+    console.log();
+    console.log(yellow('  Important: the device must be on Wi-Fi "') + bold(result.ssid) + yellow('" for'));
+    console.log(yellow('  the proxy to route traffic. If the host Mac changes Wi-Fi,'));
+    console.log(yellow(`  re-run: ${bold('pilot refresh-ios-network ' + opts.udid)}`));
+    console.log();
+    return;
   }
+
+  console.log(bold('To install on the device:'));
   console.log();
-  console.log(`  2) On the device, open ${bold('Settings → General → VPN & Device Management')}`);
-  console.log('     (or the banner in the top-level Settings screen) and tap');
-  console.log('     "Pilot Network Capture" → "Install" → enter passcode → "Install".');
+  console.log(`  ${bold('1)')} ${bold('Send')} the profile to the device.`);
+  console.log(`     ${dim('•')} The Finder window we just opened has it pre-selected —`);
+  console.log(`       right-click → ${bold('Share')} → ${bold('AirDrop')} → pick your iPhone.`);
+  console.log(`     ${dim('•')} Or email / Messages the .mobileconfig as an attachment.`);
   console.log();
-  console.log(`  3) Trust the Pilot CA:`);
-  console.log(`     ${bold('Settings → General → About → Certificate Trust Settings')}`);
-  console.log(`     and enable full trust for "Pilot MITM CA".`);
+  console.log(`  ${bold('2)')} ${bold('Install')} the profile on the device.`);
+  console.log(`     Open ${bold('Settings')} on the iPhone — there'll be a "Profile Downloaded"`);
+  console.log(`     banner near the top. Tap it (or open ${bold('General → VPN & Device')}`);
+  console.log(`     ${bold('Management')}) → "Pilot Network Capture" → ${bold('Install')} →`);
+  console.log(`     enter passcode → ${bold('Install')}.`);
+  console.log();
+  console.log(`  ${bold('3)')} ${bold('Trust')} the Pilot MITM CA.`);
+  console.log(`     ${dim('This menu only appears AFTER step 2 — installing the profile is what')}`);
+  console.log(`     ${dim('makes iOS reveal the Certificate Trust Settings row.')}`);
+  console.log(`     Open ${bold('Settings → General → About → Certificate Trust Settings')}`);
+  console.log(`     and enable the toggle next to ${bold('Pilot MITM CA')}.`);
+  console.log();
+  console.log(`  ${bold('4)')} ${bold('Verify')} that decrypted HTTPS capture works:`);
+  console.log(`     ${green('pilot verify-ios-network ' + opts.udid)}`);
   console.log();
   console.log(yellow('  Important: the device must be on Wi-Fi "') + bold(result.ssid) + yellow('" for'));
   console.log(yellow('  the proxy to route traffic. If the host Mac changes Wi-Fi,'));
   console.log(yellow(`  re-run: ${bold('pilot refresh-ios-network ' + opts.udid)}`));
   console.log();
-  console.log('  Then ' + bold('pilot test') + ' against this UDID will capture network traffic.');
-  console.log();
+}
+
+/**
+ * Best-effort reveal a file in the macOS Finder. We use `open -R <path>`
+ * which highlights the file in its parent folder window. Silent on
+ * non-macOS hosts and on failure — the printed instructions still
+ * stand if Finder isn't available.
+ */
+function revealInFinder(filePath: string): void {
+  if (process.platform !== 'darwin') return;
+  try {
+    execFileSync('open', ['-R', filePath], { stdio: 'ignore' });
+  } catch {
+    // Best-effort — instructions still work without Finder revealing.
+  }
 }
 
 // ─── Argument parsing ───────────────────────────────────────────────────

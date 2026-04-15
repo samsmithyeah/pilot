@@ -167,26 +167,35 @@ fn parse_wifi_bsd_name(listall_output: &str) -> Option<String> {
 
 /// Parse `ipconfig getsummary <iface>` output and extract the SSID.
 ///
-/// Sample output:
+/// Sample output (macOS 14+):
 ///   airport : {
 ///     BSSID : <redacted>
 ///     CHANNEL : 149
-///     SSID : MyNetworkName
+///     SSID : <redacted>
 ///     ...
 ///   }
+///
+/// macOS 14+ redacts the SSID value (prints the literal string
+/// `<redacted>`) unless the caller has Location Services permission.
+/// Terminal apps don't have that by default, so this parser has to
+/// treat `<redacted>` as "couldn't read the SSID" rather than a valid
+/// network name — otherwise we'd silently bake the literal string
+/// `<redacted>` into generated mobileconfigs and the proxy would
+/// never activate on any real network.
 ///
 /// We match `SSID :` specifically (with a space before the colon) so we
 /// don't collide with `BSSID :` on the preceding line.
 fn parse_ssid_from_ipconfig(output: &str) -> Option<String> {
     for line in output.lines() {
         let trimmed = line.trim();
-        // Require the exact token `SSID ` (with trailing space) to avoid
-        // matching BSSID. Slicing off the "SSID :" prefix leaves the value.
+        // Require the exact token `SSID :` — `strip_prefix` already
+        // anchors to the start of the line, so "BSSID :" can't match.
         if let Some(rest) = trimmed.strip_prefix("SSID :") {
             let ssid = rest.trim();
-            if !ssid.is_empty() {
-                return Some(ssid.to_string());
+            if ssid.is_empty() || ssid == "<redacted>" {
+                return None;
             }
+            return Some(ssid.to_string());
         }
     }
     None
@@ -582,6 +591,16 @@ mod tests {
     #[test]
     fn parse_ssid_from_ipconfig_returns_none_when_missing() {
         let output = "airport : {\n  CHANNEL : 149\n}\n";
+        assert_eq!(parse_ssid_from_ipconfig(output), None);
+    }
+
+    #[test]
+    fn parse_ssid_from_ipconfig_rejects_redacted_placeholder() {
+        // macOS 14+ redacts SSIDs in ipconfig output unless the caller has
+        // Location Services permission. Returning `<redacted>` as a valid
+        // SSID would silently bake the literal string into mobileconfigs
+        // so the proxy would never activate on any real network.
+        let output = "airport : {\n  BSSID : <redacted>\n  SSID : <redacted>\n}\n";
         assert_eq!(parse_ssid_from_ipconfig(output), None);
     }
 

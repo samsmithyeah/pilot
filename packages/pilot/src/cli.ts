@@ -822,6 +822,7 @@ function parseArgs(argv: string[]): CliArgs {
         arg === 'build-ios-agent'
         || arg === 'configure-ios-network'
         || arg === 'refresh-ios-network'
+        || arg === 'verify-ios-network'
         || arg === 'list-devices'
       ) {
         break;
@@ -1119,6 +1120,7 @@ ${bold('Usage:')}
   pilot build-ios-agent           Build the signed PilotAgent runner for physical iOS devices
   pilot configure-ios-network <udid>   Generate a network capture profile (.mobileconfig) for a physical iOS device
   pilot refresh-ios-network <udid>     Regenerate the network capture profile after a host Wi-Fi change
+  pilot verify-ios-network <udid>      Verify decrypted HTTPS capture is working on a physical iOS device
   pilot --version                 Print version
   pilot --help                    Show this help
 
@@ -1153,6 +1155,7 @@ async function main(): Promise<void> {
     'build-ios-agent',
     'configure-ios-network',
     'refresh-ios-network',
+    'verify-ios-network',
   ]);
 
   if (args.help && !(args.command && subcommandsWithOwnHelp.has(args.command))) {
@@ -1251,6 +1254,14 @@ async function main(): Promise<void> {
     const forwardedArgv = process.argv.slice(process.argv.indexOf('refresh-ios-network') + 1)
       .filter((a) => a !== '--__tsx-reexec');
     await runRefreshIosNetwork(forwardedArgv);
+    return;
+  }
+
+  if (args.command === 'verify-ios-network') {
+    const { runVerifyIosNetwork } = await import('./verify-ios-network.js');
+    const forwardedArgv = process.argv.slice(process.argv.indexOf('verify-ios-network') + 1)
+      .filter((a) => a !== '--__tsx-reexec');
+    await runVerifyIosNetwork(forwardedArgv);
     return;
   }
 

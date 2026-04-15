@@ -110,18 +110,43 @@ pilot test --project ios-phys    # just the physical device
 
 If you want decrypted HTTPS request/response bodies in your traces, set up network capture per device. This is a one-time step per device + per Wi-Fi network.
 
+First, **disable macOS Application Firewall stealth mode** if you have it on:
+
 ```sh
-# Generate a mobileconfig profile
+sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setstealthmode off
+```
+
+Stealth mode silently drops inbound TCP SYNs to user processes — even binaries that are explicitly allowed in the firewall list. Without this, the iPhone on Wi-Fi can't reach the Pilot proxy on the Mac's LAN IP and `pilot test` with network capture will report zero entries. `pilot setup-ios-device` flags this with a ⚠ hint.
+
+Next, generate the mobileconfig profile:
+
+```sh
+# Auto-detect SSID (macOS 14+ may require --ssid since Apple redacts it)
 pilot configure-ios-network 00008140-00096C9014F3001C
+
+# Or pass it explicitly (recommended on modern macOS)
+pilot configure-ios-network 00008140-00096C9014F3001C --ssid "YourWiFiName"
 ```
 
 The command prints a walkthrough for installing the profile on the device. In short:
 
-1. AirDrop `~/.pilot/devices/<UDID>.mobileconfig` to the device (or email it)
-2. Install the profile via Settings → General → VPN & Device Management
-3. Trust the Pilot CA in Settings → General → About → Certificate Trust Settings
+1. AirDrop `~/.pilot/devices/<UDID>.mobileconfig` to the device (the CLI reveals it in Finder for you)
+2. Install the profile via Settings → Profile Downloaded (or Settings → General → VPN & Device Management)
+3. **After install**, trust the Pilot CA in Settings → General → About → Certificate Trust Settings (the row only appears after step 2)
+
+Finally, verify end-to-end:
+
+```sh
+pilot verify-ios-network 00008140-00096C9014F3001C
+```
+
+This starts the proxy, asks you to load an HTTPS page in Safari on the device, then reports whether Pilot saw the traffic and was able to decrypt it. Use it before running tests — it catches the three most common failure modes (profile not installed, CA not trusted, firewall blocking) with specific fix-it hints.
 
 From then on, `pilot test --trace on` against that UDID will capture full HTTPS traffic into the trace. See [ios-network-capture.md](./ios-network-capture.md#physical-ios-devices) for the full writeup, including the host Wi-Fi IP drift fix and parallel-device setup.
+
+### Why explicit `--ssid` is usually needed
+
+macOS 14+ redacts Wi-Fi SSIDs from `ipconfig getsummary` output unless the calling process has Location Services permission. The legacy `networksetup -getairportnetwork` command is also broken on modern macOS (always returns "You are not associated with an AirPort network" even when connected). Pilot detects the redacted placeholder and bails with a clear error, but passing `--ssid "YourWiFiName"` explicitly avoids the dance entirely.
 
 ## Known limitations
 

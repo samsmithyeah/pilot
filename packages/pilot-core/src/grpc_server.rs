@@ -3130,6 +3130,44 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         };
         let host_port = proxy.port();
 
+        // Physical iOS: verify the proxy is reachable from the LAN. On
+        // modern macOS the Application Firewall's stealth mode silently
+        // drops inbound TCP SYNs to user processes, even when the binary
+        // is explicitly allowed in the firewall list. The symptom is the
+        // device never reaches the proxy — traffic capture silently
+        // returns 0 entries and users spend an hour debugging SSID /
+        // profile install / Wi-Fi before finding the real cause.
+        //
+        // Check by connecting to our own LAN IP on the proxy port. If
+        // that times out, the firewall (or similar) is blocking and we
+        // return a clear error with the exact socketfilterfw fix.
+        #[cfg(target_os = "macos")]
+        if is_ios_physical {
+            if let Ok(lan_ip) = ios::physical_device_proxy::resolve_host_wifi_ip().await {
+                let reachable = self_probe_lan_listener(lan_ip, host_port).await;
+                if !reachable {
+                    // Drop the proxy — otherwise the next start_network_capture
+                    // call will fail with "already running".
+                    drop(proxy);
+                    return Ok(Response::new(proto::StartNetworkCaptureResponse {
+                        request_id,
+                        success: false,
+                        proxy_port: 0,
+                        error_message: format!(
+                            "Pilot proxy is bound to {lan_ip}:{host_port} but inbound LAN \
+                             connections are being blocked — the iPhone will never reach it.\n\n\
+                             Most likely cause: macOS Application Firewall stealth mode is \
+                             silently dropping unsolicited inbound TCP SYNs, even for \
+                             allow-listed binaries. Disable it with:\n  \
+                             sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setstealthmode off\n\n\
+                             Or disable the firewall entirely for this session:\n  \
+                             sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate off"
+                        ),
+                    }));
+                }
+            }
+        }
+
         match platform {
             Platform::Ios if !is_ios_physical => {
                 // PILOT-182: route the simulator's traffic into the MITM
@@ -3414,7 +3452,13 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
                             request_id,
                             success: false,
                             error_message:
-                                "Could not determine current Wi-Fi SSID. Pass --ssid explicitly."
+                                "Could not auto-detect the host's current Wi-Fi SSID.\n\n\
+                                 macOS 14+ redacts SSIDs from `ipconfig getsummary` output \
+                                 unless the calling process has Location Services permission, \
+                                 and `networksetup -getairportnetwork` has been broken since \
+                                 Apple removed the `airport` private framework.\n\n\
+                                 Fix: pass the SSID explicitly. Example:\n  \
+                                 pilot configure-ios-network <udid> --ssid \"MyWiFiNetwork\""
                                     .to_string(),
                             profile_path: String::new(),
                             host_ip: String::new(),
@@ -4257,6 +4301,28 @@ fn parse_resolved_activity(output: &str, package_name: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Best-effort TCP connect from this process out to `host:port`, for testing
+/// whether our own LAN listener is reachable from the network interface.
+///
+/// Used on physical iOS to catch the macOS Application Firewall stealth-mode
+/// failure mode: the proxy binds cleanly on `0.0.0.0`, loopback self-tests
+/// work, but unsolicited inbound packets from the LAN are silently dropped
+/// by the firewall and the device never reaches the proxy.
+///
+/// Returns `true` if the connection establishes within 1.5 seconds, `false`
+/// otherwise. We don't distinguish between "no route", "RST", and "timeout"
+/// — any failure means the proxy isn't reachable as the iOS device sees it.
+#[cfg(target_os = "macos")]
+async fn self_probe_lan_listener(lan_ip: std::net::Ipv4Addr, port: u16) -> bool {
+    use tokio::net::TcpStream;
+    use tokio::time::timeout;
+    let addr = std::net::SocketAddr::new(std::net::IpAddr::V4(lan_ip), port);
+    matches!(
+        timeout(Duration::from_millis(1_500), TcpStream::connect(addr)).await,
+        Ok(Ok(_))
+    )
 }
 
 #[cfg(test)]

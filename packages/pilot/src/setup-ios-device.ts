@@ -42,6 +42,13 @@ export interface CheckResult {
   ok: boolean
   detail?: string
   fix?: string[]
+  /**
+   * When `true`, this check is advisory only — a failure prints a ⚠ hint
+   * but doesn't block the overall preflight. Used for checks (like
+   * firewall stealth mode) that matter for a specific Pilot feature
+   * rather than the basic test-on-device path.
+   */
+  advisory?: boolean
 }
 
 /** Check Xcode command-line tools are installed. */
@@ -186,6 +193,57 @@ export function checkSigningIdentities(): CheckResult {
   };
 }
 
+/**
+ * Check macOS Application Firewall stealth mode. When stealth mode is on,
+ * the kernel silently drops inbound TCP SYNs to user processes even when
+ * the binary is explicitly allowed in the firewall list. That breaks
+ * Pilot's physical iOS network capture path — the device can't reach the
+ * proxy at the Mac's LAN IP, traffic capture returns 0 entries, and the
+ * user has no useful feedback until they run `verify-ios-network`.
+ *
+ * This check is a warning, not a hard fail — users who don't plan to use
+ * network capture can ignore it.
+ */
+export function checkFirewallStealthMode(): CheckResult {
+  let out: string;
+  try {
+    out = execFileSync(
+      '/usr/libexec/ApplicationFirewall/socketfilterfw',
+      ['--getstealthmode'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+    );
+  } catch {
+    // socketfilterfw unavailable or errored — treat as unknown, skip warning.
+    return {
+      label: 'macOS Application Firewall stealth mode',
+      ok: true,
+      detail: 'could not determine (non-fatal)',
+    };
+  }
+  const stealthOn = /stealth mode is on/i.test(out);
+  if (!stealthOn) {
+    return {
+      label: 'macOS Application Firewall stealth mode',
+      ok: true,
+      detail: 'off (LAN proxy connections will work)',
+    };
+  }
+  return {
+    label: 'macOS Application Firewall stealth mode',
+    ok: false,
+    advisory: true,
+    fix: [
+      'Stealth mode is ON. iOS devices on Wi-Fi will NOT be able to reach',
+      'the Pilot MITM proxy on the Mac\'s LAN IP — inbound TCP SYNs get',
+      'silently dropped even for allow-listed binaries. Turn it off with:',
+      '',
+      '  sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setstealthmode off',
+      '',
+      'If you don\'t use `pilot test` with network capture, ignore this.',
+    ],
+  };
+}
+
 /** Check connected physical devices and their pairing / DDI / Developer Mode state. */
 export function checkDeviceConnection(): { ok: boolean; devices: PhysicalDeviceInfo[]; label: string; fix?: string[] } {
   const devices = listPhysicalDevices();
@@ -215,12 +273,14 @@ function printCheck(result: CheckResult): void {
   if (result.ok) {
     const tail = result.detail ? dim(` — ${result.detail}`) : '';
     console.log(`  ${green('✓')} ${result.label}${tail}`);
-  } else {
-    console.log(`  ${red('✗')} ${result.label}`);
-    if (result.fix) {
-      for (const line of result.fix) {
-        console.log(`      ${dim(line)}`);
-      }
+    return;
+  }
+  const advisory = result.advisory === true;
+  const marker = advisory ? yellow('⚠') : red('✗');
+  console.log(`  ${marker} ${result.label}`);
+  if (result.fix) {
+    for (const line of result.fix) {
+      console.log(`      ${dim(line)}`);
     }
   }
 }
@@ -268,6 +328,7 @@ export async function runSetupIosDevice(): Promise<void> {
   results.push(checkDevicectl());
   results.push(checkIproxy());
   results.push(checkSigningIdentities());
+  results.push(checkFirewallStealthMode());
   for (const r of results) printCheck(r);
   console.log();
 
@@ -283,8 +344,12 @@ export async function runSetupIosDevice(): Promise<void> {
   }
   console.log();
 
-  const allOk = results.every((r) => r.ok) && deviceCheck.ok
+  // Advisory checks (e.g. firewall stealth mode) don't block the overall
+  // preflight — they print a ⚠ hint but `pilot test` still works for the
+  // basic device path.
+  const blockingOk = results.every((r) => r.ok || r.advisory === true) && deviceCheck.ok
     && deviceCheck.devices.every((d) => d.isPaired && d.ddiServicesAvailable);
+  const allOk = blockingOk;
 
   if (allOk) {
     console.log(green('✓ All checks passed. You\'re ready to run tests on a physical device.'));
