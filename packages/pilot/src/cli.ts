@@ -350,17 +350,22 @@ async function setupSequentialDevice(
 
   const deviceJustLaunched = launchedEmulators.some((e) => e.serial === cfg.device);
 
+  // Determine whether this UDID targets a physical device or a simulator.
+  // The branch drives every downstream decision in the iOS block: simctl for
+  // simulators, devicectl for physical. It also controls whether we cache
+  // the app path in startAgent for reinstall-based clearAppData.
+  let targetIsPhysical = false;
+  let resolvedIosAppPath: string | undefined;
   if (cfg.platform === 'ios') {
-    // Determine whether this UDID targets a physical device or a simulator.
-    // The branch drives every downstream decision in this block: simctl for
-    // simulators, devicectl for physical. Without this, install/launch would
-    // silently fail on a real iPhone.
     const { isPhysicalDevice } = await import('./ios-devicectl.js');
-    const targetIsPhysical = cfg.device ? isPhysicalDevice(cfg.device) : false;
+    targetIsPhysical = cfg.device ? isPhysicalDevice(cfg.device) : false;
+    resolvedIosAppPath = cfg.app ? path.resolve(cfg.rootDir, cfg.app) : undefined;
+  }
 
+  if (cfg.platform === 'ios') {
     if (cfg.app && cfg.device) {
       try {
-        const resolvedApp = path.resolve(cfg.rootDir, cfg.app);
+        const resolvedApp = resolvedIosAppPath!;
         if (targetIsPhysical) {
           const { installAppOnDevice, isAppInstalledOnDevice } = await import('./ios-devicectl.js');
           const alreadyInstalled = !deviceJustLaunched
@@ -480,6 +485,10 @@ async function setupSequentialDevice(
       resolvedAgentApk,
       resolvedAgentTestApk,
       resolvedIosXctestrun,
+      // Only cache the app path on physical iOS — the daemon uses it for
+      // reinstall-based clearAppData. Simulators keep the host-filesystem
+      // app-container clearing path instead.
+      cfg.platform === 'ios' && targetIsPhysical ? resolvedIosAppPath : undefined,
     );
     if (cfg.platform !== 'ios') {
       await ensureSessionReady({

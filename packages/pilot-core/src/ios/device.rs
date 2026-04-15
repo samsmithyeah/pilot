@@ -270,7 +270,6 @@ pub async fn install_app(udid: &str, app_path: &str) -> Result<()> {
 /// device build — devicectl will accept the latter and reject the former
 /// with a signing error. Callers are responsible for passing the correct
 /// bundle for the target device.
-#[allow(dead_code)]
 #[instrument(skip(app_path))]
 pub async fn install_app_on_device(udid: &str, app_path: &str) -> Result<()> {
     let json_path = scratch_json_path("install-app");
@@ -361,6 +360,173 @@ pub async fn launch_app_on_device(udid: &str, bundle_id: &str) -> Result<u32> {
 
     info!(udid, bundle_id, pid, "App launched on physical device");
     Ok(pid)
+}
+
+/// Launch a URL on a physical device by delivering it to the target bundle.
+///
+/// Uses `xcrun devicectl device process launch --payload-url <url> <bundle>`.
+/// In practice this launches the target bundle but does NOT actually
+/// deliver the URL to the app's UIApplicationDelegate — the payload is
+/// attached to the launch record but RN/expo-router's deep-link handling
+/// never sees it. Pilot routes openDeepLink through the agent's
+/// `XCUIApplication.open(url:)` path instead, so this helper is kept only
+/// for diagnostics and is currently unused.
+#[allow(dead_code)]
+#[instrument]
+pub async fn launch_url_on_device(udid: &str, bundle_id: &str, url: &str) -> Result<()> {
+    let json_path = scratch_json_path("launch-url");
+    let output = Command::new("xcrun")
+        .args([
+            "devicectl",
+            "device",
+            "process",
+            "launch",
+            "--device",
+            udid,
+            "--json-output",
+            &json_path.to_string_lossy(),
+            "--terminate-existing",
+            "--payload-url",
+            url,
+            bundle_id,
+        ])
+        .output()
+        .await
+        .context("Failed to run xcrun devicectl device process launch --payload-url")?;
+
+    let json_body = tokio::fs::read_to_string(&json_path).await.ok();
+    let _ = tokio::fs::remove_file(&json_path).await;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let hint = extract_devicectl_error_hint(json_body.as_deref());
+        bail!(
+            "Failed to open URL on physical device {udid}: {stderr}{}",
+            hint.map(|h| format!("\n  hint: {h}")).unwrap_or_default()
+        );
+    }
+
+    info!(
+        udid,
+        bundle_id, url, "URL delivered to app on physical device"
+    );
+    Ok(())
+}
+
+/// Uninstall an app from a physical iOS device by bundle ID.
+#[instrument]
+pub async fn uninstall_app_on_device(udid: &str, bundle_id: &str) -> Result<()> {
+    let output = Command::new("xcrun")
+        .args([
+            "devicectl",
+            "device",
+            "uninstall",
+            "app",
+            "--device",
+            udid,
+            bundle_id,
+        ])
+        .output()
+        .await
+        .context("Failed to run xcrun devicectl device uninstall app")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Uninstalling a not-installed app is fine — target state is reached.
+        if stderr.contains("not installed") || stderr.contains("could not be found") {
+            debug!(udid, bundle_id, "App already not installed");
+            return Ok(());
+        }
+        bail!("Failed to uninstall {bundle_id} from {udid}: {stderr}");
+    }
+    info!(udid, bundle_id, "App uninstalled from physical device");
+    Ok(())
+}
+
+/// Pull an app's data container from a physical device to a local directory.
+///
+/// Uses `xcrun devicectl device copy from --domain-type appDataContainer`.
+/// The destination directory will contain the container's children
+/// (typically `Documents/`, `Library/`, `tmp/`).
+#[instrument(skip(local_dest))]
+pub async fn copy_app_container_from_device(
+    udid: &str,
+    bundle_id: &str,
+    local_dest: &str,
+) -> Result<()> {
+    let output = Command::new("xcrun")
+        .args([
+            "devicectl",
+            "device",
+            "copy",
+            "from",
+            "--device",
+            udid,
+            "--domain-type",
+            "appDataContainer",
+            "--domain-identifier",
+            bundle_id,
+            "--source",
+            "/",
+            "--destination",
+            local_dest,
+        ])
+        .output()
+        .await
+        .context("Failed to run xcrun devicectl device copy from")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("Failed to copy app container from {udid}: {stderr}");
+    }
+    Ok(())
+}
+
+/// Push local files back into an app's data container on a physical device.
+///
+/// Uses `xcrun devicectl device copy to --domain-type appDataContainer` with
+/// one source entry per top-level child (`Documents/`, `Library/`, `tmp/`).
+/// Passing `--remove-existing-content true` replaces the destination, so
+/// stale files left by the previous state are cleared.
+#[instrument(skip(local_sources))]
+pub async fn copy_app_container_to_device(
+    udid: &str,
+    bundle_id: &str,
+    local_sources: &[String],
+) -> Result<()> {
+    if local_sources.is_empty() {
+        return Ok(());
+    }
+    let mut args: Vec<&str> = vec![
+        "devicectl",
+        "device",
+        "copy",
+        "to",
+        "--device",
+        udid,
+        "--domain-type",
+        "appDataContainer",
+        "--domain-identifier",
+        bundle_id,
+        "--destination",
+        "/",
+        "--remove-existing-content",
+        "true",
+    ];
+    for source in local_sources {
+        args.push("--source");
+        args.push(source.as_str());
+    }
+    let output = Command::new("xcrun")
+        .args(&args)
+        .output()
+        .await
+        .context("Failed to run xcrun devicectl device copy to")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("Failed to copy app container to {udid}: {stderr}");
+    }
+    Ok(())
 }
 
 /// Terminate a running process on a physical iOS device by PID.

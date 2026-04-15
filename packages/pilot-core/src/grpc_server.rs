@@ -46,6 +46,10 @@ pub struct PilotServiceImpl {
 struct IosAgentConfig {
     xctestrun_path: String,
     target_package: String,
+    /// Host path to the installed `.app` bundle. Only set when the target
+    /// device is physical — used by `clearAppData` to reinstall the app as
+    /// the only way to wipe persistent state on a real device.
+    app_path: Option<String>,
 }
 
 impl PilotServiceImpl {
@@ -1506,6 +1510,7 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
                 *self.ios_agent_config.write().await = Some(IosAgentConfig {
                     xctestrun_path: req.ios_xctestrun_path.clone(),
                     target_package: req.target_package.clone(),
+                    app_path: (!req.ios_app_path.is_empty()).then(|| req.ios_app_path.clone()),
                 });
             }
             Platform::Android => {
@@ -2042,26 +2047,36 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         let platform = self.require_platform().await?;
         match platform {
             Platform::Ios => {
-                // Physical iOS devices have no host-side "openurl" mechanism —
-                // neither `xcrun simctl openurl` (simulator-only) nor any
-                // devicectl equivalent. The only robust path would be a
-                // Safari-driven fallback inside the XCUITest agent, which is
-                // tracked as a v2 follow-up. Return a clear actionable error
-                // instead of silently succeeding.
-                if self.is_active_ios_physical().await {
-                    return Ok(self
-                        .action_error(
-                            request_id,
-                            "UNSUPPORTED_ON_PHYSICAL_DEVICE",
-                            "device.openDeepLink is not yet supported on physical iOS \
-                             devices. Workarounds: add a test-only button in your app \
-                             that calls `UIApplication.shared.open(url)`, or open the \
-                             URL manually via Safari on the device before the test runs."
-                                .to_string(),
-                        )
-                        .await);
-                }
                 let serial = self.active_serial().await?;
+                if self.is_active_ios_physical().await {
+                    // Route through the XCUITest agent, which calls
+                    // `XCUIApplication.open(url:)` on the target app.
+                    // This triggers the app's scene URL handler the same
+                    // way `simctl openurl` does on simulators — unlike
+                    // `devicectl process launch --payload-url`, which
+                    // launches the app but doesn't actually deliver the
+                    // URL to the app's UIApplicationDelegate.
+                    let bundle_id = self
+                        .ios_agent_config
+                        .read()
+                        .await
+                        .as_ref()
+                        .map(|c| c.target_package.clone())
+                        .filter(|p| !p.is_empty())
+                        .ok_or_else(|| {
+                            Status::failed_precondition(
+                                "device.openDeepLink on a physical iOS device requires an \
+                                 active agent session with a target package. Call \
+                                 startAgent first.",
+                            )
+                        })?;
+                    let command = AgentCommand::OpenDeepLink {
+                        url: req.uri.clone(),
+                        package: bundle_id,
+                    };
+                    let result = self.send_agent_command(&command).await;
+                    return self.make_action_response(request_id, result).await;
+                }
                 match ios::device::open_url(&serial, &req.uri).await {
                     Ok(()) => Ok(Response::new(proto::ActionResponse {
                         request_id,
@@ -2372,20 +2387,66 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
                 if self.is_active_ios_physical().await {
                     // Physical devices have no host-accessible app container
                     // filesystem, so `get_app_container` / `clear_container`
-                    // are meaningless. The only way to reset persistent state
-                    // on a real device is to reinstall the app bundle. We
-                    // surface a clear actionable error rather than silently
-                    // succeeding while leaving state behind.
-                    return Ok(self
-                        .action_error(
-                            request_id,
-                            "UNSUPPORTED_ON_PHYSICAL_DEVICE",
-                            "device.clearAppData is not supported on physical iOS devices. \
-                             Reinstall the app (pass `--force-install` to `pilot test`) \
-                             to wipe persistent state."
-                                .to_string(),
-                        )
-                        .await);
+                    // are meaningless. Reinstall the app bundle as the only
+                    // reliable way to wipe persistent state on a real device.
+                    // Requires the app path to have been cached during
+                    // StartAgent (via the StartAgentRequest.ios_app_path
+                    // field). Without it we can't reinstall and must surface
+                    // an actionable error.
+                    let serial = self.active_serial().await?;
+                    let app_path = self
+                        .ios_agent_config
+                        .read()
+                        .await
+                        .as_ref()
+                        .and_then(|c| c.app_path.clone());
+                    let Some(app_path) = app_path else {
+                        return Ok(self
+                            .action_error(
+                                request_id,
+                                "UNSUPPORTED_ON_PHYSICAL_DEVICE",
+                                "device.clearAppData on a physical iOS device requires the \
+                                 app bundle path to have been passed at startAgent time. \
+                                 Pilot's CLI does this automatically when `app` is set in \
+                                 your config. If you're calling startAgent manually, pass \
+                                 the device-signed .app path via StartAgentRequest.ios_app_path."
+                                    .to_string(),
+                            )
+                            .await);
+                    };
+                    // Uninstall + install is the only devicectl sequence
+                    // that actually wipes the app's data container on
+                    // physical iOS (plain `install` preserves the container
+                    // when replacing an existing bundle). Uninstall also
+                    // drops the bundle's LaunchServices URL-scheme entry,
+                    // so we wait briefly after install for LaunchServices
+                    // to re-index — without this, the first subsequent
+                    // `openDeepLink` call drops silently.
+                    if let Err(e) =
+                        ios::device::uninstall_app_on_device(&serial, &req.package_name).await
+                    {
+                        warn!(error = %e, "Uninstall step of physical-iOS clearAppData failed, continuing to reinstall");
+                    }
+                    if let Err(e) = ios::device::install_app_on_device(&serial, &app_path).await {
+                        return Ok(self
+                            .action_error(
+                                request_id,
+                                "ACTION_FAILED",
+                                format!("clearAppData reinstall failed: {e}"),
+                            )
+                            .await);
+                    }
+                    // Give LaunchServices time to re-index the bundle's URL
+                    // schemes. Without this, the next `openDeepLink` often
+                    // fires before iOS knows what app handles the scheme.
+                    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+                    return Ok(Response::new(proto::ActionResponse {
+                        request_id,
+                        success: true,
+                        error_type: String::new(),
+                        error_message: String::new(),
+                        screenshot: Vec::new(),
+                    }));
                 }
                 let serial = self.active_serial().await?;
                 // Clear the data container (AsyncStorage, UserDefaults, caches)
@@ -2459,21 +2520,15 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         match platform {
             Platform::Ios => {
                 if self.is_active_ios_physical().await {
-                    // Physical devices have no `simctl pbcopy` path. Going
-                    // through UIPasteboard from the XCUITest runner hits
-                    // the iOS 16+ paste permission dialog which has crashed
-                    // the runner historically. Surfacing a clear error is
-                    // preferable to a silent crash or stuck dialog.
-                    return Ok(self
-                        .action_error(
-                            request_id,
-                            "UNSUPPORTED_ON_PHYSICAL_DEVICE",
-                            "device.setClipboard is not yet supported on physical iOS devices. \
-                             Workaround: seed clipboard contents from within the app under test, \
-                             or use a test-only debug hook."
-                                .to_string(),
-                        )
-                        .await);
+                    // simctl pbcopy is simulator-only. Physical devices go
+                    // through the XCUITest agent, which calls
+                    // `UIPasteboard.general.string = ...`. Writes don't
+                    // trigger the iOS 16+ paste prompt — only reads do, and
+                    // even then the runner bundle bypasses the dialog since
+                    // it isn't a foreground app.
+                    let command = AgentCommand::SetClipboard { text: req.text };
+                    let result = self.send_agent_command(&command).await;
+                    return self.make_action_response(request_id, result).await;
                 }
                 // Use simctl pbcopy to avoid the iOS 16+ paste permission dialog
                 // that would crash the XCUITest agent if it accessed UIPasteboard.
@@ -2505,18 +2560,31 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         let text = match platform {
             Platform::Ios => {
                 if self.is_active_ios_physical().await {
-                    return Err(Status::unimplemented(
-                        "device.getClipboard is not yet supported on physical iOS devices. \
-                         Workaround: read the clipboard from within the app under test via \
-                         a test-only debug hook.",
-                    ));
+                    // Route through the XCUITest agent — the runner bundle
+                    // can call `UIPasteboard.general.string` without hitting
+                    // the iOS 16+ paste prompt since it isn't a foreground
+                    // app. On simulators we keep the simctl pbpaste path to
+                    // match the existing behaviour (and avoid touching the
+                    // agent at all when we don't need to).
+                    let command = AgentCommand::GetClipboard {};
+                    let result = self
+                        .send_agent_command(&command)
+                        .await
+                        .map_err(|e| Status::internal(e.to_string()))?;
+                    result
+                        .data
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string()
+                } else {
+                    // Use simctl pbpaste to avoid the iOS 16+ paste permission dialog
+                    // that would crash the XCUITest agent if it accessed UIPasteboard.
+                    let serial = self.active_serial().await?;
+                    ios::device::get_clipboard(&serial)
+                        .await
+                        .map_err(|e| Status::internal(e.to_string()))?
                 }
-                // Use simctl pbpaste to avoid the iOS 16+ paste permission dialog
-                // that would crash the XCUITest agent if it accessed UIPasteboard.
-                let serial = self.active_serial().await?;
-                ios::device::get_clipboard(&serial)
-                    .await
-                    .map_err(|e| Status::internal(e.to_string()))?
             }
             Platform::Android => {
                 let command = AgentCommand::GetClipboard {};
@@ -3484,16 +3552,52 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         match platform {
             Platform::Ios => {
                 if self.is_active_ios_physical().await {
-                    return Ok(self
-                        .action_error(
-                            request_id,
-                            "UNSUPPORTED_ON_PHYSICAL_DEVICE",
-                            "device.saveAppState is not supported on physical iOS devices. \
-                             Physical devices do not expose their app container filesystem to \
-                             the host. Use simulator-based setup projects for reusable auth state."
-                                .to_string(),
-                        )
-                        .await);
+                    // Physical devices: use `xcrun devicectl device copy from
+                    // --domain-type appDataContainer` to pull the app's data
+                    // container to a scratch directory, then tar it for
+                    // parity with the simulator output shape.
+                    let scratch = tempfile::tempdir()
+                        .map_err(|e| Status::internal(format!("tempdir: {e}")))?;
+                    let scratch_path = scratch.path().to_string_lossy().to_string();
+                    if let Err(e) =
+                        ios::device::copy_app_container_from_device(&serial, pkg, &scratch_path)
+                            .await
+                    {
+                        return Ok(self
+                            .action_error(
+                                request_id,
+                                "APP_STATE_SAVE_FAILED",
+                                format!("devicectl copy from failed: {e}"),
+                            )
+                            .await);
+                    }
+                    let output = tokio::process::Command::new("tar")
+                        .args(["czf", local_path, "-C", &scratch_path, "."])
+                        .output()
+                        .await;
+                    return match output {
+                        Ok(out) if out.status.success() => {
+                            info!(%pkg, %local_path, "iOS physical app state saved");
+                            Ok(Self::success_action_response(request_id))
+                        }
+                        Ok(out) => {
+                            let stderr = String::from_utf8_lossy(&out.stderr);
+                            Ok(self
+                                .action_error(
+                                    request_id,
+                                    "APP_STATE_SAVE_FAILED",
+                                    format!("tar failed: {stderr}"),
+                                )
+                                .await)
+                        }
+                        Err(e) => Ok(self
+                            .action_error(
+                                request_id,
+                                "APP_STATE_SAVE_FAILED",
+                                format!("Failed to run tar: {e}"),
+                            )
+                            .await),
+                    };
                 }
                 // iOS simulator: app container is on the host filesystem.
                 // Use simctl to find it, then tar it directly.
@@ -3637,16 +3741,136 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         match platform {
             Platform::Ios => {
                 if self.is_active_ios_physical().await {
-                    return Ok(self
-                        .action_error(
-                            request_id,
-                            "UNSUPPORTED_ON_PHYSICAL_DEVICE",
-                            "device.restoreAppState is not supported on physical iOS devices. \
-                             Physical devices do not expose their app container filesystem to \
-                             the host. Use simulator-based setup projects for reusable auth state."
-                                .to_string(),
-                        )
-                        .await);
+                    // Physical: extract the archive locally, then push each
+                    // top-level child (`Documents`, `Library`, `tmp`) back
+                    // into the app container via `devicectl device copy to
+                    // --remove-existing-content true`. We terminate the app
+                    // first so iOS isn't actively writing to the directories
+                    // we're overwriting.
+                    let scratch = tempfile::tempdir()
+                        .map_err(|e| Status::internal(format!("tempdir: {e}")))?;
+                    let scratch_path = scratch.path().to_string_lossy().to_string();
+                    let extract = tokio::process::Command::new("tar")
+                        .args(["xzf", local_path, "-C", &scratch_path])
+                        .output()
+                        .await;
+                    match extract {
+                        Ok(out) if !out.status.success() => {
+                            let stderr = String::from_utf8_lossy(&out.stderr);
+                            return Ok(self
+                                .action_error(
+                                    request_id,
+                                    "APP_STATE_RESTORE_FAILED",
+                                    format!("tar extract failed: {stderr}"),
+                                )
+                                .await);
+                        }
+                        Err(e) => {
+                            return Ok(self
+                                .action_error(
+                                    request_id,
+                                    "APP_STATE_RESTORE_FAILED",
+                                    format!("Failed to run tar: {e}"),
+                                )
+                                .await);
+                        }
+                        _ => {}
+                    }
+                    // Collect top-level children that actually exist in the
+                    // archive — we only want to push directories the user
+                    // actually saved, so empty runs don't wipe the live data.
+                    let mut sources: Vec<String> = Vec::new();
+                    for name in ["Documents", "Library", "tmp"] {
+                        let candidate = std::path::Path::new(&scratch_path).join(name);
+                        if candidate.exists() {
+                            sources.push(candidate.to_string_lossy().to_string());
+                        }
+                    }
+                    if sources.is_empty() {
+                        return Ok(self
+                            .action_error(
+                                request_id,
+                                "APP_STATE_RESTORE_FAILED",
+                                "Archive contained no Documents/Library/tmp directories"
+                                    .to_string(),
+                            )
+                            .await);
+                    }
+                    // Wipe the container by uninstalling + reinstalling the
+                    // app. `devicectl copy to --remove-existing-content`
+                    // alone would leave the app running and racing with
+                    // our writes; wiping via reinstall is the same pattern
+                    // we use for `clearAppData` and avoids every possible
+                    // "process is holding files" edge case. After the
+                    // reinstall the container is empty, so the subsequent
+                    // copy just lays the saved state on top.
+                    let app_path = self
+                        .ios_agent_config
+                        .read()
+                        .await
+                        .as_ref()
+                        .and_then(|c| c.app_path.clone());
+                    let Some(app_path) = app_path else {
+                        return Ok(self
+                            .action_error(
+                                request_id,
+                                "APP_STATE_RESTORE_FAILED",
+                                "device.restoreAppState on a physical iOS device requires \
+                                 the app bundle path cached at startAgent time. Pilot's \
+                                 CLI passes this automatically when `app` is set."
+                                    .to_string(),
+                            )
+                            .await);
+                    };
+                    if let Err(e) = ios::device::uninstall_app_on_device(&serial, pkg).await {
+                        warn!(error = %e, "Pre-restore uninstall failed, continuing");
+                    }
+                    if let Err(e) = ios::device::install_app_on_device(&serial, &app_path).await {
+                        return Ok(self
+                            .action_error(
+                                request_id,
+                                "APP_STATE_RESTORE_FAILED",
+                                format!("Pre-restore reinstall failed: {e}"),
+                            )
+                            .await);
+                    }
+                    // Give LaunchServices a moment to re-register the
+                    // freshly installed bundle before devicectl re-enters
+                    // its sandbox to push the container contents.
+                    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+                    if let Err(e) =
+                        ios::device::copy_app_container_to_device(&serial, pkg, &sources).await
+                    {
+                        return Ok(self
+                            .action_error(
+                                request_id,
+                                "APP_STATE_RESTORE_FAILED",
+                                format!("devicectl copy to failed: {e}"),
+                            )
+                            .await);
+                    }
+                    info!(%pkg, %local_path, "iOS physical app state restored");
+                    // Reinstalling + pushing the container replaces the app
+                    // bundle under the running XCUITest runner. The agent's
+                    // cached XCUIApplication references become stale in a
+                    // way that causes snapshots to return partial trees
+                    // after the next launch — elements present in the
+                    // hierarchy dump are missing from findElement. Restart
+                    // the agent entirely so the new test session starts
+                    // against fresh XCUITest bindings.
+                    if let Err(e) = self
+                        .restart_ios_agent_for_app(&serial, pkg, false, 10_000)
+                        .await
+                    {
+                        return Ok(self
+                            .action_error(
+                                request_id,
+                                "APP_STATE_RESTORE_FAILED",
+                                format!("Agent restart after restore failed: {e}"),
+                            )
+                            .await);
+                    }
+                    return Ok(Self::success_action_response(request_id));
                 }
                 // iOS simulator: extract archive directly into the app container
                 let container = match ios::device::get_app_container(&serial, pkg).await {

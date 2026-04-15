@@ -34,6 +34,7 @@ let client: PilotGrpcClient | undefined;
 let config: PilotConfig | undefined;
 let assignedSerial: string | undefined;
 let resolvedXctestrunPath: string | undefined;
+let resolvedAppPath: string | undefined;
 
 function send(msg: WorkerToMainMessage): void {
   if (process.send) {
@@ -151,15 +152,25 @@ async function handleInit(msg: InitMessage): Promise<void> {
   const resolvedIosXctestrun = config.iosXctestrun
     ? path.resolve(config.rootDir, config.iosXctestrun)
     : undefined;
+  const resolvedIosAppPath = config.platform === 'ios' && config.app
+    ? path.resolve(config.rootDir, config.app)
+    : undefined;
   resolvedXctestrunPath = resolvedIosXctestrun;
+  resolvedAppPath = resolvedIosAppPath;
   sendProgress('starting Pilot agent');
-  await device.startAgent(config.package ?? '', resolvedAgentApk, resolvedAgentTestApk, resolvedIosXctestrun);
+  await device.startAgent(
+    config.package ?? '',
+    resolvedAgentApk,
+    resolvedAgentTestApk,
+    resolvedIosXctestrun,
+    resolvedIosAppPath,
+  );
 
   try {
     if (config.package) {
       sendProgress(`launching ${config.package}`);
       await launchConfiguredApp(
-        sessionContext(msg.deviceSerial, resolvedAgentApk, resolvedAgentTestApk, resolvedIosXctestrun),
+        sessionContext(msg.deviceSerial, resolvedAgentApk, resolvedAgentTestApk, resolvedIosXctestrun, resolvedIosAppPath),
         'worker initialization',
       );
     } else {
@@ -299,6 +310,7 @@ function sessionContext(
   agentApkPath?: string,
   agentTestApkPath?: string,
   iosXctestrunPath?: string,
+  iosAppPath?: string,
 ): SessionPreflightContext {
   if (!device || !client || !config) {
     throw new Error(`Worker ${workerId}: Not initialized`);
@@ -317,6 +329,7 @@ function sessionContext(
     agentApkPath,
     agentTestApkPath,
     iosXctestrunPath: iosXctestrunPath ?? resolvedXctestrunPath,
+    iosAppPath: iosAppPath ?? resolvedAppPath,
     deviceSerial: serial,
   };
 }

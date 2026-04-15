@@ -14,6 +14,12 @@ export interface SessionPreflightContext {
   agentApkPath?: string
   agentTestApkPath?: string
   iosXctestrunPath?: string
+  /**
+   * Device-signed .app bundle path. On physical iOS, the daemon caches this
+   * so that `clearAppData` can reinstall the app. Ignored on simulators
+   * and Android.
+   */
+  iosAppPath?: string
   /** ADB serial for this device — enables ADB-level recovery when agent is unavailable */
   deviceSerial?: string
 }
@@ -66,20 +72,18 @@ export async function launchConfiguredApp(
       return;
     }
 
-    // On iOS simulators, clear data then restart for isolation between test
-    // files. clearAppData removes AsyncStorage (including React Navigation
-    // state). restartApp handles terminate → relaunch atomically through the
-    // daemon with fallback mechanisms (in-runner relaunch → simctl relaunch →
+    // On iOS, clear data then restart for isolation between test files.
+    // clearAppData removes AsyncStorage (including React Navigation state).
+    // restartApp handles terminate → relaunch atomically through the daemon
+    // with fallback mechanisms (in-runner relaunch → simctl relaunch →
     // full agent restart), avoiding the race condition where a separate
     // terminateApp + launchApp sequence can reconnect to a dying process.
     //
-    // Physical iOS devices can't use clearAppData (no filesystem-level app
-    // container access), so we only restartApp. Tests that need persisted-
-    // state isolation should use resetAppDeepLink.
-    const isPhysicalIos = !!ctx.config.device;
-    if (!isPhysicalIos) {
-      await ctx.device.clearAppData(ctx.config.package);
-    }
+    // On physical iOS devices the daemon implements clearAppData via
+    // uninstall + reinstall (devicectl), since there's no host-side
+    // app-container access. That path requires StartAgent to have been
+    // called with ios_app_path — pilot's CLI + worker runners always do.
+    await ctx.device.clearAppData(ctx.config.package);
     try {
       await ctx.device.restartApp(ctx.config.package);
     } catch (err) {
@@ -126,7 +130,7 @@ export async function launchConfiguredApp(
   // ensureSessionReady's recovery path will retry with a clearer error.
   try {
     await ctx.device.startAgent(
-      ctx.config.package, ctx.agentApkPath, ctx.agentTestApkPath, ctx.iosXctestrunPath,
+      ctx.config.package, ctx.agentApkPath, ctx.agentTestApkPath, ctx.iosXctestrunPath, ctx.iosAppPath,
     );
   } catch {
     // Will be recovered by ensureSessionReady below
@@ -224,7 +228,7 @@ async function recoverSession(ctx: SessionPreflightContext): Promise<void> {
 
   // Then try agent-level dismissal if the agent is reachable
   await dismissBlockingSystemUi(ctx);
-  await ctx.device.startAgent(ctx.config.package ?? '', ctx.agentApkPath, ctx.agentTestApkPath, ctx.iosXctestrunPath);
+  await ctx.device.startAgent(ctx.config.package ?? '', ctx.agentApkPath, ctx.agentTestApkPath, ctx.iosXctestrunPath, ctx.iosAppPath);
   if (!ctx.config.package) return;
 
   try {

@@ -273,6 +273,11 @@ message StartAgentRequest {
   string agent_apk_path = 3;       // host path to agent APK (auto-install, Android)
   string agent_test_apk_path = 4;  // host path to agent test APK (auto-install, Android)
   string ios_xctestrun_path = 5;   // host path to .xctestrun file (iOS)
+  // host path to the .app bundle installed on the device. Used by the
+  // daemon on physical iOS devices to reinstall the app on clearAppData
+  // calls (devicectl has no host-side app container access, so reinstall
+  // is the only way to reset persistent state). Empty for simulators.
+  string ios_app_path = 6;
 }
 
 message PingRequest {}

@@ -348,6 +348,7 @@ export class PilotGrpcClient {
     agentApkPath?: string,
     agentTestApkPath?: string,
     iosXctestrunPath?: string,
+    iosAppPath?: string,
   ): Promise<ActionResponse> {
     return this.call<ActionResponse>('startAgent', {
       requestId: requestId(),
@@ -355,6 +356,7 @@ export class PilotGrpcClient {
       agentApkPath: agentApkPath ?? '',
       agentTestApkPath: agentTestApkPath ?? '',
       iosXctestrunPath: iosXctestrunPath ?? '',
+      iosAppPath: iosAppPath ?? '',
     }, 180_000);
   }
 

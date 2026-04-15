@@ -177,6 +177,10 @@ pub enum AgentCommand {
     TerminateApp {
         package: String,
     },
+    OpenDeepLink {
+        url: String,
+        package: String,
+    },
     HideKeyboard {},
     IsKeyboardShown {},
     SetOrientation {
@@ -416,6 +420,9 @@ impl AgentCommand {
             AgentCommand::LaunchApp { package } => ("launchApp", json!({ "bundleId": package })),
             AgentCommand::TerminateApp { package } => {
                 ("terminateApp", json!({ "bundleId": package }))
+            }
+            AgentCommand::OpenDeepLink { url, package } => {
+                ("openDeepLink", json!({ "url": url, "bundleId": package }))
             }
             AgentCommand::HideKeyboard {} => ("hideKeyboard", json!({})),
             AgentCommand::IsKeyboardShown {} => ("isKeyboardShown", json!({})),

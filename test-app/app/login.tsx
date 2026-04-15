@@ -88,7 +88,8 @@ export default function LoginScreen() {
           placeholder="Enter your email"
           keyboardType="email-address"
           autoCapitalize="none"
-          autoComplete="email"
+          autoComplete="off"
+          textContentType="none"
           accessibilityLabel="Email"
           accessibilityHint="Enter your email address"
           testID="email-input"
@@ -101,6 +102,12 @@ export default function LoginScreen() {
           onChangeText={setPassword}
           placeholder="Enter your password"
           secureTextEntry
+          // Suppress iCloud Keychain "Save Password?" prompt during E2E
+          // runs. textContentType="oneTimeCode" tells iOS "this isn't a
+          // real password" so it doesn't offer to save it. Real apps
+          // should use "password" here.
+          textContentType="oneTimeCode"
+          autoComplete="off"
           accessibilityLabel="Password"
           accessibilityHint="Enter your password"
           testID="password-input"
