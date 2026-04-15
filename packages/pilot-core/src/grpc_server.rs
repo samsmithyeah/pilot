@@ -85,6 +85,44 @@ impl PilotServiceImpl {
         )
     }
 
+    /// Idempotently start the Wi-Fi MITM proxy bound to a physical iOS
+    /// device's deterministic port. Needed whenever we're about to
+    /// perform any operation on a physical device that might cause iOS
+    /// to issue an OCSP trust-verification request to Apple — install,
+    /// launch, agent start, agent restart, etc. Without a live listener
+    /// at that port, the phone's Wi-Fi proxy settings route the OCSP
+    /// request to a dead address and iOS rejects the app with the
+    /// "Developer App Certificate is not trusted" umbrella error.
+    ///
+    /// Skipped if a proxy is already running. `start_network_capture`
+    /// reuses the same listener, and `stop_network_capture` tears it
+    /// down — we re-prime it from every physical-iOS entry point.
+    #[cfg(target_os = "macos")]
+    async fn ensure_ios_physical_proxy(&self, serial: &str) {
+        if self.network_proxy.read().await.is_some() {
+            return;
+        }
+        let ca = match MitmAuthority::load_or_create() {
+            Ok(ca) => Arc::new(ca),
+            Err(e) => {
+                warn!(error = %e, "Failed to load MITM CA for Wi-Fi proxy pre-start");
+                return;
+            }
+        };
+        let port = ios::physical_device_proxy::deterministic_port(serial);
+        let bind =
+            std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), port);
+        match NetworkProxy::start_on(ca, bind).await {
+            Ok(proxy) => {
+                info!(%serial, %bind, "Pre-started Wi-Fi MITM proxy for physical iOS OCSP passthrough");
+                *self.network_proxy.write().await = Some(proxy);
+            }
+            Err(e) => {
+                warn!(error = %e, %bind, "Failed to pre-start Wi-Fi MITM proxy; OCSP passthrough unavailable");
+            }
+        }
+    }
+
     fn request_id(provided: &str) -> String {
         if provided.is_empty() {
             Uuid::new_v4().to_string()
@@ -339,6 +377,15 @@ impl PilotServiceImpl {
         let is_physical = self.is_active_ios_physical().await;
 
         ios::agent_launch::kill_existing_agents_on(serial).await;
+
+        // Physical iOS: re-prime the Wi-Fi MITM proxy before xcodebuild so
+        // iOS's OCSP query for the relaunched runner reaches our passthrough
+        // path. A prior test's stop_network_capture may have torn it down.
+        #[cfg(target_os = "macos")]
+        if is_physical {
+            self.ensure_ios_physical_proxy(serial).await;
+        }
+
         // On physical devices we skip the simctl-mediated pre-relaunch because
         // simctl does not work on real hardware. The XCUITest runner's own
         // `app.launch()` (inside the re-started agent) provides an equivalent
@@ -1492,13 +1539,27 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
             .map_err(|e| Status::internal(e.to_string()))?;
 
         match dm.set_active(&req.serial) {
-            Ok(()) => Ok(Response::new(proto::ActionResponse {
-                request_id,
-                success: true,
-                error_type: String::new(),
-                error_message: String::new(),
-                screenshot: Vec::new(),
-            })),
+            Ok(()) => {
+                // Drop the device_manager lock before the async pre-start so
+                // ensure_ios_physical_proxy can acquire its own locks without
+                // deadlocking against our write guard.
+                drop(dm);
+                // For physical iOS, pre-start the Wi-Fi MITM proxy
+                // immediately so any subsequent devicectl install / launch /
+                // xcodebuild invocation can't race the phone's OCSP check
+                // (which routes through the Wi-Fi proxy port on the Mac).
+                #[cfg(target_os = "macos")]
+                if self.is_active_ios_physical().await {
+                    self.ensure_ios_physical_proxy(&req.serial).await;
+                }
+                Ok(Response::new(proto::ActionResponse {
+                    request_id,
+                    success: true,
+                    error_type: String::new(),
+                    error_message: String::new(),
+                    screenshot: Vec::new(),
+                }))
+            }
             Err(e) => Ok(Response::new(proto::ActionResponse {
                 request_id,
                 success: false,
@@ -1555,45 +1616,13 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
                 // same physical device would fight its own leftover tunnel.
                 *self.ios_iproxy.write().await = None;
 
-                // Pre-start the Wi-Fi MITM proxy for physical iOS devices so
-                // iOS OCSP queries issued during runner launch reach our
-                // passthrough path. Without this, the Wi-Fi proxy payload on
-                // the phone points at a dead port, Apple trust verification
-                // fails, and iOS rejects the fresh dev-signed runner with a
-                // misleading "invalid code signature, inadequate entitlements
-                // or its profile has not been explicitly trusted" umbrella.
-                // Idempotent: skipped if a proxy is already bound.
+                // Pre-start the Wi-Fi MITM proxy for physical iOS devices.
+                // Idempotent — skipped if already bound (typically from
+                // set_device). Re-primes when prior test's stop_network_capture
+                // tore the listener down.
                 #[cfg(target_os = "macos")]
-                if is_physical && self.network_proxy.read().await.is_none() {
-                    let mitm_ca = match MitmAuthority::load_or_create() {
-                        Ok(ca) => Arc::new(ca),
-                        Err(e) => {
-                            error!(error = %e, "Failed to load MITM CA for pre-start proxy");
-                            return Ok(Response::new(proto::ActionResponse {
-                                request_id,
-                                success: false,
-                                error_type: "AGENT_START_FAILED".to_string(),
-                                error_message: format!(
-                                    "Failed to load MITM CA before starting agent: {e}"
-                                ),
-                                screenshot: Vec::new(),
-                            }));
-                        }
-                    };
-                    let port = ios::physical_device_proxy::deterministic_port(&serial);
-                    let bind = std::net::SocketAddr::new(
-                        std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-                        port,
-                    );
-                    match NetworkProxy::start_on(mitm_ca, bind).await {
-                        Ok(proxy) => {
-                            info!("Pre-started Wi-Fi MITM proxy on {bind} for physical iOS OCSP passthrough");
-                            *self.network_proxy.write().await = Some(proxy);
-                        }
-                        Err(e) => {
-                            warn!(error = %e, bind = %bind, "Failed to pre-start Wi-Fi proxy for physical iOS — OCSP passthrough unavailable, runner launch may fail if Wi-Fi proxy is configured");
-                        }
-                    }
+                if is_physical {
+                    self.ensure_ios_physical_proxy(&serial).await;
                 }
 
                 let agent_port = self.agent.read().await.port();

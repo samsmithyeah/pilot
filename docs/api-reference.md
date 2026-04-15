@@ -1127,7 +1127,7 @@ describe("custom config", () => {
 | `timeout`    | `number`                                    | Action/assertion timeout (ms)                |
 | `screenshot` | `'always' \| 'only-on-failure' \| 'never'` | Screenshot capture mode                      |
 | `retries`    | `number`                                    | Retry count for failed tests                 |
-| `trace`      | `TraceMode \| Partial<TraceConfig>`         | Trace recording configuration                |
+| `trace`      | `TraceMode \| Partial<TraceConfig>`         | Trace recording configuration. See [configuration.md](./configuration.md#traceconfig) for the full `TraceConfig` shape (includes `network`, `networkHosts`, `screenshots`, etc.). |
 | `appState`   | `string`                                    | Path to saved app state archive to restore   |
 
 The following device-shaping fields may **only** be set on a project's
@@ -1642,6 +1642,57 @@ Open the HTML test report in the default browser.
 npx pilot show-report               # opens pilot-report/index.html
 npx pilot show-report ./my-report   # custom directory
 ```
+
+### iOS physical-device commands
+
+These commands support running tests on USB-attached iPhones/iPads. See
+[docs/ios-physical-devices.md](./ios-physical-devices.md) for the full
+setup walkthrough.
+
+#### `pilot list-devices [--json]`
+
+Print a table of every device Pilot can target right now — Android (ADB),
+iOS simulators (simctl), and iOS physical (devicectl) — with a one-line
+status (`Ready` or an imperative fix). `--json` emits the row model for
+scripting.
+
+#### `pilot setup-ios-device [udid]`
+
+Run the per-device preflight checklist for a physical iOS device: pairing,
+Developer Mode, Developer Disk Image, USB transport, built agent cache,
+firewall stealth mode, and the Xcode 26 CoreDevice sudo prompt probe.
+Prints per-check `ok`/`fix` output and exits non-zero if anything blocks
+`pilot test`. With no UDID, auto-selects the single attached device.
+
+#### `pilot build-ios-agent [--team <id>] [--device|--simulator]`
+
+Build the signed `PilotAgent` XCUITest bundle for the current device /
+provisioning profile. Auto-detects the Apple Developer team ID from Xcode's
+preferences (or keychain) if `--team` is omitted. The resulting
+`.xctestrun` is cached under `~/.pilot/` and picked up automatically by
+`pilot test`.
+
+#### `pilot configure-ios-network <udid> [--ssid <name>] [--device-name <name>]`
+
+Generate a `.mobileconfig` profile that routes the physical device's Wi-Fi
+traffic through Pilot's MITM proxy for decrypted HTTPS capture, and reveal
+it in Finder so you can AirDrop it to the device. `--ssid` targets a
+specific Wi-Fi network (defaults to the host's current SSID); `--device-name`
+sets the profile's `PayloadDisplayName`.
+
+#### `pilot refresh-ios-network <udid>`
+
+Regenerate the profile for a device whose host IP or Wi-Fi SSID has
+changed since the last run. Same shape as `configure-ios-network` — the
+difference is only wording in the output.
+
+#### `pilot verify-ios-network <udid>`
+
+End-to-end sanity check that the installed profile plus the trusted CA
+actually produce decrypted HTTPS capture. Starts the proxy, asks you to
+load an HTTPS page in Safari on the device, then reports whether Pilot
+saw the request and could decrypt the body. Exits non-zero on failure
+with fix-it hints for each failure mode.
 
 ### `pilot --version` / `pilot -v`
 

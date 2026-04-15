@@ -19,7 +19,7 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { findDaemonBin } from './daemon-bin.js';
 import { PilotGrpcClient } from './grpc-client.js';
-import { findPidsOnPort } from './port-utils.js';
+import { pickFreePort } from './port-utils.js';
 
 const DIM = '\x1b[2m';
 const BOLD = '\x1b[1m';
@@ -55,21 +55,8 @@ async function callGenerateProfile(opts: Options): Promise<{
   port: number
   ssid: string
 }> {
-  const port = '50051';
-  const address = `localhost:${port}`;
-
-  // Kill any existing daemon on the target port so we always start clean.
-  const existing = findPidsOnPort(port);
-  for (const pid of existing) {
-    try {
-      process.kill(pid, 'SIGTERM');
-    } catch {
-      // Already gone
-    }
-  }
-  if (existing.length > 0) {
-    await new Promise((r) => setTimeout(r, 300));
-  }
+  const port = String(await pickFreePort());
+  const address = `127.0.0.1:${port}`;
 
   const bin = findDaemonBin();
   const child = spawn(bin, ['--port', port, '--platform', 'ios'], {

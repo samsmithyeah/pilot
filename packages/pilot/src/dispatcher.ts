@@ -412,8 +412,33 @@ export async function runParallel(opts: DispatcherOptions, _portOffset = 0): Pro
   let freshIosUdids = new Set<string>();
   let deviceSerials: string[];
 
-  if (isIos) {
-    // ─── iOS device discovery & provisioning ───
+  if (isIos && !config.simulator) {
+    // ─── Physical iOS device bucket ───
+    // No `simulator` configured → treat as a physical device run. Use the
+    // explicit `config.device` UDID when set, otherwise auto-pick the single
+    // paired USB device. Mirrors the single-worker resolution in cli.ts.
+    // Parallel workers against one physical device aren't supported (only
+    // one XCUITest session per device) — the dispatcher caps workers to 1
+    // downstream via the project's explicit `workers: 1`, but we don't
+    // enforce that here; any over-count is handled by the worker slot
+    // allocator.
+    if (config.device) {
+      deviceSerials = [config.device];
+    } else {
+      try {
+        const { resolvePhysicalIosDevice } = await import('./ios-device-resolve.js');
+        deviceSerials = [resolvePhysicalIosDevice()];
+      } catch (e) {
+        throw new Error(
+          `Physical iOS device bucket failed to resolve: ${(e as Error).message}`,
+        );
+      }
+    }
+    process.stderr.write(
+      `${DIM}Physical iOS device: ${deviceSerials[0]}${RESET}\n`,
+    );
+  } else if (isIos) {
+    // ─── iOS simulator discovery & provisioning ───
     // The daemon reports ALL booted iOS simulators. Filter to only those
     // compatible with the primary — different runtimes cause xcodebuild
     // test-without-building to fail since the xctestrun is OS-version-specific.

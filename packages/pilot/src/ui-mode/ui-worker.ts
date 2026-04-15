@@ -182,15 +182,28 @@ async function handleInit(msg: UIWorkerInitMessage): Promise<void> {
       }
     }
   } else if (config.platform === 'ios' && config.app && msg.deviceSerial) {
-    // iOS: install .app on this simulator if not already present.
-    // The CLI only installs on the primary simulator; cloned workers need it too.
+    // iOS: install the .app on this device/simulator if not already present.
+    // The CLI only installs on the primary target; cloned workers need it too.
+    // Physical devices go through devicectl, simulators go through simctl.
     const resolvedApp = path.resolve(config.rootDir, config.app);
-    const alreadyInstalled = !msg.freshEmulator
-      && config.package
-      && isAppInstalled(msg.deviceSerial, config.package);
-    if (!alreadyInstalled) {
-      sendProgress(`installing ${path.basename(resolvedApp)}`);
-      installApp(msg.deviceSerial, resolvedApp);
+    const { isPhysicalDevice, installAppOnDevice, isAppInstalledOnDevice } =
+      await import('../ios-devicectl.js');
+    const isPhys = isPhysicalDevice(msg.deviceSerial);
+    if (isPhys) {
+      const alreadyInstalled =
+        config.package && (await isAppInstalledOnDevice(msg.deviceSerial, config.package));
+      if (!alreadyInstalled) {
+        sendProgress(`installing ${path.basename(resolvedApp)} on device`);
+        await installAppOnDevice(msg.deviceSerial, resolvedApp);
+      }
+    } else {
+      const alreadyInstalled = !msg.freshEmulator
+        && config.package
+        && isAppInstalled(msg.deviceSerial, config.package);
+      if (!alreadyInstalled) {
+        sendProgress(`installing ${path.basename(resolvedApp)}`);
+        installApp(msg.deviceSerial, resolvedApp);
+      }
     }
   }
 
@@ -201,12 +214,41 @@ async function handleInit(msg: UIWorkerInitMessage): Promise<void> {
   const resolvedAgentTestApk = config.agentTestApk
     ? path.resolve(config.rootDir, config.agentTestApk)
     : undefined;
-  const resolvedIosXctestrun = config.iosXctestrun
+  let resolvedIosXctestrun = config.iosXctestrun
     ? path.resolve(config.rootDir, config.iosXctestrun)
     : undefined;
+  // Auto-detect xctestrun if omitted, mirroring the single-worker
+  // resolution in cli.ts and the parallel-worker path in worker-runner.ts.
+  if (!resolvedIosXctestrun && config.platform === 'ios' && msg.deviceSerial) {
+    const { isPhysicalDevice } = await import('../ios-devicectl.js');
+    const { findDeviceXctestrun, findSimulatorXctestrun } =
+      await import('../ios-device-resolve.js');
+    const isPhys = isPhysicalDevice(msg.deviceSerial);
+    const found = isPhys ? findDeviceXctestrun(config.rootDir) : findSimulatorXctestrun();
+    if (found) {
+      resolvedIosXctestrun = found;
+      sendProgress(`auto-detected xctestrun: ${path.basename(found)}`);
+    }
+  }
   resolvedXctestrunPath = resolvedIosXctestrun;
+  // Cache the device-signed .app path on physical iOS so the daemon can
+  // reinstall via devicectl for clearAppData (no host-filesystem container
+  // access on real hardware). Matches the cli.ts setupSequentialDevice path.
+  let resolvedIosAppPath: string | undefined;
+  if (config.platform === 'ios' && config.app && msg.deviceSerial) {
+    const { isPhysicalDevice } = await import('../ios-devicectl.js');
+    if (isPhysicalDevice(msg.deviceSerial)) {
+      resolvedIosAppPath = path.resolve(config.rootDir, config.app);
+    }
+  }
   sendProgress('starting Pilot agent');
-  await device.startAgent(config.package ?? '', resolvedAgentApk, resolvedAgentTestApk, resolvedIosXctestrun);
+  await device.startAgent(
+    config.package ?? '',
+    resolvedAgentApk,
+    resolvedAgentTestApk,
+    resolvedIosXctestrun,
+    resolvedIosAppPath,
+  );
 
   try {
     if (config.package) {

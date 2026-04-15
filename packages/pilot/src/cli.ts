@@ -1007,8 +1007,23 @@ async function provisionDevicesForBucket(
   if (desiredWorkers <= 0) return { serials: [], launched: [] };
 
   if (effectiveConfig.platform === 'ios') {
+    // Physical-device bucket: no `simulator` set → resolve a paired USB
+    // device. Parallel workers against one physical device aren't
+    // supported, so we always return a single serial here regardless of
+    // desiredWorkers; the caller's worker allocation is capped elsewhere.
     if (!effectiveConfig.simulator) {
-      throw new Error('iOS bucket has no `simulator` set in its `use:` block.');
+      if (effectiveConfig.device) {
+        return { serials: [effectiveConfig.device], launched: [] };
+      }
+      const { resolvePhysicalIosDevice } = await import('./ios-device-resolve.js');
+      try {
+        const udid = resolvePhysicalIosDevice();
+        return { serials: [udid], launched: [] };
+      } catch (e) {
+        throw new Error(
+          `iOS physical device bucket failed to resolve: ${(e as Error).message}`,
+        );
+      }
     }
     const { provisionSimulators, listBootedSimulators, cleanupStaleSimulators } =
       await import('./ios-simulator.js');

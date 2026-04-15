@@ -26,6 +26,7 @@ import { spawn } from 'node:child_process';
 import * as readline from 'node:readline';
 import { findDaemonBin } from './daemon-bin.js';
 import { PilotGrpcClient } from './grpc-client.js';
+import { pickFreePort } from './port-utils.js';
 
 const DIM = '\x1b[2m';
 const BOLD = '\x1b[1m';
@@ -51,13 +52,12 @@ interface VerifyOptions {
 // ─── Daemon lifecycle ───────────────────────────────────────────────────
 
 async function withDaemon<T>(fn: (client: PilotGrpcClient) => Promise<T>): Promise<T> {
-  const port = String(50051 + Math.floor(Math.random() * 1000));
+  const port = String(await pickFreePort());
   const bin = findDaemonBin();
   const child = spawn(bin, ['--port', port, '--platform', 'ios'], {
     stdio: ['ignore', 'ignore', 'ignore'],
   });
   child.unref();
-  await new Promise((resolve) => setTimeout(resolve, 400));
 
   const client = new PilotGrpcClient(`127.0.0.1:${port}`);
   const ready = await client.waitForReady(5_000);

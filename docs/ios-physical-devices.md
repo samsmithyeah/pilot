@@ -239,11 +239,11 @@ Run `pilot setup-ios-device` first — it surfaces most setup issues with action
 **`Password:` prompt mid-test, right after "Starting iOS agent…"** — Xcode 26's CoreDevice calls `sudo -- /usr/bin/true` before mounting the Developer Disk Image to prime the sudo cache. Pilot itself doesn't call sudo. Eliminate the prompt permanently by allowing that single binary without a password:
 
 ```sh
-echo "$USER ALL=(ALL) NOPASSWD: /usr/bin/true" | sudo tee /etc/sudoers.d/pilot-xcode-ddi
-sudo chmod 440 /etc/sudoers.d/pilot-xcode-ddi
+echo "$USER ALL=(ALL) NOPASSWD: /usr/bin/true" | sudo tee /etc/sudoers.d/zz-pilot-xcode-ddi
+sudo chmod 440 /etc/sudoers.d/zz-pilot-xcode-ddi
 ```
 
-`/usr/bin/true` is a literal no-op (exit 0, no side effects), so scoping NOPASSWD to it is safe. `pilot setup-ios-device` flags a missing rule with a ⚠ advisory and the same fix.
+`/usr/bin/true` is a literal no-op (exit 0, no side effects), so scoping NOPASSWD to it is safe. The `zz-` prefix ensures the rule sorts last in `/etc/sudoers.d/` — sudoers is last-match-wins, and without the prefix any user-specific file (e.g. `/etc/sudoers.d/<username>`) would silently override our NOPASSWD grant. `pilot setup-ios-device` flags a missing rule with a ⚠ advisory and the same fix.
 
 (An earlier version of this doc suggested `sudo DevToolsSecurity -enable` — that works on older Xcode but is a no-op on Xcode 26, where CoreDevice re-asks for auth regardless of `_developer` group membership.)
 

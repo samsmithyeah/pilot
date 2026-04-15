@@ -6,6 +6,30 @@
  */
 
 import { execFileSync, spawnSync } from 'node:child_process';
+import { createServer } from 'node:net';
+
+/**
+ * Pick a free ephemeral TCP port by binding `0` on loopback, reading the
+ * assigned port, then closing the server. Avoids the collision window that
+ * random-in-a-range schemes have when multiple CLI invocations race.
+ */
+export async function pickFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.unref();
+    server.on('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const addr = server.address();
+      if (addr && typeof addr === 'object') {
+        const port = addr.port;
+        server.close(() => resolve(port));
+      } else {
+        server.close();
+        reject(new Error('Failed to acquire ephemeral port'));
+      }
+    });
+  });
+}
 
 const DIM = '\x1b[2m';
 const RESET = '\x1b[0m';

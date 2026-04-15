@@ -236,11 +236,14 @@ export function checkSudoTruePasswordless(): CheckResult {
         'before mounting the Developer Disk Image. Run this one-time to make',
         'the prompt go away for good:',
         '',
-        '  echo "$USER ALL=(ALL) NOPASSWD: /usr/bin/true" | sudo tee /etc/sudoers.d/pilot-xcode-ddi',
-        '  sudo chmod 440 /etc/sudoers.d/pilot-xcode-ddi',
+        '  echo "$USER ALL=(ALL) NOPASSWD: /usr/bin/true" | sudo tee /etc/sudoers.d/zz-pilot-xcode-ddi',
+        '  sudo chmod 440 /etc/sudoers.d/zz-pilot-xcode-ddi',
         '',
         '/usr/bin/true has no side effects — xcodebuild only calls it to warm',
-        'the sudo cache — so NOPASSWD on that single binary is safe.',
+        'the sudo cache — so NOPASSWD on that single binary is safe. The',
+        '`zz-` prefix ensures our rule sorts after any user-specific file in',
+        '/etc/sudoers.d/ that might otherwise override it (sudoers uses',
+        'last-match-wins rule resolution).',
       ],
     };
   }

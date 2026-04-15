@@ -21,6 +21,7 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { findDaemonBin } from './daemon-bin.js';
 import { PilotGrpcClient, type DeviceInfoProto } from './grpc-client.js';
+import { pickFreePort } from './port-utils.js';
 import {
   listPhysicalDevices,
   listUsbAttachedIosDevices,
@@ -276,17 +277,13 @@ function statusStringColored(r: DeviceRow): string {
  * short-lived and doesn't need to reuse a long-running daemon.
  */
 async function listDevicesFromDaemon(): Promise<DeviceInfoProto[]> {
-  const port = String(50051 + Math.floor(Math.random() * 1000));
+  const port = String(await pickFreePort());
   const bin = findDaemonBin();
   const child = spawn(
     bin,
     ['--port', port],
     { stdio: ['ignore', 'ignore', 'ignore'] },
   );
-  // Let the daemon bind its socket. A fresh daemon needs ~100ms; we give
-  // it 400ms of headroom since cold starts on a loaded host occasionally
-  // exceed that.
-  await new Promise((resolve) => setTimeout(resolve, 400));
 
   const client = new PilotGrpcClient(`127.0.0.1:${port}`);
   const ready = await client.waitForReady(5_000);

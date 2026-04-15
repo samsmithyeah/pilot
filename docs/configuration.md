@@ -106,12 +106,17 @@ For fine-grained control, pass an object instead of a mode string:
 
 ```typescript
 interface TraceConfig {
-  mode: TraceMode;       // Recording mode (default: "off")
-  screenshots: boolean;  // Capture before/after screenshots (default: true)
-  snapshots: boolean;    // Capture view hierarchy XML (default: true)
-  sources: boolean;      // Include test source files (default: true)
-  attachments: boolean;  // Include user attachments (default: true)
-  network: boolean;      // Capture HTTP/HTTPS traffic via proxy (default: true)
+  mode: TraceMode;         // Recording mode (default: "off")
+  screenshots: boolean;    // Capture before/after screenshots (default: true)
+  snapshots: boolean;      // Capture view hierarchy XML (default: true)
+  sources: boolean;        // Include test source files (default: true)
+  attachments: boolean;    // Include user attachments (default: true)
+  network: boolean;        // Capture HTTP/HTTPS traffic via proxy (default: true)
+  networkHosts?: string[]; // Hostname allowlist (glob patterns). When set,
+                           // only entries whose host matches a pattern are
+                           // kept in the trace archive. Primarily useful on
+                           // physical iOS, where the Wi-Fi proxy is
+                           // system-wide — see docs/ios-network-capture.md.
 }
 ```
 

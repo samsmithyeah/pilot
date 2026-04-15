@@ -128,17 +128,30 @@ async function handleInit(msg: InitMessage): Promise<void> {
       }
     }
   } else if (config.platform === 'ios' && config.app && msg.deviceSerial) {
-    // iOS: install .app on this simulator if not already present.
-    // The CLI only installs on the primary simulator; cloned workers need it too.
+    // iOS: install the .app on this device/simulator if not already present.
+    // The CLI only installs on the primary target; cloned workers need it too.
     // Same fresh-simulator caveat as Android — reinstall unconditionally on
     // a freshly-cloned simulator since the bundle may be stale.
+    // Physical devices go through devicectl, simulators go through simctl.
     const resolvedApp = path.resolve(config.rootDir, config.app);
-    const alreadyInstalled = !msg.freshEmulator
-      && config.package
-      && isAppInstalled(msg.deviceSerial, config.package);
-    if (!alreadyInstalled) {
-      sendProgress(`installing ${path.basename(resolvedApp)}`);
-      installApp(msg.deviceSerial, resolvedApp);
+    const { isPhysicalDevice, installAppOnDevice, isAppInstalledOnDevice } =
+      await import('./ios-devicectl.js');
+    const isPhys = isPhysicalDevice(msg.deviceSerial);
+    if (isPhys) {
+      const alreadyInstalled =
+        config.package && (await isAppInstalledOnDevice(msg.deviceSerial, config.package));
+      if (!alreadyInstalled) {
+        sendProgress(`installing ${path.basename(resolvedApp)} on device`);
+        await installAppOnDevice(msg.deviceSerial, resolvedApp);
+      }
+    } else {
+      const alreadyInstalled = !msg.freshEmulator
+        && config.package
+        && isAppInstalled(msg.deviceSerial, config.package);
+      if (!alreadyInstalled) {
+        sendProgress(`installing ${path.basename(resolvedApp)}`);
+        installApp(msg.deviceSerial, resolvedApp);
+      }
     }
   }
 
@@ -149,9 +162,23 @@ async function handleInit(msg: InitMessage): Promise<void> {
   const resolvedAgentTestApk = config.agentTestApk
     ? path.resolve(config.rootDir, config.agentTestApk)
     : undefined;
-  const resolvedIosXctestrun = config.iosXctestrun
+  let resolvedIosXctestrun = config.iosXctestrun
     ? path.resolve(config.rootDir, config.iosXctestrun)
     : undefined;
+  // Auto-detect xctestrun if omitted, mirroring the single-worker
+  // resolution in cli.ts. Picks the device-slice xctestrun under
+  // ios-agent/.build-device for physical devices and the newest
+  // simulator-slice xctestrun from Xcode DerivedData for simulators.
+  if (!resolvedIosXctestrun && config.platform === 'ios' && msg.deviceSerial) {
+    const { isPhysicalDevice } = await import('./ios-devicectl.js');
+    const { findDeviceXctestrun, findSimulatorXctestrun } = await import('./ios-device-resolve.js');
+    const isPhys = isPhysicalDevice(msg.deviceSerial);
+    const found = isPhys ? findDeviceXctestrun(config.rootDir) : findSimulatorXctestrun();
+    if (found) {
+      resolvedIosXctestrun = found;
+      sendProgress(`auto-detected xctestrun: ${path.basename(found)}`);
+    }
+  }
   const resolvedIosAppPath = config.platform === 'ios' && config.app
     ? path.resolve(config.rootDir, config.app)
     : undefined;
