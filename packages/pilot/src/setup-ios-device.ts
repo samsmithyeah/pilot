@@ -288,23 +288,22 @@ function printCheck(result: CheckResult): void {
 function printDeviceStatus(devices: PhysicalDeviceInfo[]): void {
   for (const device of devices) {
     const unpaired = !device.isPaired;
-    const ddiOff = !device.ddiServicesAvailable;
+    // Note: we intentionally do NOT inspect `ddiServicesAvailable` here.
+    // That field only reflects whether CoreDevice is CURRENTLY holding a
+    // Developer Disk Image assertion, not whether one can be mounted on
+    // demand. Pilot's agent-start path mounts the DDI itself at test time,
+    // so flagging DDI-not-mounted in a passive preflight false-alarms on
+    // healthy devices (observed: real iPhone that successfully runs
+    // 119/119 tests but shows `ddiServicesAvailable: false` when idle).
 
-    // Green if fully ready, yellow if paired but DDI missing, red if unpaired.
-    const color = unpaired ? red : ddiOff ? yellow : green;
-    const marker = unpaired ? '✗' : ddiOff ? '⚠' : '✓';
+    const color = unpaired ? red : green;
+    const marker = unpaired ? '✗' : '✓';
     console.log(`  ${color(marker)} ${device.name} ${dim(`(${device.udid})`)}`);
     console.log(`      ${dim(`iOS ${device.osVersion || '?'}`)}`);
     if (unpaired) {
       console.log(`      ${red('not paired')} — open Xcode → Window → Devices and Simulators,`);
       console.log(`        ${dim('wait for the device to appear, then click "Use for Development".')}`);
-    }
-    if (ddiOff && !unpaired) {
-      console.log(`      ${yellow('Developer Disk Image not mounted')} — this usually resolves`);
-      console.log(`        ${dim('on the first `xcodebuild -destination id=<udid>` run, or by')}`);
-      console.log(`        ${dim('opening the device in Xcode → Window → Devices and Simulators.')}`);
-    }
-    if (!unpaired && !ddiOff) {
+    } else {
       console.log(`      ${green('ready for pilot test')}`);
     }
   }
@@ -346,10 +345,12 @@ export async function runSetupIosDevice(): Promise<void> {
 
   // Advisory checks (e.g. firewall stealth mode) don't block the overall
   // preflight — they print a ⚠ hint but `pilot test` still works for the
-  // basic device path.
-  const blockingOk = results.every((r) => r.ok || r.advisory === true) && deviceCheck.ok
-    && deviceCheck.devices.every((d) => d.isPaired && d.ddiServicesAvailable);
-  const allOk = blockingOk;
+  // basic device path. We intentionally don't require
+  // `ddiServicesAvailable` here either; it's an unreliable "is Xcode
+  // currently holding a DDI lease?" signal that false-alarms on healthy
+  // idle devices (Pilot's `startAgent` flow mounts the DDI on demand).
+  const allOk = results.every((r) => r.ok || r.advisory === true) && deviceCheck.ok
+    && deviceCheck.devices.every((d) => d.isPaired);
 
   if (allOk) {
     console.log(green('✓ All checks passed. You\'re ready to run tests on a physical device.'));
