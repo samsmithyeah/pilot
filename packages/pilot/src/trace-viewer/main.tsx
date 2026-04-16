@@ -516,12 +516,27 @@ style.textContent = `
   .hierarchy-search input:focus { border-color: var(--color-accent); }
 
   /* Errors tab */
-  .error-block { display: flex; flex-direction: column; gap: 8px; }
-  .error-entry { background: var(--color-error-bg); border: 1px solid var(--color-error-border); border-radius: 4px; padding: 10px; }
-  .error-entry-selected { border-color: var(--color-error); }
-  .error-entry-label { font-size: 11px; color: var(--color-text-muted); margin-bottom: 4px; font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace; }
-  .error-message { color: var(--color-error); font-weight: 500; margin-bottom: 6px; font-size: 12px; }
-  .error-stack { font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace; font-size: 11px; color: var(--color-text-muted); white-space: pre-wrap; word-break: break-all; }
+  .error-block { display: flex; flex-direction: column; gap: 12px; }
+  .error-entry { background: var(--color-error-bg); border: 1px solid var(--color-error-border); border-left: 3px solid var(--color-error); border-radius: 4px; padding: 10px 12px; }
+  .error-entry-selected { border-color: var(--color-error); box-shadow: 0 0 0 1px var(--color-error) inset; }
+  .error-title { color: var(--color-error); font-weight: 600; font-size: 12px; font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace; margin-bottom: 8px; word-break: break-word; }
+  .error-grid { display: grid; grid-template-columns: 80px 1fr; gap: 3px 12px; font-size: 12px; margin-bottom: 8px; }
+  .error-grid:empty { display: none; }
+  .error-grid-key { color: var(--color-text-muted); text-transform: lowercase; }
+  .error-grid-value { color: var(--color-text-secondary); word-break: break-word; }
+  .error-grid-value.mono { font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace; font-size: 11px; }
+  .error-grid-value.expected { font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace; font-size: 11px; color: var(--color-success); }
+  .error-grid-value.received { font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace; font-size: 11px; color: var(--color-error); }
+  .error-message { color: var(--color-error); font-size: 12px; margin-top: 4px; word-break: break-word; }
+  .error-log { margin-top: 10px; border-top: 1px solid var(--color-error-border); padding-top: 8px; }
+  .error-log-title { color: var(--color-text-muted); font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+  .error-log-list { list-style: none; margin: 0; padding: 0; font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace; font-size: 11px; color: var(--color-text-secondary); }
+  .error-log-list li { padding: 1px 0 1px 12px; position: relative; white-space: pre-wrap; word-break: break-word; }
+  .error-log-list li::before { content: '–'; position: absolute; left: 0; color: var(--color-text-faintest); }
+  .error-stack-details { margin-top: 8px; }
+  .error-stack-details summary { color: var(--color-text-muted); font-size: 11px; cursor: pointer; user-select: none; }
+  .error-stack-details summary:hover { color: var(--color-text-secondary); }
+  .error-stack { font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace; font-size: 11px; color: var(--color-text-muted); white-space: pre-wrap; word-break: break-all; margin-top: 6px; padding: 6px 8px; background: var(--color-bg); border-radius: 3px; }
   .test-error-banner { display: flex; align-items: center; gap: 6px; padding: 6px 12px; background: var(--color-error-bg); border-bottom: 1px solid var(--color-error-border); cursor: pointer; font-size: 12px; color: var(--color-error); flex-shrink: 0; }
   .test-error-banner:hover { background: var(--color-error-border); }
   .test-error-banner-icon { font-weight: 700; flex-shrink: 0; }

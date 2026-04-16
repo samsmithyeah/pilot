@@ -395,50 +395,112 @@ function HierarchyTabWrapper({ event, hierarchies, onNodeSelect }: {
 
 // ─── Errors Tab ───
 
+function errorTitle(ev: ActionTraceEvent | AssertionTraceEvent): string {
+  if (ev.type === 'assertion') {
+    const neg = ev.negated ? 'not.' : '';
+    return `Error: expect(locator).${neg}${ev.assertion}() failed`;
+  }
+  return `Error: ${ev.action}() failed`;
+}
+
 function ErrorsTab({ event, events, testError }: {
   event: ActionTraceEvent | AssertionTraceEvent | undefined
   events: AnyTraceEvent[]
   testError?: string
 }) {
-  // Collect all failed actions/assertions from the trace
   const failedEvents = events.filter((e): e is ActionTraceEvent | AssertionTraceEvent =>
     (e.type === 'action' && !(e as ActionTraceEvent).success) ||
     (e.type === 'assertion' && !(e as AssertionTraceEvent).passed),
   );
 
+  // The test-level error is usually the message of the failing assertion, so
+  // suppress it when a matching failed event exists (mirrors Playwright, which
+  // shows one error block per failure rather than duplicating at the bottom).
+  const showTestError = testError
+    && !failedEvents.some((ev) => ev.error && testError.includes(ev.error));
+
   if (failedEvents.length === 0 && !testError) return <div class="no-content">No errors</div>;
 
   return (
     <div class="error-block">
-      {failedEvents.map((ev, i) => {
-        const isSelected = event && ev.actionIndex === event.actionIndex && ev.type === event.type;
-        const label = ev.type === 'action'
-          ? `${ev.action}${ev.selector ? ` ${ev.selector}` : ''}`
-          : `expect ${ev.assertion}${ev.selector ? ` ${ev.selector}` : ''}`;
-        const error = ev.type === 'action' ? ev.error : ev.error;
-        const stack = ev.type === 'action' ? ev.errorStack : undefined;
-
-        return (
-          <div key={i} class={`error-entry${isSelected ? ' error-entry-selected' : ''}`}>
-            <div class="error-entry-label">{label}</div>
-            {error && <div class="error-message">{error}</div>}
-            {stack && <pre class="error-stack">{stack}</pre>}
-            {ev.type === 'assertion' && ev.expected !== undefined && (
-              <div style={{ marginTop: '4px', fontSize: '12px' }}>
-                <div><span style={{ color: 'var(--color-text-muted)' }}>Expected: </span><span style={{ color: 'var(--color-success)' }}>{ev.expected}</span></div>
-                {ev.actual !== undefined && (
-                  <div><span style={{ color: 'var(--color-text-muted)' }}>Actual: </span><span style={{ color: 'var(--color-error)' }}>{ev.actual}</span></div>
-                )}
-              </div>
-            )}
-          </div>
-        );
-      })}
-      {testError && (
-        <div class="error-entry error-entry-test">
-          <div class="error-entry-label">Test Error</div>
+      {failedEvents.map((ev, i) => (
+        <ErrorEntry
+          key={i}
+          ev={ev}
+          isSelected={!!event && event.actionIndex === ev.actionIndex && event.type === ev.type}
+        />
+      ))}
+      {showTestError && (
+        <div class="error-entry">
+          <div class="error-title">Test Error</div>
           <div class="error-message">{testError}</div>
         </div>
+      )}
+    </div>
+  );
+}
+
+function ErrorEntry({ ev, isSelected }: { ev: ActionTraceEvent | AssertionTraceEvent; isSelected: boolean }) {
+  const title = errorTitle(ev);
+  const log = ev.type === 'action' ? ev.log : undefined;
+  const stack = ev.type === 'action' ? ev.errorStack : undefined;
+  const isAssertion = ev.type === 'assertion';
+
+  return (
+    <div class={`error-entry${isSelected ? ' error-entry-selected' : ''}`}>
+      <div class="error-title">{title}</div>
+
+      <div class="error-grid">
+        {ev.selector && (
+          <>
+            <span class="error-grid-key">Locator</span>
+            <span class="error-grid-value mono">{ev.selector}</span>
+          </>
+        )}
+        {isAssertion && ev.expected !== undefined && (
+          <>
+            <span class="error-grid-key">Expected</span>
+            <span class="error-grid-value expected">{ev.expected}</span>
+          </>
+        )}
+        {isAssertion && ev.actual !== undefined && (
+          <>
+            <span class="error-grid-key">Received</span>
+            <span class="error-grid-value received">{ev.actual}</span>
+          </>
+        )}
+        {isAssertion && (
+          <>
+            <span class="error-grid-key">Timeout</span>
+            <span class="error-grid-value mono">{ev.duration}ms ({ev.attempts} attempt{ev.attempts === 1 ? '' : 's'})</span>
+          </>
+        )}
+        {ev.sourceLocation && (
+          <>
+            <span class="error-grid-key">At</span>
+            <span class="error-grid-value mono">{ev.sourceLocation.file}:{ev.sourceLocation.line}</span>
+          </>
+        )}
+      </div>
+
+      {ev.error && !isAssertion && (
+        <div class="error-message">{ev.error}</div>
+      )}
+
+      {log && log.length > 0 && (
+        <div class="error-log">
+          <div class="error-log-title">Call log</div>
+          <ul class="error-log-list">
+            {log.map((line, i) => <li key={i}>{line}</li>)}
+          </ul>
+        </div>
+      )}
+
+      {stack && (
+        <details class="error-stack-details">
+          <summary>Stack trace</summary>
+          <pre class="error-stack">{stack}</pre>
+        </details>
       )}
     </div>
   );
