@@ -12,7 +12,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, RwLock};
 use tracing::{debug, warn};
 
-use crate::network_proxy::{NetworkHandler, ParsedRequest, ParsedResponse};
+use crate::network_proxy::{NetworkHandler, ParsedRequest, ParsedResponse, RequestOutcome};
 use crate::proto;
 
 /// Timeout waiting for the SDK to send a [`RouteDecision`] before we
@@ -39,7 +39,6 @@ pub(crate) enum ResolvedDecision {
     /// The SDK wants to fetch the real upstream response first. The caller
     /// should perform the upstream call and then call
     /// [`RouteInterceptHandler::complete_fetch`] with the result.
-    #[allow(dead_code)]
     Fetch {
         url: Option<String>,
         method: Option<String>,
@@ -292,14 +291,17 @@ impl NetworkHandler for RouteInterceptHandler {
         req: &mut ParsedRequest,
         hostname: &str,
         is_https: bool,
-    ) -> Option<ParsedResponse> {
-        let (decision, intercept_id) = self.intercept(req, hostname, is_https).await?;
+    ) -> RequestOutcome {
+        let (decision, intercept_id) = match self.intercept(req, hostname, is_https).await {
+            Some(pair) => pair,
+            None => return RequestOutcome::NotMatched,
+        };
 
         match decision {
             ResolvedDecision::Abort => {
                 // Return a synthetic "connection reset" response. The proxy
                 // will write this to the client then close the connection.
-                Some(ParsedResponse {
+                RequestOutcome::Synthesized(ParsedResponse {
                     status_code: 0,
                     headers: vec![("connection".to_string(), "close".to_string())],
                     body: Vec::new(),
@@ -341,9 +343,9 @@ impl NetworkHandler for RouteInterceptHandler {
                         req.body = b;
                     }
                 }
-                None // proceed to upstream
+                RequestOutcome::Continued
             }
-            ResolvedDecision::Fulfill(resp) => Some(resp),
+            ResolvedDecision::Fulfill(resp) => RequestOutcome::Synthesized(resp),
             ResolvedDecision::Fetch {
                 url: fetch_url,
                 method: fetch_method,
@@ -370,21 +372,22 @@ impl NetworkHandler for RouteInterceptHandler {
                         if let Some(fulfill) =
                             self.complete_fetch(&intercept_id, &upstream_resp).await
                         {
-                            Some(fulfill_to_response(fulfill))
+                            RequestOutcome::Synthesized(fulfill_to_response(fulfill))
                         } else {
                             // Timeout or error — return the original upstream response
-                            Some(upstream_resp)
+                            RequestOutcome::Synthesized(upstream_resp)
                         }
                     }
                     None => {
                         // Upstream fetch failed. Signal the SDK so its
-                        // `route.fetch()` promise rejects instead of hanging
-                        // until the handler timeout. `status = 0` is the
-                        // sentinel — not a valid HTTP status, so it's
-                        // unambiguous (and matches the proto's default).
+                        // `route.fetch()` promise rejects (status=0 sentinel),
+                        // then abort so the proxy doesn't silently make a
+                        // SECOND upstream attempt — important for side-
+                        // effecting methods like POST where a retry could
+                        // double-process. The app sees a clean network error.
                         warn!(
                             %intercept_id, %target_url,
-                            "RouteFetch: upstream request failed; signalling SDK and forwarding original",
+                            "RouteFetch: upstream request failed; aborting to avoid duplicate upstream attempt",
                         );
                         let msg = proto::NetworkRouteServerMessage {
                             msg: Some(proto::network_route_server_message::Msg::FetchedResponse(
@@ -397,7 +400,12 @@ impl NetworkHandler for RouteInterceptHandler {
                             )),
                         };
                         let _ = self.to_sdk.send(msg).await;
-                        None
+                        RequestOutcome::Synthesized(ParsedResponse {
+                            status_code: 0,
+                            headers: vec![("connection".to_string(), "close".to_string())],
+                            body: Vec::new(),
+                            raw_bytes: Vec::new(),
+                        })
                     }
                 }
             }
@@ -529,6 +537,7 @@ async fn fetch_upstream(
             || lower == "proxy-connection"
             || lower == "accept-encoding"
             || lower == "content-length"
+            || lower == "transfer-encoding"
         {
             continue;
         }
@@ -598,6 +607,13 @@ async fn fetch_upstream_tls(
     read_http_response(&mut tls_stream).await
 }
 
+/// Hard ceiling on how long `read_http_response` will keep reading. The
+/// per-read 30 s timeout alone isn't enough — a slow-drip server that sends
+/// one byte every 29 s keeps the connection alive forever. 60 s is generous
+/// for legitimate slow responses but stops obvious denial-of-service drips.
+const FETCH_TOTAL_READ_TIMEOUT: Duration = Duration::from_secs(60);
+const FETCH_PER_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
 async fn read_http_response<S: tokio::io::AsyncRead + Unpin>(
     stream: &mut S,
 ) -> Option<ParsedResponse> {
@@ -607,19 +623,35 @@ async fn read_http_response<S: tokio::io::AsyncRead + Unpin>(
     let mut buf = vec![0u8; 8192];
     let max_size = 10 * 1024 * 1024; // 10 MB
     let mut truncated = false;
-    loop {
-        match tokio::time::timeout(std::time::Duration::from_secs(30), stream.read(&mut buf)).await
-        {
-            Ok(Ok(0)) => break,
-            Ok(Ok(n)) => {
-                data.extend_from_slice(&buf[..n]);
-                if data.len() > max_size {
-                    truncated = true;
-                    break;
+    let mut timed_out_total = false;
+    let read_loop = async {
+        loop {
+            match tokio::time::timeout(FETCH_PER_READ_TIMEOUT, stream.read(&mut buf)).await {
+                Ok(Ok(0)) => break,
+                Ok(Ok(n)) => {
+                    data.extend_from_slice(&buf[..n]);
+                    if data.len() > max_size {
+                        truncated = true;
+                        break;
+                    }
                 }
+                Ok(Err(_)) | Err(_) => break,
             }
-            Ok(Err(_)) | Err(_) => break,
         }
+    };
+    if tokio::time::timeout(FETCH_TOTAL_READ_TIMEOUT, read_loop)
+        .await
+        .is_err()
+    {
+        timed_out_total = true;
+    }
+
+    if timed_out_total {
+        warn!(
+            bytes_read = data.len(),
+            timeout_secs = FETCH_TOTAL_READ_TIMEOUT.as_secs(),
+            "route.fetch() upstream response exceeded total read budget; returning partial data",
+        );
     }
 
     if truncated {
@@ -653,11 +685,37 @@ async fn read_http_response<S: tokio::io::AsyncRead + Unpin>(
         raw_body
     };
 
-    // Strip transfer-encoding from headers since the body is now decoded
-    let headers: Vec<(String, String)> = headers
+    // Strip transfer-encoding (body is now decoded) and any stale
+    // content-length (truncation or chunked-decode will have changed the
+    // real body size; if the handler echoes these headers into
+    // route.fulfill(), a mismatched content-length would make the client
+    // hang waiting for promised bytes that never arrive).
+    let mut headers: Vec<(String, String)> = headers
         .into_iter()
-        .filter(|(k, _)| !k.eq_ignore_ascii_case("transfer-encoding"))
+        .filter(|(k, _)| {
+            !k.eq_ignore_ascii_case("transfer-encoding")
+                && !k.eq_ignore_ascii_case("content-length")
+        })
         .collect();
+    headers.push(("content-length".to_string(), body.len().to_string()));
+
+    // If the upstream ignored our `Accept-Encoding: identity` request and
+    // returned a compressed body, surface it loudly — we don't decompress
+    // here, so `response.json()` / `response.text()` in the SDK will fail
+    // on the raw compressed bytes. (Follow-up: PILOT-191 will add gzip/br.)
+    if let Some((_, enc)) = headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-encoding"))
+    {
+        let e = enc.to_ascii_lowercase();
+        if e.contains("gzip") || e.contains("deflate") || e.contains("br") || e.contains("zstd") {
+            warn!(
+                content_encoding = enc.as_str(),
+                "route.fetch() upstream returned a compressed response despite Accept-Encoding: identity; \
+                 SDK .json()/.text() will fail on the raw bytes",
+            );
+        }
+    }
 
     Some(ParsedResponse {
         status_code,
@@ -719,9 +777,12 @@ fn glob_to_regex(pattern: &str) -> Result<regex::Regex, regex::Error> {
                     // `**` — match everything (including `/`)
                     re.push_str(".*");
                     i += 2;
-                    // Skip optional trailing `/` after `**/`
+                    // A trailing `/` after `**` is REQUIRED in the match
+                    // (not `(?:/)?`) so `**/api` doesn't match `example.comapi`
+                    // — the separator must land on a `/` boundary. This
+                    // matches Playwright semantics for path-segment globs.
                     if i < chars.len() && chars[i] == '/' {
-                        re.push_str("(?:/)?");
+                        re.push('/');
                         i += 1;
                     }
                 } else {
@@ -908,5 +969,20 @@ mod tests {
         assert!(re.is_match("https://example.com/api/v1/posts"));
         assert!(re.is_match("https://example.com/api/v2/posts"));
         assert!(!re.is_match("https://example.com/api/v12/posts"));
+    }
+
+    #[test]
+    fn glob_double_star_requires_slash_separator() {
+        // Regression: `**/api` used to compile to `.*(?:/)?api` and thus
+        // incorrectly matched URLs like `https://example.comapi` where the
+        // `/` separator was absent. The separator is now required.
+        let re = glob_to_regex("**/api").unwrap();
+        assert!(re.is_match("https://example.com/api"));
+        assert!(!re.is_match("https://example.comapi"));
+        assert!(!re.is_match("example.comapi"));
+
+        let re2 = glob_to_regex("**/api/**").unwrap();
+        assert!(re2.is_match("https://example.com/api/posts"));
+        assert!(!re2.is_match("https://example.comapi/posts"));
     }
 }

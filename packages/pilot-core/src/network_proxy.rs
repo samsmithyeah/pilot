@@ -82,6 +82,23 @@ pub(crate) struct ParsedResponse {
     pub raw_bytes: Vec<u8>,
 }
 
+/// Outcome of `NetworkHandler::on_request`. Three distinct states because
+/// "no route matched" (passthrough) and "route matched + `continue()`" must
+/// be distinguishable — they look the same to the proxy (forward upstream)
+/// but are different in the trace log's `route_action` field.
+pub(crate) enum RequestOutcome {
+    /// No registered route matched this URL. Forward the original request
+    /// upstream, log as untracked passthrough.
+    NotMatched,
+    /// A route matched and the handler chose `continue()` (possibly with
+    /// mutations already applied to `req`). Forward upstream, log as
+    /// `route_action: "continued"`.
+    Continued,
+    /// A route matched and produced a synthetic response (abort/fulfill).
+    /// Do not forward upstream; return `resp` to the client.
+    Synthesized(ParsedResponse),
+}
+
 /// Hook trait for request/response transformation and synthetic responses.
 ///
 /// All methods have no-op defaults. PILOT-182 adds the insertion points;
@@ -90,17 +107,16 @@ pub(crate) struct ParsedResponse {
 #[async_trait::async_trait]
 pub(crate) trait NetworkHandler: Send + Sync {
     /// Inspect (and optionally mutate) a request before it's forwarded to
-    /// upstream. If this returns `Some(resp)`, the upstream call is skipped
-    /// and `resp` is returned directly to the client (route fulfillment /
-    /// abort). `hostname` and `is_https` are provided so the handler can
+    /// upstream. See [`RequestOutcome`] for the three possible states.
+    /// `hostname` and `is_https` are provided so the handler can
     /// reconstruct the full URL.
     async fn on_request(
         &self,
         _req: &mut ParsedRequest,
         _hostname: &str,
         _is_https: bool,
-    ) -> Option<ParsedResponse> {
-        None
+    ) -> RequestOutcome {
+        RequestOutcome::NotMatched
     }
 
     /// Inspect (and optionally mutate) a response before it's written back
@@ -1361,36 +1377,49 @@ async fn handle_mitm_http<C, U>(
         // new shape. The synthetic-response branch never forwards upstream,
         // so we skip the re-encode there — it's wasted work (`record_entry`
         // reads structured fields, not `raw_bytes`).
+        //
+        // The outcome drives `route_action` on the pass-through record_entry
+        // below — "continued" for matched+continue, "" for passthrough.
+        let mut route_action_on_pass: &'static str = "";
         if let Some(h) = handler.as_ref() {
-            if let Some(mut synth) = h.on_request(&mut req, hostname, is_https).await {
-                if synth.status_code == 0 {
-                    // Abort: drop the connection without writing anything.
-                    // A clean TCP close triggers a network error in the app's
-                    // HTTP client without corrupting its state (important for
-                    // iOS NSURLSession which crashes on malformed responses).
-                    h.notify_response(&req, &synth, hostname, is_https, "aborted")
+            match h.on_request(&mut req, hostname, is_https).await {
+                RequestOutcome::Synthesized(mut synth) => {
+                    if synth.status_code == 0 {
+                        // Abort: drop the connection without writing anything.
+                        // A clean TCP close triggers a network error in the app's
+                        // HTTP client without corrupting its state (important for
+                        // iOS NSURLSession which crashes on malformed responses).
+                        h.notify_response(&req, &synth, hostname, is_https, "aborted")
+                            .await;
+                        record_entry(&state, &req, &synth, hostname, is_https, start, "aborted")
+                            .await;
+                        return;
+                    }
+                    if synth.raw_bytes.is_empty() {
+                        synth.raw_bytes = reencode_response(&synth);
+                    }
+                    if client_stream.write_all(&synth.raw_bytes).await.is_err() {
+                        return;
+                    }
+                    let close = has_connection_close(&synth.headers);
+                    h.notify_response(&req, &synth, hostname, is_https, "mocked")
                         .await;
-                    record_entry(&state, &req, &synth, hostname, is_https, start, "aborted").await;
-                    return;
+                    record_entry(&state, &req, &synth, hostname, is_https, start, "mocked").await;
+                    if close {
+                        return;
+                    }
+                    continue;
                 }
-                if synth.raw_bytes.is_empty() {
-                    synth.raw_bytes = reencode_response(&synth);
+                RequestOutcome::Continued => {
+                    // Handler may have mutated `req`, so reserialize before
+                    // forwarding upstream.
+                    req.raw_bytes = reencode_request(&req);
+                    route_action_on_pass = "continued";
                 }
-                if client_stream.write_all(&synth.raw_bytes).await.is_err() {
-                    return;
+                RequestOutcome::NotMatched => {
+                    // No route matched — forward untouched, leave action empty.
                 }
-                let close = has_connection_close(&synth.headers);
-                h.notify_response(&req, &synth, hostname, is_https, "mocked")
-                    .await;
-                record_entry(&state, &req, &synth, hostname, is_https, start, "mocked").await;
-                if close {
-                    return;
-                }
-                continue;
             }
-            // Non-synthetic path: the handler may have mutated `req`, so
-            // reserialize before forwarding upstream.
-            req.raw_bytes = reencode_request(&req);
         }
 
         if upstream_stream.write_all(&req.raw_bytes).await.is_err() {
@@ -1420,9 +1449,19 @@ async fn handle_mitm_http<C, U>(
         let connection_close = has_connection_close(&resp.headers);
 
         if let Some(h) = handler.as_ref() {
-            h.notify_response(&req, &resp, hostname, is_https, "").await;
+            h.notify_response(&req, &resp, hostname, is_https, route_action_on_pass)
+                .await;
         }
-        record_entry(&state, &req, &resp, hostname, is_https, start, "").await;
+        record_entry(
+            &state,
+            &req,
+            &resp,
+            hostname,
+            is_https,
+            start,
+            route_action_on_pass,
+        )
+        .await;
 
         if connection_close {
             return;
@@ -1558,13 +1597,33 @@ async fn handle_http(
         // device.on('request') see the pre-mutation request.
         h.notify_request(&parsed_req, hostname, false).await;
 
-        if let Some(mut synth) = h.on_request(&mut parsed_req, hostname, false).await {
-            if synth.status_code == 0 {
-                // Abort: drop the connection without sending anything.
-                // This causes a clean TCP RST / connection-closed error in
-                // the app's HTTP client rather than a malformed response
-                // that could crash iOS's NSURLSession.
-                h.notify_response(&parsed_req, &synth, hostname, false, "aborted")
+        match h.on_request(&mut parsed_req, hostname, false).await {
+            RequestOutcome::Synthesized(mut synth) => {
+                if synth.status_code == 0 {
+                    // Abort: drop the connection without sending anything.
+                    // This causes a clean TCP RST / connection-closed error in
+                    // the app's HTTP client rather than a malformed response
+                    // that could crash iOS's NSURLSession.
+                    h.notify_response(&parsed_req, &synth, hostname, false, "aborted")
+                        .await;
+                    record_entry(
+                        &state,
+                        &parsed_req,
+                        &synth,
+                        hostname,
+                        false,
+                        start,
+                        "aborted",
+                    )
+                    .await;
+                    return;
+                }
+                // Handler returned a synthetic response — send it to the client.
+                if synth.raw_bytes.is_empty() {
+                    synth.raw_bytes = reencode_response(&synth);
+                }
+                let _ = client.write_all(&synth.raw_bytes).await;
+                h.notify_response(&parsed_req, &synth, hostname, false, "mocked")
                     .await;
                 record_entry(
                     &state,
@@ -1573,38 +1632,25 @@ async fn handle_http(
                     hostname,
                     false,
                     start,
-                    "aborted",
+                    "mocked",
                 )
                 .await;
                 return;
             }
-            // Handler returned a synthetic response — send it to the client.
-            if synth.raw_bytes.is_empty() {
-                synth.raw_bytes = reencode_response(&synth);
+            RequestOutcome::Continued => {
+                // Route matched + handler called `continue()` (possibly with
+                // mutations). Apply them back to the local variables used by
+                // the upstream request builder below.
+                was_continued = true;
+                effective_method = parsed_req.method;
+                effective_path = parsed_req.path;
+                req_headers = parsed_req.headers;
+                request_body = parsed_req.body;
             }
-            let _ = client.write_all(&synth.raw_bytes).await;
-            h.notify_response(&parsed_req, &synth, hostname, false, "mocked")
-                .await;
-            record_entry(
-                &state,
-                &parsed_req,
-                &synth,
-                hostname,
-                false,
-                start,
-                "mocked",
-            )
-            .await;
-            return;
+            RequestOutcome::NotMatched => {
+                // No registered route matched this URL — forward original.
+            }
         }
-        // Handler returned None — route.continue() was called (or no
-        // route matched). Apply mutations from the handler back to the
-        // local variables used by the upstream request builder below.
-        was_continued = true;
-        effective_method = parsed_req.method;
-        effective_path = parsed_req.path;
-        req_headers = parsed_req.headers;
-        request_body = parsed_req.body;
     }
 
     // Rebuild the request with a relative path for the upstream server

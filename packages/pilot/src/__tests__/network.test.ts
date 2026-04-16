@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { PilotRequest, Route, FetchedAPIResponse, matchUrlPattern } from '../network.js';
+import {
+  PilotRequest, Route, FetchedAPIResponse, matchUrlPattern, patternsEqual,
+} from '../network.js';
 
 // ─── matchUrlPattern (glob matching) ───
 
@@ -32,6 +34,15 @@ describe('matchUrlPattern', () => {
       expect(matchUrlPattern('https://jsonplaceholder.typicode.com/users/1', '**/posts*')).toBe(false);
     });
 
+    it('** requires a / separator (does not match example.comapi for **/api)', () => {
+      // Regression: the optional-slash form `.*(?:/)?api` let `**/api` match
+      // `example.comapi` (no separator). The separator is now required.
+      expect(matchUrlPattern('https://example.com/api', '**/api')).toBe(true);
+      expect(matchUrlPattern('https://example.comapi', '**/api')).toBe(false);
+      expect(matchUrlPattern('https://example.com/api/posts', '**/api/**')).toBe(true);
+      expect(matchUrlPattern('https://example.comapi/posts', '**/api/**')).toBe(false);
+    });
+
     it('{a,b} matches alternatives', () => {
       expect(matchUrlPattern('https://example.com/api/posts', 'https://example.com/{api,v2}/*')).toBe(true);
       expect(matchUrlPattern('https://example.com/v2/posts', 'https://example.com/{api,v2}/*')).toBe(true);
@@ -57,6 +68,34 @@ describe('matchUrlPattern', () => {
       expect(matchUrlPattern('https://example.com/api/posts', (url) => url.pathname === '/api/posts')).toBe(true);
       expect(matchUrlPattern('https://example.com/api/users', (url) => url.pathname === '/api/posts')).toBe(false);
     });
+  });
+});
+
+// ─── patternsEqual (removeRoute support) ───
+
+describe('patternsEqual', () => {
+  it('compares strings by value', () => {
+    expect(patternsEqual('**/api', '**/api')).toBe(true);
+    expect(patternsEqual('**/api', '**/users')).toBe(false);
+  });
+
+  it('compares RegExps by source AND flags (not reference)', () => {
+    expect(patternsEqual(/foo/, /foo/)).toBe(true);
+    expect(patternsEqual(/foo/i, /foo/i)).toBe(true);
+    expect(patternsEqual(/foo/, /foo/i)).toBe(false);       // different flags
+    expect(patternsEqual(/foo/, /bar/)).toBe(false);         // different source
+  });
+
+  it('compares predicates by reference', () => {
+    const a = (u: URL) => u.pathname === '/a';
+    const b = (u: URL) => u.pathname === '/a';              // structurally identical, different ref
+    expect(patternsEqual(a, a)).toBe(true);
+    expect(patternsEqual(a, b)).toBe(false);
+  });
+
+  it('does not match across different pattern types', () => {
+    expect(patternsEqual('**/api', /api/)).toBe(false);
+    expect(patternsEqual(/api/, (u) => u.pathname === '/api')).toBe(false);
   });
 });
 

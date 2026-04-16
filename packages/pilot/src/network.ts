@@ -354,8 +354,11 @@ function globToRegex(pattern: string): RegExp {
       if (i + 1 < chars.length && chars[i + 1] === '*') {
         re += '.*';
         i += 2;
+        // A trailing `/` after `**` is required, not optional —
+        // otherwise `**/api` would match `example.comapi`. Mirrors
+        // the Rust impl in route_handler.rs::glob_to_regex (keep in sync).
         if (i < chars.length && chars[i] === '/') {
-          re += '(?:/)?';
+          re += '/';
           i++;
         }
       } else {
@@ -388,6 +391,30 @@ function globToRegex(pattern: string): RegExp {
 
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Structural equality for user-supplied URL patterns. Needed by `unroute`
+ * because regex/predicate patterns all share the sentinel glob `**` on the
+ * daemon side, so comparing by `urlPattern` string would collapse every
+ * regex/predicate route into a single bucket.
+ *
+ * @internal — exported only for unit-test visibility.
+ */
+export function patternsEqual(
+  a: string | RegExp | ((url: URL) => boolean),
+  b: string | RegExp | ((url: URL) => boolean),
+): boolean {
+  if (typeof a === 'string' && typeof b === 'string') {
+    return a === b;
+  }
+  if (a instanceof RegExp && b instanceof RegExp) {
+    return a.source === b.source && a.flags === b.flags;
+  }
+  if (typeof a === 'function' && typeof b === 'function') {
+    return a === b;
+  }
+  return false;
 }
 
 /** Convert a URL pattern to the glob string sent to the daemon. */
@@ -491,9 +518,18 @@ export class NetworkRouteManager {
     const stream = this._ensureStream();
 
     return new Promise<void>((resolve, reject) => {
+      // Wire all three listeners so the promise always settles: data for
+      // the success/failure reply, error/end so a stream death during
+      // registration rejects instead of leaking a listener + hanging the
+      // caller. The `cleanup` closure detaches all three whichever wins.
+      const cleanup = () => {
+        stream.removeListener('data', onResponse);
+        stream.removeListener('error', onStreamError);
+        stream.removeListener('end', onStreamEnd);
+      };
       const onResponse = (msg: ServerMessage) => {
         if (msg.registerRouteResponse?.routeId === routeId) {
-          stream.removeListener('data', onResponse);
+          cleanup();
           if (msg.registerRouteResponse.success) {
             resolve();
           } else {
@@ -502,7 +538,19 @@ export class NetworkRouteManager {
           }
         }
       };
+      const onStreamError = (err: Error) => {
+        cleanup();
+        this._routes.delete(routeId);
+        reject(new Error(`NetworkRoute stream error during route registration: ${err.message}`));
+      };
+      const onStreamEnd = () => {
+        cleanup();
+        this._routes.delete(routeId);
+        reject(new Error('NetworkRoute stream closed during route registration'));
+      };
       stream.on('data', onResponse);
+      stream.on('error', onStreamError);
+      stream.on('end', onStreamEnd);
 
       stream.write({
         registerRoute: {
@@ -518,11 +566,10 @@ export class NetworkRouteManager {
     pattern: string | RegExp | ((url: URL) => boolean),
     handler?: (route: Route) => Promise<void> | void,
   ): Promise<void> {
-    const glob = patternToGlob(pattern);
     const toRemove: string[] = [];
 
     for (const [id, info] of this._routes) {
-      if (info.urlPattern === glob) {
+      if (patternsEqual(info.originalPattern, pattern)) {
         if (!handler || info.handler === handler) {
           toRemove.push(id);
         }
