@@ -192,6 +192,18 @@ describe('Route', () => {
     expect(route.request().url).toBe('https://example.com/api/posts');
   });
 
+  it('throws if abort() is called after fetch()', async () => {
+    const { route } = makeRoute();
+    await route.fetch();
+    await expect(route.abort()).rejects.toThrow(/After route\.fetch\(\), only route\.fulfill\(\)/);
+  });
+
+  it('throws if continue() is called after fetch()', async () => {
+    const { route } = makeRoute();
+    await route.fetch();
+    await expect(route.continue()).rejects.toThrow(/After route\.fetch\(\), only route\.fulfill\(\)/);
+  });
+
   it('fetch sends fetch then fulfillAfterFetch on subsequent fulfill', async () => {
     const { route, decisions } = makeRoute();
     const resp = await route.fetch();

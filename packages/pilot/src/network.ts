@@ -91,17 +91,19 @@ export class Route {
   /** Abort the request. */
   async abort(errorCode?: string): Promise<void> {
     this._ensureNotResolved();
-    this._resolved = true;
+    // Mark resolved *after* sending so a throw from _sendDecision (e.g. the
+    // post-fetch phase guard) leaves _resolved=false — the handler's catch
+    // can then fail-open via continueRequest without double-resolving.
     this._sendDecision({
       interceptId: this._interceptId,
       abort: { errorCode: errorCode ?? '' },
     });
+    this._resolved = true;
   }
 
   /** Continue the request with optional overrides. */
   async continue(overrides?: RouteContinueOptions): Promise<void> {
     this._ensureNotResolved();
-    this._resolved = true;
     this._sendDecision({
       interceptId: this._interceptId,
       continueRequest: {
@@ -115,6 +117,7 @@ export class Route {
           : Buffer.alloc(0),
       },
     });
+    this._resolved = true;
   }
 
   /** Fulfill the request with a mock response. */
@@ -177,7 +180,10 @@ export class Route {
     }
 
     // Replace _sendDecision so the next route.fulfill() sends
-    // fulfill_after_fetch instead of a regular fulfill.
+    // fulfill_after_fetch instead of a regular fulfill. After fetch(), only
+    // fulfill() is legal — abort/continue would be a wrong-phase decision
+    // that the daemon can't pair with the pending fulfill_after_fetch slot,
+    // so reject them loudly instead of silently hanging the intercept.
     const originalSend = this._sendDecision;
     this._resolved = false;
     this._sendDecision = (decision: RouteDecisionMsg) => {
@@ -186,6 +192,11 @@ export class Route {
           interceptId: this._interceptId,
           fulfillAfterFetch: decision.fulfill,
         });
+      } else if (decision.abort || decision.continueRequest || decision.fetch) {
+        throw new Error(
+          'After route.fetch(), only route.fulfill() is allowed. ' +
+          'route.abort()/continue()/fetch() would leave the request in an inconsistent state.',
+        );
       } else {
         originalSend(decision);
       }
@@ -203,6 +214,16 @@ export class Route {
   /** @internal — used by NetworkRouteManager to detect handlers that return without resolving. */
   _isResolved(): boolean {
     return this._resolved;
+  }
+
+  /**
+   * @internal — NetworkRouteManager marks the route resolved after failing
+   * open, so a late `route.fulfill()` from a background async chain throws
+   * loudly (Route has already been handled) instead of silently sending a
+   * decision the daemon can't pair with any pending intercept.
+   */
+  _forceResolve(): void {
+    this._resolved = true;
   }
 }
 
@@ -680,6 +701,10 @@ export class NetworkRouteManager {
               continueRequest: { url: '', method: '', headers: [], postData: Buffer.alloc(0) },
             },
           });
+          // Lock the route so a late async tail in the handler that calls
+          // route.fulfill() throws loudly instead of sending a stale
+          // decision the daemon can't route back to any pending intercept.
+          route._forceResolve();
           routeAction = 'continue';
         }
         this._emitRouteTraceEvent(msg, routeAction, startTime, true, undefined, routeInfo.sourceLocation);
@@ -695,6 +720,7 @@ export class NetworkRouteManager {
               continueRequest: { url: '', method: '', headers: [], postData: Buffer.alloc(0) },
             },
           });
+          route._forceResolve();
         }
         this._emitRouteTraceEvent(msg, 'continue', startTime, false, String(err), routeInfo.sourceLocation);
       });

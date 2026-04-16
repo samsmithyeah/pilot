@@ -4451,13 +4451,25 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
             info!("NetworkRoute stream closed, releasing pending intercepts");
             handler_for_read.release_all_pending().await;
 
-            // Clear the stored handler reference
-            *active_route_handler_cleanup.write().await = None;
-
-            // Remove handler from proxy
-            let proxy_guard = network_proxy_cleanup.read().await;
-            if let Some(proxy) = proxy_guard.as_ref() {
-                proxy.clear_handler().await;
+            // Guard cleanup on Arc-pointer identity: if a newer NetworkRoute
+            // stream has already installed its handler in between, we must
+            // not null out its state when our (now-stale) stream closes.
+            // `Arc::ptr_eq` keeps comparison Send-safe (raw `*const T` is
+            // not Send, which would break the surrounding `tokio::spawn`).
+            let mut stored = active_route_handler_cleanup.write().await;
+            let still_ours = stored
+                .as_ref()
+                .map(|h| Arc::ptr_eq(h, &handler_for_read))
+                .unwrap_or(false);
+            if still_ours {
+                *stored = None;
+                drop(stored);
+                let proxy_guard = network_proxy_cleanup.read().await;
+                if let Some(proxy) = proxy_guard.as_ref() {
+                    proxy.clear_handler().await;
+                }
+            } else {
+                debug!("NetworkRoute cleanup: newer handler already installed, skipping clear");
             }
         });
 

@@ -118,7 +118,15 @@ impl RouteInterceptHandler {
         intercept_id: &str,
         response: &ParsedResponse,
     ) -> Option<proto::RouteFulfill> {
-        // Send the fetched response to the SDK
+        // Register the receiver BEFORE sending the FetchedResponse so the SDK
+        // can't round-trip a `fulfill_after_fetch` decision faster than we
+        // register — mirrors the rationale in `intercept()` above.
+        let (tx, rx) = oneshot::channel();
+        self.pending
+            .write()
+            .await
+            .insert(intercept_id.to_string(), tx);
+
         let msg = proto::NetworkRouteServerMessage {
             msg: Some(proto::network_route_server_message::Msg::FetchedResponse(
                 proto::FetchedResponse {
@@ -138,16 +146,9 @@ impl RouteInterceptHandler {
         };
         if self.to_sdk.send(msg).await.is_err() {
             warn!("Failed to send FetchedResponse — stream closed");
+            self.pending.write().await.remove(intercept_id);
             return None;
         }
-
-        // Re-register a pending slot for the same intercept_id (the SDK will
-        // send a `fulfill_after_fetch` decision).
-        let (tx, rx) = oneshot::channel();
-        self.pending
-            .write()
-            .await
-            .insert(intercept_id.to_string(), tx);
 
         match tokio::time::timeout(HANDLER_TIMEOUT, rx).await {
             Ok(Ok(decision)) => {
@@ -509,14 +510,25 @@ async fn fetch_upstream(
     } else {
         parsed.path().to_string()
     };
-    let mut req_buf = format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n");
+    // Force identity encoding so we don't have to decompress gzip/br here —
+    // some CDNs return compressed bodies even when the client doesn't
+    // negotiate for them, so we set this explicitly rather than relying on
+    // absence of `Accept-Encoding` meaning "no encoding".
+    let mut req_buf = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nAccept-Encoding: identity\r\n",
+    );
     for (k, v) in headers {
         let lower = k.to_lowercase();
-        // Skip headers we set ourselves or that would cause compressed responses
+        // Skip headers we set ourselves (Host/Connection/Accept-Encoding/
+        // Content-Length), the proxy-specific Proxy-Connection, and any
+        // Content-Length the caller provided — we recompute it from the
+        // real body length below to avoid duplicate headers (a known HTTP
+        // request-smuggling vector).
         if lower == "host"
             || lower == "connection"
             || lower == "proxy-connection"
             || lower == "accept-encoding"
+            || lower == "content-length"
         {
             continue;
         }
