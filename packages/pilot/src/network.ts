@@ -588,23 +588,61 @@ export class NetworkRouteManager {
       }
     }
 
-    for (const id of toRemove) {
-      this._routes.delete(id);
-      this._safeWrite({
-        unregisterRoute: { routeId: id },
-      });
-    }
+    await Promise.all(toRemove.map((id) => this._unregisterAndAwait(id)));
   }
 
   /** Remove all routes. */
   async removeAllRoutes(): Promise<void> {
     const ids = [...this._routes.keys()];
-    for (const id of ids) {
-      this._routes.delete(id);
-      this._safeWrite({
-        unregisterRoute: { routeId: id },
-      });
-    }
+    await Promise.all(ids.map((id) => this._unregisterAndAwait(id)));
+  }
+
+  /**
+   * Send an UnregisterRoute and wait for the daemon's
+   * UnregisterRouteResponse before resolving. Mirrors `addRoute`.
+   *
+   * Critically: `_routes` is NOT cleared until the daemon confirms. If
+   * we cleared eagerly, a request in flight in the proxy could hit the
+   * still-registered daemon route, the daemon would send an
+   * InterceptedRequest, and the SDK would fall through the "unknown
+   * route" branch and send a continue fallback — leaving the request
+   * tagged `route_action: "continued"` (MODIFIED badge) even though
+   * the user had called `unroute()`.
+   *
+   * Keeping the SDK-side entry alive during the round-trip means any
+   * racing dispatch still invokes the user's handler (which is the
+   * correct behaviour for requests that happened *before* the `await
+   * unroute()` returned). After this promise resolves, the daemon is
+   * guaranteed to no longer match the route, so no further dispatches
+   * can happen.
+   */
+  private _unregisterAndAwait(routeId: string): Promise<void> {
+    const stream = this._ensureStream();
+    return new Promise<void>((resolve) => {
+      const cleanup = () => {
+        stream.removeListener('data', onResponse);
+        stream.removeListener('error', onStreamIssue);
+        stream.removeListener('end', onStreamIssue);
+      };
+      const finish = () => {
+        cleanup();
+        this._routes.delete(routeId);
+        resolve();
+      };
+      const onResponse = (msg: ServerMessage) => {
+        if (msg.unregisterRouteResponse?.routeId === routeId) {
+          finish();
+        }
+      };
+      // Stream issues still resolve (not reject): the caller is tearing
+      // down, not asserting network health. Drop SDK-side state too —
+      // without a stream we can't dispatch anyway.
+      const onStreamIssue = () => finish();
+      stream.on('data', onResponse);
+      stream.on('error', onStreamIssue);
+      stream.on('end', onStreamIssue);
+      this._safeWrite({ unregisterRoute: { routeId } });
+    });
   }
 
   /** Subscribe to request events. */

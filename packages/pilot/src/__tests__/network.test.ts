@@ -1,7 +1,10 @@
+import { EventEmitter } from 'node:events';
 import { describe, expect, it } from 'vitest';
 import {
-  PilotRequest, Route, FetchedAPIResponse, matchUrlPattern, patternsEqual,
+  PilotRequest, Route, FetchedAPIResponse, NetworkRouteManager,
+  matchUrlPattern, patternsEqual,
 } from '../network.js';
+import type { PilotGrpcClient } from '../grpc-client.js';
 
 // ─── matchUrlPattern (glob matching) ───
 
@@ -280,5 +283,76 @@ describe('Route', () => {
     expect((decisions[1] as Record<string, unknown>).fulfillAfterFetch).toBeDefined();
     const body = (decisions[1] as Record<string, Record<string, unknown>>).fulfillAfterFetch.body as Buffer;
     expect(Buffer.from(body).toString()).toBe('{"modified":true}');
+  });
+});
+
+// ─── NetworkRouteManager unregister round-trip ───
+
+/**
+ * Minimal fake gRPC duplex stream for NetworkRouteManager tests. Records
+ * written messages so tests can assert what was sent, and exposes `emitData`
+ * so tests can drive the "daemon replied" path without a real daemon.
+ */
+class FakeDuplexStream extends EventEmitter {
+  public writes: unknown[] = [];
+  write(msg: unknown): boolean { this.writes.push(msg); return true; }
+  end(): void { this.emit('end'); }
+  emitData(msg: unknown): void { this.emit('data', msg); }
+}
+
+describe('NetworkRouteManager unregister round-trip', () => {
+  function makeManager(): { manager: NetworkRouteManager; stream: FakeDuplexStream } {
+    const stream = new FakeDuplexStream();
+    const client = {
+      networkRouteStream: () => stream,
+    } as unknown as PilotGrpcClient;
+    return { manager: new NetworkRouteManager(client), stream };
+  }
+
+  it('removeRoute waits for UnregisterRouteResponse before resolving', async () => {
+    const { manager, stream } = makeManager();
+
+    // Register a route first. addRoute also awaits a response from the daemon,
+    // so we have to drive that round-trip too.
+    const addP = manager.addRoute('**/api/*', async () => { /* noop */ });
+    // Wait a microtask so the `registerRoute` write lands.
+    await Promise.resolve();
+    const registerMsg = stream.writes.find(
+      (m): m is { registerRoute: { routeId: string } } =>
+        typeof m === 'object' && m !== null && 'registerRoute' in m,
+    );
+    expect(registerMsg).toBeDefined();
+    const routeId = registerMsg!.registerRoute.routeId;
+    stream.emitData({ registerRouteResponse: { routeId, success: true, errorMessage: '' } });
+    await addP;
+
+    // Now the actual test: removeRoute should send unregisterRoute and WAIT.
+    const removeP = manager.removeRoute('**/api/*');
+    await Promise.resolve();
+    const unregisterMsg = stream.writes.find(
+      (m): m is { unregisterRoute: { routeId: string } } =>
+        typeof m === 'object' && m !== null && 'unregisterRoute' in m,
+    );
+    expect(unregisterMsg).toBeDefined();
+    expect(unregisterMsg!.unregisterRoute.routeId).toBe(routeId);
+
+    // Critical: the promise must be pending until the daemon replies.
+    // Race the remove promise against an immediately-resolved sentinel;
+    // if remove is still pending, the sentinel wins.
+    const pending = Symbol('pending');
+    const raceResult = await Promise.race([
+      removeP.then(() => 'resolved' as const),
+      Promise.resolve(pending),
+    ]);
+    expect(raceResult).toBe(pending);
+    // And while pending, `hasRoutes` is still true — a request dispatched
+    // mid-round-trip would still find its routeInfo and hit the user's
+    // handler rather than the "unknown route" fallback.
+    expect(manager.hasRoutes).toBe(true);
+
+    // Daemon replies — the promise now resolves.
+    stream.emitData({ unregisterRouteResponse: { routeId, success: true } });
+    await removeP;
+    expect(manager.hasRoutes).toBe(false);
   });
 });
