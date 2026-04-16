@@ -113,7 +113,6 @@ impl RouteInterceptHandler {
 
     /// After a `RouteFetch` decision: send the real upstream response to the
     /// SDK so it can inspect/modify it, then await the final fulfill decision.
-    #[allow(dead_code)]
     pub(crate) async fn complete_fetch(
         &self,
         intercept_id: &str,
@@ -280,13 +279,14 @@ impl RouteInterceptHandler {
     }
 
     /// Core interception logic: check if the URL matches a route, and if so
-    /// send it to the SDK and await a decision.
+    /// send it to the SDK and await a decision. Returns the decision and the
+    /// intercept_id (needed for multi-phase flows like `RouteFetch`).
     async fn intercept(
         &self,
         req: &ParsedRequest,
         hostname: &str,
         is_https: bool,
-    ) -> Option<ResolvedDecision> {
+    ) -> Option<(ResolvedDecision, String)> {
         let scheme = if is_https { "https" } else { "http" };
         let url = format!("{scheme}://{hostname}{}", req.path);
 
@@ -333,7 +333,7 @@ impl RouteInterceptHandler {
         match tokio::time::timeout(HANDLER_TIMEOUT, rx).await {
             Ok(Ok(decision)) => {
                 debug!(%intercept_id, "Received SDK routing decision");
-                Some(decision_to_resolved(decision))
+                Some((decision_to_resolved(decision), intercept_id))
             }
             Ok(Err(_)) => {
                 warn!(%intercept_id, "Decision channel dropped (stream closed?)");
@@ -360,7 +360,7 @@ impl NetworkHandler for RouteInterceptHandler {
         hostname: &str,
         is_https: bool,
     ) -> Option<ParsedResponse> {
-        let decision = self.intercept(req, hostname, is_https).await?;
+        let (decision, intercept_id) = self.intercept(req, hostname, is_https).await?;
 
         match decision {
             ResolvedDecision::Abort => {
@@ -411,16 +411,43 @@ impl NetworkHandler for RouteInterceptHandler {
                 None // proceed to upstream
             }
             ResolvedDecision::Fulfill(resp) => Some(resp),
-            ResolvedDecision::Fetch { .. } => {
-                // RouteFetch is handled at a higher level in handle_mitm_http
-                // because it needs to perform the upstream call. We signal
-                // this by returning None and letting the caller check the
-                // decision. This path shouldn't be reached because the gRPC
-                // handler intercepts RouteFetch before it gets here.
-                //
-                // For safety, treat as passthrough.
-                warn!("RouteFetch reached on_request — this shouldn't happen; forwarding upstream");
-                None
+            ResolvedDecision::Fetch {
+                url: fetch_url,
+                method: fetch_method,
+                headers: fetch_headers,
+                post_data: fetch_body,
+            } => {
+                // Make an independent upstream call, send the response to the
+                // SDK for inspection/modification, and return the final response.
+                let scheme = if is_https { "https" } else { "http" };
+                let base_url = format!("{scheme}://{hostname}{}", req.path);
+                let target_url = fetch_url.filter(|u| !u.is_empty()).unwrap_or(base_url);
+                let target_method = fetch_method
+                    .filter(|m| !m.is_empty())
+                    .unwrap_or_else(|| req.method.clone());
+                let target_headers = fetch_headers.unwrap_or_else(|| req.headers.clone());
+                let target_body = fetch_body.unwrap_or_else(|| req.body.clone());
+
+                match fetch_upstream(&target_url, &target_method, &target_headers, &target_body)
+                    .await
+                {
+                    Some(upstream_resp) => {
+                        // Use the original intercept_id so the SDK's
+                        // fulfill_after_fetch decision routes correctly.
+                        if let Some(fulfill) =
+                            self.complete_fetch(&intercept_id, &upstream_resp).await
+                        {
+                            Some(fulfill_to_response(fulfill))
+                        } else {
+                            // Timeout or error — return the original upstream response
+                            Some(upstream_resp)
+                        }
+                    }
+                    None => {
+                        warn!("RouteFetch: upstream request failed; forwarding original");
+                        None
+                    }
+                }
             }
         }
     }
@@ -436,6 +463,186 @@ impl NetworkHandler for RouteInterceptHandler {
         // intercepts at the request stage). Event notifications happen at the
         // proxy level instead.
     }
+}
+
+// ─── Upstream Fetch (for RouteFetch) ───
+
+/// Make a standalone HTTP/HTTPS request to the upstream server. Used by
+/// `RouteFetch` to get the real response so the SDK can inspect/modify it.
+async fn fetch_upstream(
+    url: &str,
+    method: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+) -> Option<ParsedResponse> {
+    let parsed = url.parse::<url::Url>().ok()?;
+    let host = parsed.host_str()?;
+    let port = parsed.port_or_known_default()?;
+    let is_tls = parsed.scheme() == "https";
+
+    let connect_addr = format!("{host}:{port}");
+    let stream = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        tokio::net::TcpStream::connect(&connect_addr),
+    )
+    .await
+    .ok()?
+    .ok()?;
+
+    // Build HTTP/1.1 request
+    let path = if let Some(q) = parsed.query() {
+        format!("{}?{q}", parsed.path())
+    } else {
+        parsed.path().to_string()
+    };
+    let mut req_buf = format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n");
+    for (k, v) in headers {
+        let lower = k.to_lowercase();
+        // Skip headers we set ourselves or that would cause compressed responses
+        if lower == "host"
+            || lower == "connection"
+            || lower == "proxy-connection"
+            || lower == "accept-encoding"
+        {
+            continue;
+        }
+        req_buf.push_str(&format!("{k}: {v}\r\n"));
+    }
+    if !body.is_empty() {
+        req_buf.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    }
+    req_buf.push_str("\r\n");
+
+    if is_tls {
+        fetch_upstream_tls(stream, host, &req_buf, body).await
+    } else {
+        fetch_upstream_plain(stream, &req_buf, body).await
+    }
+}
+
+async fn fetch_upstream_plain(
+    mut stream: tokio::net::TcpStream,
+    request: &str,
+    body: &[u8],
+) -> Option<ParsedResponse> {
+    use tokio::io::AsyncWriteExt;
+    stream.write_all(request.as_bytes()).await.ok()?;
+    if !body.is_empty() {
+        stream.write_all(body).await.ok()?;
+    }
+    read_http_response(&mut stream).await
+}
+
+async fn fetch_upstream_tls(
+    stream: tokio::net::TcpStream,
+    host: &str,
+    request: &str,
+    body: &[u8],
+) -> Option<ParsedResponse> {
+    use tokio::io::AsyncWriteExt;
+
+    let mut root_store = rustls::RootCertStore::empty();
+    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let tls_config = Arc::new(
+        rustls::ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth(),
+    );
+    let connector = tokio_rustls::TlsConnector::from(tls_config);
+    let server_name = rustls::pki_types::ServerName::try_from(host.to_string()).ok()?;
+    let mut tls_stream = connector.connect(server_name, stream).await.ok()?;
+
+    tls_stream.write_all(request.as_bytes()).await.ok()?;
+    if !body.is_empty() {
+        tls_stream.write_all(body).await.ok()?;
+    }
+    read_http_response(&mut tls_stream).await
+}
+
+async fn read_http_response<S: tokio::io::AsyncRead + Unpin>(
+    stream: &mut S,
+) -> Option<ParsedResponse> {
+    use tokio::io::AsyncReadExt;
+
+    let mut data = Vec::new();
+    let mut buf = vec![0u8; 8192];
+    let max_size = 10 * 1024 * 1024; // 10 MB
+    loop {
+        match tokio::time::timeout(std::time::Duration::from_secs(30), stream.read(&mut buf)).await
+        {
+            Ok(Ok(0)) => break,
+            Ok(Ok(n)) => {
+                data.extend_from_slice(&buf[..n]);
+                if data.len() > max_size {
+                    break;
+                }
+            }
+            Ok(Err(_)) | Err(_) => break,
+        }
+    }
+
+    if data.is_empty() {
+        return None;
+    }
+
+    let status_code = crate::network_proxy::parse_status_code(&data);
+    let (headers, header_end) = crate::network_proxy::parse_headers(&data);
+    let raw_body = if header_end < data.len() {
+        data[header_end..].to_vec()
+    } else {
+        Vec::new()
+    };
+
+    // Decode chunked transfer encoding if present
+    let is_chunked = headers
+        .iter()
+        .any(|(k, v)| k.eq_ignore_ascii_case("transfer-encoding") && v.contains("chunked"));
+    let body = if is_chunked {
+        decode_chunked(&raw_body)
+    } else {
+        raw_body
+    };
+
+    // Strip transfer-encoding from headers since the body is now decoded
+    let headers: Vec<(String, String)> = headers
+        .into_iter()
+        .filter(|(k, _)| !k.eq_ignore_ascii_case("transfer-encoding"))
+        .collect();
+
+    Some(ParsedResponse {
+        status_code,
+        headers,
+        body,
+        raw_bytes: data,
+    })
+}
+
+/// Decode chunked transfer encoding into a plain body.
+fn decode_chunked(data: &[u8]) -> Vec<u8> {
+    let mut result = Vec::new();
+    let mut pos = 0;
+    while pos < data.len() {
+        // Find chunk size line (terminated by \r\n)
+        let line_end = match data[pos..].windows(2).position(|w| w == b"\r\n") {
+            Some(p) => pos + p,
+            None => break,
+        };
+        let size_str = std::str::from_utf8(&data[pos..line_end]).unwrap_or("0");
+        // Chunk extensions (after `;`) are ignored
+        let size_hex = size_str.split(';').next().unwrap_or("0").trim();
+        let chunk_size = usize::from_str_radix(size_hex, 16).unwrap_or(0);
+        if chunk_size == 0 {
+            break; // Final chunk
+        }
+        let chunk_start = line_end + 2;
+        let chunk_end = chunk_start + chunk_size;
+        if chunk_end > data.len() {
+            break; // Incomplete chunk
+        }
+        result.extend_from_slice(&data[chunk_start..chunk_end]);
+        pos = chunk_end + 2; // Skip trailing \r\n
+    }
+    result
 }
 
 // ─── URL Glob → Regex ───

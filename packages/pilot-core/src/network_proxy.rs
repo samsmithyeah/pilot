@@ -1962,7 +1962,7 @@ fn get_header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str
 /// Parse headers from a raw HTTP message bytes. Returns headers list and byte
 /// offset of the body start. Headers are stored in order, preserving
 /// duplicates (e.g. multiple Set-Cookie headers).
-fn parse_headers(raw: &[u8]) -> (Vec<(String, String)>, usize) {
+pub(crate) fn parse_headers(raw: &[u8]) -> (Vec<(String, String)>, usize) {
     let mut headers = Vec::new();
 
     // Find the header/body boundary in the raw bytes
@@ -1994,7 +1994,7 @@ fn parse_headers(raw: &[u8]) -> (Vec<(String, String)>, usize) {
 }
 
 /// Extract the status code from the first line of an HTTP response.
-fn parse_status_code(raw: &[u8]) -> i32 {
+pub(crate) fn parse_status_code(raw: &[u8]) -> i32 {
     let header_end = raw.len().min(256); // status line is always near the start
     let snippet = String::from_utf8_lossy(&raw[..header_end]);
     let first_line = snippet.lines().next().unwrap_or("");

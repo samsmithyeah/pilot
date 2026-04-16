@@ -88,10 +88,7 @@ describe("Network mocking", () => {
     await device.unrouteAll()
   })
 
-  // TODO: route.fetch() requires two-phase interception in the plain HTTP
-  // proxy path (handle_http). Currently only supported in the MITM/CONNECT
-  // path. Enable once handle_http supports RouteFetch decisions.
-  test.skip("route.fetch() — modify real response", async ({ device }) => {
+  test("route.fetch() — modify real response", async ({ device }) => {
     const screen = new ApiCallsScreen(device)
 
     await device.route("**/users/1", async (route) => {
