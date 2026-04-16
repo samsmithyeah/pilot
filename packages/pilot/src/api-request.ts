@@ -51,9 +51,10 @@ export class PilotAPIResponse {
     this._body = body;
   }
 
-  /** Parse the response body as JSON. */
+  /** Parse the response body as JSON. Returns `null` for empty bodies. */
   async json(): Promise<unknown> {
-    return JSON.parse(this._body.toString('utf-8'));
+    const text = this._body.toString('utf-8');
+    return text ? JSON.parse(text) : null;
   }
 
   /** Return the response body as a UTF-8 string. */
@@ -158,11 +159,11 @@ export class APIRequestContext {
     // Resolve URL
     const resolvedUrl = this._resolveUrl(url, options?.params);
 
-    // Merge headers
-    const headers: Record<string, string> = {
-      ...this._extraHTTPHeaders,
-      ...options?.headers,
-    };
+    // Merge headers (lowercase keys so per-request headers override globals
+    // regardless of casing — HTTP header names are case-insensitive)
+    const headers: Record<string, string> = {};
+    for (const [k, v] of Object.entries(this._extraHTTPHeaders)) headers[k.toLowerCase()] = v;
+    for (const [k, v] of Object.entries(options?.headers ?? {})) headers[k.toLowerCase()] = v;
 
     // Build body
     let body: BodyInit | undefined;

@@ -42,6 +42,9 @@ function createTestServer(): http.Server {
       } else if (path === '/status/500') {
         res.writeHead(500, { 'content-type': 'text/plain' });
         res.end('Internal Server Error');
+      } else if (path === '/status/204') {
+        res.writeHead(204);
+        res.end();
       } else if (path === '/slow') {
         setTimeout(() => {
           res.writeHead(200, { 'content-type': 'text/plain' });
@@ -220,6 +223,16 @@ describe('APIRequestContext', () => {
       const body = await res.json() as { headers: Record<string, string> };
       expect(body.headers['x-custom']).toBe('local');
     });
+
+    it('overrides headers case-insensitively', async () => {
+      const ctx = new APIRequestContext({
+        baseURL,
+        extraHTTPHeaders: { 'Authorization': 'Bearer global' },
+      });
+      const res = await ctx.get('/echo', { headers: { 'authorization': 'Bearer local' } });
+      const body = await res.json() as { headers: Record<string, string> };
+      expect(body.headers['authorization']).toBe('Bearer local');
+    });
   });
 
   describe('response', () => {
@@ -259,6 +272,12 @@ describe('APIRequestContext', () => {
       const text = await res.text();
       expect(json1).toEqual(json2);
       expect(text).toBe(JSON.stringify({ id: 1, name: 'Test' }));
+    });
+
+    it('json() returns null for empty body', async () => {
+      const ctx = new APIRequestContext({ baseURL });
+      const res = await ctx.delete('/status/204');
+      expect(await res.json()).toBeNull();
     });
 
     it('does not throw on 4xx', async () => {
