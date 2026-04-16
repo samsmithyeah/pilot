@@ -511,6 +511,11 @@ Return a mock response without contacting the server.
 
 Fetch the actual response from the server. Returns a `FetchedAPIResponse` that you can inspect and modify before calling `route.fulfill()`.
 
+- `overrides.url?`: `string` — override the URL to fetch from. **Unlike `route.continue()`, this may target a different host** — the daemon opens an independent connection to the override URL's host/port/scheme
+- `overrides.method?`: `string` — override the HTTP method
+- `overrides.headers?`: `Record<string, string>` — override headers
+- `overrides.postData?`: `string | Buffer` — override request body
+
 ```ts
 await device.route('**/api/users/*', async (route) => {
   const response = await route.fetch()
