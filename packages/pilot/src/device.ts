@@ -488,7 +488,9 @@ export class Device {
     handler: (route: Route) => Promise<void> | void,
     options?: { times?: number },
   ): Promise<void> {
-    return this._ensureRouteManager().addRoute(url, handler, options);
+    const start = Date.now();
+    await this._ensureRouteManager().addRoute(url, handler, options);
+    this._emitNetworkAction('route', formatPattern(url), start, true);
   }
 
   /**
@@ -500,13 +502,17 @@ export class Device {
     handler?: (route: Route) => Promise<void> | void,
   ): Promise<void> {
     if (!this._routeManager) return;
-    return this._routeManager.removeRoute(url, handler);
+    const start = Date.now();
+    await this._routeManager.removeRoute(url, handler);
+    this._emitNetworkAction('unroute', formatPattern(url), start, true);
   }
 
   /** Remove all registered route handlers. */
   async unrouteAll(): Promise<void> {
     if (!this._routeManager) return;
-    return this._routeManager.removeAllRoutes();
+    const start = Date.now();
+    await this._routeManager.removeAllRoutes();
+    this._emitNetworkAction('unrouteAll', undefined, start, true);
   }
 
   /** Wait for a request matching the pattern. */
@@ -599,7 +605,32 @@ export class Device {
     }
   }
 
+  /** Emit a trace event for a network management action (route/unroute). */
+  private _emitNetworkAction(action: string, pattern: string | undefined, start: number, success: boolean, error?: string): void {
+    const collector = this._traceCollector;
+    if (!collector) return;
+    collector.addActionEvent({
+      category: 'network',
+      action,
+      duration: Date.now() - start,
+      success,
+      error,
+      selector: pattern,
+      log: pattern ? [`${action}(${pattern})`] : [action],
+      hasScreenshotBefore: false,
+      hasScreenshotAfter: false,
+      hasHierarchyBefore: false,
+      hasHierarchyAfter: false,
+    });
+  }
+
   close(): void {
     this._client.close();
   }
+}
+
+function formatPattern(url: string | RegExp | ((url: URL) => boolean)): string {
+  if (typeof url === 'string') return url;
+  if (url instanceof RegExp) return url.toString();
+  return '<predicate>';
 }
