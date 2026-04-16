@@ -42,6 +42,48 @@ class CommandHandler {
         return ProcessInfo.processInfo.environment["PILOT_TARGET_BUNDLE_ID"] ?? ""
     }
 
+    /// Dismiss any blocking iOS system dialog currently covering the app
+    /// (e.g. "Save Password?", "Allow Notifications?", iCloud Keychain
+    /// prompts). Returns true if a dialog was dismissed. Intended for
+    /// physical iOS devices where iOS system UI can cover the app between
+    /// test actions; simulators rarely show these dialogs.
+    ///
+    /// Some dialogs are hosted by SpringBoard (notifications, location
+    /// permission prompts). Others — notably iCloud Keychain's "Save
+    /// Password?" prompt — are presented as a remote view controller
+    /// inside the target app's process via AuthenticationServices, so
+    /// they appear under the target app's hierarchy, not SpringBoard.
+    /// We check both. Order of labels matters — "Not Now" / "Don't Allow"
+    /// come before "OK"/"Continue" so we never accidentally accept a
+    /// permission grant when the intent was to decline.
+    @discardableResult
+    private func dismissBlockingSystemDialogs() -> Bool {
+        let dismissalLabels = [
+            "Not Now",
+            "Don’t Allow",
+            "Don't Allow",
+            "Not now",
+            "Dismiss",
+            "Close",
+            "Cancel",
+        ]
+        let sources: [XCUIApplication] = [
+            app,
+            XCUIApplication(bundleIdentifier: "com.apple.springboard"),
+        ]
+        for source in sources {
+            for label in dismissalLabels {
+                let button = source.buttons[label]
+                if button.exists && button.isHittable {
+                    button.tap()
+                    Thread.sleep(forTimeInterval: 0.25)
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
     /// Recreate the XCUIApplication and helper objects so the runner can
     /// rebind to a freshly relaunched app process without restarting xctrunner.
     private func rebindApp(bundleId: String? = nil) -> XCUIApplication {
@@ -150,6 +192,21 @@ class CommandHandler {
                 do {
                     element = try snapshotFinder.findElement(selector)
                 } catch {
+                    // Before falling through to the wait engine, check for
+                    // blocking iOS system dialogs (Save Password, Allow
+                    // Notifications, etc.) that may be covering the target.
+                    // Common on physical devices — iCloud Keychain can pop
+                    // up after a sign-in tap and obscure post-login UI. If
+                    // we dismiss one, try the snapshot once more before
+                    // polling.
+                    if dismissBlockingSystemDialogs() {
+                        do {
+                            let retried = try snapshotFinder.findElement(selector)
+                            return retried.toDict()
+                        } catch {
+                            // Fall through to wait engine
+                        }
+                    }
                     if timeout >= 1000 {
                         // Element not in current snapshot — poll with wait engine
                         element = try waitEngine.waitForElement(selector, timeoutMs: timeout, elementFinder: elementFinder)
@@ -514,24 +571,57 @@ class CommandHandler {
             return ["package": bundleId]
 
         case "openDeepLink":
-            // Deep links are handled by the daemon via `xcrun simctl openurl`,
-            // which is the only correct path on iOS — the agent should never
-            // be reached for this command. If it is, fail loudly rather than
-            // silently launching Safari and typing into the address bar (which
-            // would pop a visible browser mid-test).
-            throw AgentError.actionFailed("openDeepLink must be handled by the daemon via simctl openurl, not the agent")
+            // On simulators the daemon handles deep links via
+            // `xcrun simctl openurl`. On physical devices there's no
+            // equivalent host-side mechanism, so the daemon routes here
+            // and we call `XCUIApplication.open(url:)` which delivers the
+            // URL via the target app's scene. This is Apple's supported
+            // XCUITest path for URL-scheme deep links.
+            let urlString = params["url"] as? String ?? ""
+            guard !urlString.isEmpty, let url = URL(string: urlString) else {
+                throw AgentError.actionFailed("openDeepLink: missing or invalid URL")
+            }
+            let bundleId = targetBundleId(fallback: params)
+            let targetApp = rebindApp(bundleId: bundleId)
+            // XCUIApplication.open(_:) requires iOS 16.4+. Our deployment
+            // target is 15.0 to keep the runner compatible with older
+            // devices, so we gate the call at runtime.
+            if #available(iOS 16.4, *) {
+                targetApp.open(url)
+                Thread.sleep(forTimeInterval: 0.3)
+                return ["success": true]
+            } else {
+                throw AgentError.actionFailed(
+                    "openDeepLink requires iOS 16.4 or newer on physical devices"
+                )
+            }
 
         // ─── Orientation ───
 
         case "setOrientation":
             let orientation = params["orientation"] as? String ?? "portrait"
+            let target: UIDeviceOrientation
             switch orientation.lowercased() {
             case "landscape":
-                XCUIDevice.shared.orientation = .landscapeLeft
+                target = .landscapeLeft
             case "portrait":
-                XCUIDevice.shared.orientation = .portrait
+                target = .portrait
             default:
                 throw AgentError.actionFailed("Unknown orientation: \(orientation). Use portrait/landscape.")
+            }
+            // On simulators XCUIDevice.orientation is a straightforward
+            // write. On physical devices iOS re-reads the accelerometer
+            // almost immediately after the set and can revert if nothing is
+            // driving UI re-layout. Write → settle → re-verify → optionally
+            // retry once so the subsequent `getOrientation` observes the
+            // requested state. If it still doesn't stick, fall through so
+            // the caller sees whatever the device settled on — rotation
+            // outside of Pilot's control is a valid platform state.
+            XCUIDevice.shared.orientation = target
+            Thread.sleep(forTimeInterval: 0.4)
+            if XCUIDevice.shared.orientation != target {
+                XCUIDevice.shared.orientation = target
+                Thread.sleep(forTimeInterval: 0.4)
             }
             return ["success": true]
 

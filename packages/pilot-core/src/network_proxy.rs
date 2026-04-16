@@ -18,6 +18,7 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tracing::{debug, info, warn};
 
 use crate::mitm_ca::MitmAuthority;
+use crate::pac;
 
 /// Timeout for connecting to upstream servers.
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -108,6 +109,11 @@ pub(crate) struct ProxyState {
     /// at runtime, the code path exists and the types are exercised, so the
     /// future roadmap work is a pure drop-in.
     handler: Option<Arc<dyn NetworkHandler>>,
+    /// Glob patterns used by the `/pilot.pac` PAC script to decide which
+    /// hosts route through the proxy vs. go DIRECT. Sourced from the user's
+    /// `trace.networkHosts` in pilot.config.ts and kept up-to-date by
+    /// `NetworkProxy::set_network_hosts`. Empty = route everything.
+    network_hosts: Vec<String>,
 }
 
 /// Handle to the running proxy. Dropping it stops the proxy.
@@ -118,13 +124,33 @@ pub struct NetworkProxy {
 }
 
 impl NetworkProxy {
-    /// Start the proxy on an ephemeral port. Returns immediately.
+    /// Start the proxy on an ephemeral loopback port (the default for
+    /// simulators and Android devices, which reach the proxy via transparent
+    /// redirection or `adb reverse`).
+    ///
     /// The `mitm_ca` is used to generate per-host TLS certificates for HTTPS
     /// interception.
     pub async fn start(mitm_ca: Arc<MitmAuthority>) -> Result<Self> {
-        let listener = TcpListener::bind("127.0.0.1:0")
+        Self::start_on(mitm_ca, "127.0.0.1:0".parse().expect("valid ipv4 addr")).await
+    }
+
+    /// Start the proxy on a specific bind address and port.
+    ///
+    /// Physical iOS devices (PILOT-185) cannot reach `127.0.0.1` on the host
+    /// — they have their own loopback. Instead, a mobileconfig installs a
+    /// Wi-Fi HTTP proxy pointing at the host's local LAN IP + a deterministic
+    /// per-UDID port. Binding on `0.0.0.0:<port>` makes the proxy reachable
+    /// over the LAN so the device's HTTP proxy directs traffic into it.
+    ///
+    /// Loopback binds are still preferred anywhere the caller doesn't need
+    /// LAN exposure — an open `0.0.0.0` listener would let any host on the
+    /// local network reach the MITM proxy, which is not what simulator tests
+    /// want. The shim helper `start` above picks `127.0.0.1:0` on behalf of
+    /// callers that don't care.
+    pub async fn start_on(mitm_ca: Arc<MitmAuthority>, bind_addr: SocketAddr) -> Result<Self> {
+        let listener = TcpListener::bind(bind_addr)
             .await
-            .context("Failed to bind proxy port")?;
+            .with_context(|| format!("Failed to bind proxy port at {bind_addr}"))?;
         let port = listener.local_addr()?.port();
 
         let mut root_store = rustls::RootCertStore::empty();
@@ -139,6 +165,7 @@ impl NetworkProxy {
             entries: Vec::new(),
             tls_client_config,
             handler: None,
+            network_hosts: Vec::new(),
         }));
 
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -188,6 +215,29 @@ impl NetworkProxy {
     #[cfg(target_os = "macos")]
     pub(crate) fn state_handle(&self) -> Arc<Mutex<ProxyState>> {
         self.state.clone()
+    }
+
+    /// Update the PAC host-allowlist served at `/pilot.pac`. Called from
+    /// `grpc_server::set_device` whenever the CLI hands us a (possibly
+    /// changed) `trace.networkHosts`. Safe to call while the proxy is
+    /// serving traffic — the next PAC fetch (or iOS re-evaluation) picks
+    /// up the new list.
+    ///
+    /// Only called from `#[cfg(target_os = "macos")]` blocks (physical iOS
+    /// is macOS-only), so gated to avoid dead-code warnings on Linux CI.
+    #[cfg(target_os = "macos")]
+    pub async fn set_network_hosts(&self, hosts: Vec<String>) {
+        let mut state = self.state.lock().await;
+        state.network_hosts = hosts;
+    }
+
+    /// Clear any captured entries without stopping the proxy. Used when a
+    /// test session starts network capture on a proxy that was pre-started
+    /// for OCSP passthrough during agent launch — pre-start OCSP/CRL traffic
+    /// would otherwise leak into the captured entries of the first test.
+    pub async fn reset_entries(&self) {
+        let mut state = self.state.lock().await;
+        state.entries.clear();
     }
 
     /// Stop the proxy and return all captured entries.
@@ -255,10 +305,108 @@ async fn handle_connection(
     let method = parts[0];
     let target = parts[1];
 
+    // Direct (non-proxied) GET for the PAC script. iOS fetches this on
+    // Wi-Fi join when the device's profile uses `ProxyType=Auto`. Served
+    // straight out of ProxyState — no upstream round-trip.
+    if method == "GET" && target == "/pilot.pac" {
+        handle_pac_request(client, addr, &buf, state).await;
+        return;
+    }
+
     if method == "CONNECT" {
         handle_connect(client, target, state, mitm_ca).await;
     } else {
         handle_http(client, method, target, &buf, state).await;
+    }
+}
+
+/// Serve `/pilot.pac` — the Proxy Auto-Config script iOS fetches when its
+/// Wi-Fi payload uses `ProxyType=Auto`. The body is generated from the
+/// current `network_hosts` allowlist stored in `ProxyState` and the Host
+/// header from the incoming request (so the PAC's proxy target is
+/// guaranteed to be an address iOS can reach — it's the same one it just
+/// used to fetch the PAC).
+///
+/// Every fetch is logged at `info!` level with the client address and the
+/// number of hosts in the allowlist. That's deliberate: iOS's PAC cache
+/// is aggressive and opaque, and having an authoritative log of "iOS
+/// re-fetched the PAC at T" (or the absence of one) is the difference
+/// between a solvable stale-filter bug and a two-day hunt. Tune volume
+/// down to `debug!` later if it gets noisy; for now the observability is
+/// worth more than the log lines.
+async fn handle_pac_request(
+    mut client: TcpStream,
+    client_addr: SocketAddr,
+    initial_data: &[u8],
+    state: Arc<Mutex<ProxyState>>,
+) {
+    // Pull the Host header out of the already-read request. iOS sends
+    // `Host: <ip>:<port>` (or just `<ip>` with default port) for the
+    // direct GET to the PAC server. We reuse whichever address that is
+    // as the PAC's proxy destination — matches what iOS actually reached.
+    let (req_headers, _) = parse_headers(initial_data);
+    let host_header = get_header(&req_headers, "host").unwrap_or_default();
+    let (proxy_host, proxy_port) = match parse_host_header(host_header) {
+        Some(v) => v,
+        None => {
+            warn!(
+                %client_addr,
+                host_header,
+                "PAC fetch missing or unparsable Host header — refusing with 400"
+            );
+            let _ = client
+                .write_all(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n")
+                .await;
+            return;
+        }
+    };
+
+    let network_hosts = state.lock().await.network_hosts.clone();
+    let body = pac::generate_pac_script(&proxy_host, proxy_port, &network_hosts);
+    let body_bytes = body.as_bytes();
+
+    info!(
+        %client_addr,
+        proxy_host,
+        proxy_port,
+        host_count = network_hosts.len(),
+        bytes = body_bytes.len(),
+        "Served /pilot.pac"
+    );
+
+    let headers = format!(
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: application/x-ns-proxy-autoconfig\r\n\
+         Content-Length: {}\r\n\
+         Cache-Control: no-store\r\n\
+         Connection: close\r\n\
+         \r\n",
+        body_bytes.len()
+    );
+    if let Err(e) = client.write_all(headers.as_bytes()).await {
+        debug!("PAC response header write failed: {e}");
+        return;
+    }
+    if let Err(e) = client.write_all(body_bytes).await {
+        debug!("PAC response body write failed: {e}");
+    }
+}
+
+/// Parse a `Host:` header value of the form `<host>` or `<host>:<port>`
+/// into its components. Returns `None` when the header is empty or the
+/// port part can't be parsed. IPv6 literals aren't handled — iOS only
+/// uses IPv4 LAN addresses for physical-device Wi-Fi proxies today.
+fn parse_host_header(header: &str) -> Option<(String, u16)> {
+    let trimmed = header.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some((host, port_str)) = trimmed.rsplit_once(':') {
+        let port: u16 = port_str.parse().ok()?;
+        Some((host.to_string(), port))
+    } else {
+        // No port in the header — default to port 80 for HTTP.
+        Some((trimmed.to_string(), 80))
     }
 }
 
@@ -2563,5 +2711,38 @@ mod tests {
         );
         // raw_bytes must end with the chunked terminator, nothing more.
         assert!(first.raw_bytes.ends_with(b"0\r\n\r\n"));
+    }
+
+    #[test]
+    fn parse_host_header_with_port() {
+        let (host, port) = super::parse_host_header("192.168.4.38:9037").unwrap();
+        assert_eq!(host, "192.168.4.38");
+        assert_eq!(port, 9037);
+    }
+
+    #[test]
+    fn parse_host_header_without_port_defaults_to_80() {
+        let (host, port) = super::parse_host_header("192.168.4.38").unwrap();
+        assert_eq!(host, "192.168.4.38");
+        assert_eq!(port, 80);
+    }
+
+    #[test]
+    fn parse_host_header_empty_returns_none() {
+        assert!(super::parse_host_header("").is_none());
+        assert!(super::parse_host_header("   ").is_none());
+    }
+
+    #[test]
+    fn parse_host_header_invalid_port_returns_none() {
+        assert!(super::parse_host_header("192.168.4.38:notaport").is_none());
+        assert!(super::parse_host_header("192.168.4.38:99999").is_none());
+    }
+
+    #[test]
+    fn parse_host_header_trims_whitespace() {
+        let (host, port) = super::parse_host_header("  10.0.0.1:8080  ").unwrap();
+        assert_eq!(host, "10.0.0.1");
+        assert_eq!(port, 8080);
     }
 }

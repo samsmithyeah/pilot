@@ -18,7 +18,7 @@ import { runTestFile, collectResults, type TestResult, type SuiteResult } from '
 import { createReporters, ReporterDispatcher, type FullResult } from './reporter.js';
 import { ensureSessionReady, launchConfiguredApp } from './session-preflight.js';
 import { glob } from 'glob';
-import { resolveTraceConfig } from './trace/types.js';
+import { resolveTraceConfig, isNetworkTracingEnabled, networkHostsForPac } from './trace/types.js';
 import { spawn, execFileSync } from 'node:child_process';
 import {
   clearOfflineEmulatorTransports,
@@ -276,8 +276,19 @@ async function ensureDaemonRunning(address: string, daemonBin?: string, platform
   const resolvedBin = process.env.PILOT_DAEMON_BIN ?? daemonBin ?? 'pilot-core';
   const daemonArgs = ['--port', port];
   if (platform) daemonArgs.push('--platform', platform);
+  // Optional: redirect the spawned daemon's stdout/stderr to a file when
+  // `PILOT_DAEMON_LOG=<path>` is set. Useful for debugging daemon-side
+  // behaviour (MITM proxy pre-start, `/pilot.pac` serves, agent startup)
+  // without spinning up a separate daemon process. Off by default — the
+  // env var is the only way to enable it.
+  let daemonStdio: 'ignore' | ['ignore', number, number] = 'ignore';
+  const daemonLogPath = process.env.PILOT_DAEMON_LOG;
+  if (daemonLogPath) {
+    const fd = fs.openSync(daemonLogPath, 'a');
+    daemonStdio = ['ignore', fd, fd];
+  }
   const child = spawn(resolvedBin, daemonArgs, {
-    stdio: 'ignore',
+    stdio: daemonStdio,
   });
   child.on('error', () => {
     // Handled below via waitForReady timeout
@@ -341,8 +352,16 @@ async function setupSequentialDevice(
   const client = await ensureDaemonRunning(cfg.daemonAddress, cfg.daemonBin, cfg.platform);
   const device = new Device(client, cfg);
 
+  // Tell the daemon whether this session intends to capture network traffic.
+  // When false, the daemon skips every physical-iOS MITM/OCSP pre-arm code
+  // path — the biggest single basic-track failure-surface reduction.
+  // When true, we also pass the host-glob allowlist through so the daemon
+  // can embed it in the PAC script served at `/pilot.pac`.
+  const networkTracingEnabled = isNetworkTracingEnabled(cfg.trace);
+  const pacNetworkHosts = networkHostsForPac(cfg.trace);
+
   try {
-    await device.setDevice(cfg.device);
+    await device.setDevice(cfg.device, networkTracingEnabled, pacNetworkHosts);
     console.log(dim(`Using device: ${cfg.device}`));
   } catch (err) {
     throw new Error(`Failed to set device: ${err}`);
@@ -350,34 +369,114 @@ async function setupSequentialDevice(
 
   const deviceJustLaunched = launchedEmulators.some((e) => e.serial === cfg.device);
 
+  // Determine whether this UDID targets a physical device or a simulator.
+  // The branch drives every downstream decision in the iOS block: simctl for
+  // simulators, devicectl for physical. It also controls whether we cache
+  // the app path in startAgent for reinstall-based clearAppData.
+  let targetIsPhysical = false;
+  let resolvedIosAppPath: string | undefined;
+  if (cfg.platform === 'ios') {
+    const { isPhysicalDevice } = await import('./ios-devicectl.js');
+    targetIsPhysical = cfg.device ? isPhysicalDevice(cfg.device) : false;
+    resolvedIosAppPath = cfg.app ? path.resolve(cfg.rootDir, cfg.app) : undefined;
+  }
+
+  // Physical-iOS fast-fail checks. Fire BEFORE the 8-second installAppOnDevice
+  // so the user gets an immediate, actionable error instead of a mid-test hang.
+  if (cfg.platform === 'ios' && targetIsPhysical && cfg.device) {
+    // Cert-trust probe. The devicectl launch is ~1s and pattern-matches
+    // cleanly on "cert not trusted". Only helpful when the runner is
+    // already installed (i.e. second-and-subsequent runs on the device)
+    // — on a fresh device the probe returns 'runner-not-installed' and
+    // we proceed silently so xcodebuild can install it via the normal
+    // path and trigger the iOS trust prompt.
+    const { probeCertTrust } = await import('./ios-trust-probe.js');
+    const trust = await probeCertTrust(cfg.device);
+    if (trust.state === 'untrusted') {
+      console.error();
+      console.error('\x1b[31m✗ Pilot runner is installed but the developer certificate is not trusted.\x1b[0m');
+      console.error();
+      console.error('  On the phone, open \x1b[1mSettings → General → VPN & Device Management\x1b[0m,');
+      console.error('  find \x1b[1mApple Development: <your name>\x1b[0m, and tap \x1b[1mTrust\x1b[0m.');
+      console.error();
+      console.error(dim('  Free Apple Developer accounts re-roll the profile every 7 days,'));
+      console.error(dim('  so this step recurs weekly. Re-run `pilot build-ios-agent`'));
+      console.error(dim('  before trusting so the profile on the phone matches.'));
+      console.error();
+      throw new Error('iOS developer certificate not trusted on device');
+    }
+    // Host-IP drift when tracing is enabled. A stale sidecar means the
+    // mobileconfig points at the Mac's old LAN IP and the device will
+    // silently fail to route through the proxy.
+    if (isNetworkTracingEnabled(cfg.trace)) {
+      const { checkHostIpDrift } = await import('./ios-host-ip-check.js');
+      const drift = checkHostIpDrift(cfg.device);
+      if (!drift.ok && drift.sidecarHostIp && drift.currentHostIp) {
+        console.log();
+        console.log('\x1b[33m⚠ Host IP drift detected.\x1b[0m');
+        console.log(
+          dim(`  Installed profile points at ${drift.sidecarHostIp}, Mac is now ${drift.currentHostIp}.`),
+        );
+        console.log(
+          dim(`  Run \`pilot refresh-ios-network ${cfg.device}\` and reinstall the updated`),
+        );
+        console.log(dim('  profile on the device, otherwise traces will come back empty.'));
+        console.log();
+      }
+    }
+  }
+
   if (cfg.platform === 'ios') {
     if (cfg.app && cfg.device) {
       try {
-        const { installApp, isAppInstalled } = await import('./ios-simulator.js');
-        const resolvedApp = path.resolve(cfg.rootDir, cfg.app);
-        const alreadyInstalled = !deviceJustLaunched
-          && cfg.package
-          && isAppInstalled(cfg.device, cfg.package);
-
-        if (alreadyInstalled && !forceInstall) {
-          console.log(dim(`App ${cfg.package} already installed, skipping iOS app install. Use --force-install to reinstall.`));
-        } else {
-          if (alreadyInstalled) {
-            console.log(dim(`Reinstalling iOS app: ${path.basename(resolvedApp)}`));
+        const resolvedApp = resolvedIosAppPath!;
+        if (targetIsPhysical) {
+          const { installAppOnDevice, isAppInstalledOnDevice } = await import('./ios-devicectl.js');
+          const alreadyInstalled = !deviceJustLaunched
+            && cfg.package
+            && (await isAppInstalledOnDevice(cfg.device, cfg.package));
+          if (alreadyInstalled && !forceInstall) {
+            console.log(dim(`App ${cfg.package} already installed on device, skipping install. Use --force-install to reinstall.`));
+          } else {
+            if (alreadyInstalled) {
+              console.log(dim(`Reinstalling iOS app on device: ${path.basename(resolvedApp)}`));
+            }
+            await installAppOnDevice(cfg.device, resolvedApp);
+            console.log(dim(`Installed ${path.basename(resolvedApp)} on iOS device ${cfg.device}.`));
           }
-          installApp(cfg.device, resolvedApp);
-          console.log(dim(`Installed ${path.basename(resolvedApp)} on iOS simulator.`));
+        } else {
+          const { installApp, isAppInstalled } = await import('./ios-simulator.js');
+          const alreadyInstalled = !deviceJustLaunched
+            && cfg.package
+            && isAppInstalled(cfg.device, cfg.package);
+          if (alreadyInstalled && !forceInstall) {
+            console.log(dim(`App ${cfg.package} already installed, skipping iOS app install. Use --force-install to reinstall.`));
+          } else {
+            if (alreadyInstalled) {
+              console.log(dim(`Reinstalling iOS app: ${path.basename(resolvedApp)}`));
+            }
+            installApp(cfg.device, resolvedApp);
+            console.log(dim(`Installed ${path.basename(resolvedApp)} on iOS simulator.`));
+          }
         }
       } catch (err) {
         throw new Error(`Failed to install iOS app: ${err}`);
       }
     }
     if (cfg.package && cfg.device) {
-      try {
-        execFileSync('xcrun', ['simctl', 'launch', cfg.device, cfg.package]);
-        console.log(dim(`Launched ${cfg.package} on iOS simulator.`));
-      } catch {
-        // App may already be running
+      // For simulators we fire a best-effort simctl launch so the app is in
+      // the foreground when the XCUITest runner attaches, which avoids a
+      // brief black-screen flicker. For physical devices we skip this step
+      // entirely: `simctl launch` doesn't work on real hardware, and the
+      // XCUITest runner's own `app.launch()` (inside the Swift agent) will
+      // bring the app forward during the subsequent agent startup.
+      if (!targetIsPhysical) {
+        try {
+          execFileSync('xcrun', ['simctl', 'launch', cfg.device, cfg.package]);
+          console.log(dim(`Launched ${cfg.package} on iOS simulator.`));
+        } catch {
+          // App may already be running
+        }
       }
     }
   } else {
@@ -437,9 +536,58 @@ async function setupSequentialDevice(
   const resolvedAgentTestApk = cfg.agentTestApk
     ? path.resolve(cfg.rootDir, cfg.agentTestApk)
     : undefined;
-  const resolvedIosXctestrun = cfg.iosXctestrun
+  let resolvedIosXctestrun = cfg.iosXctestrun
     ? path.resolve(cfg.rootDir, cfg.iosXctestrun)
     : undefined;
+  // iOS xctestrun auto-detect: if the user didn't set `iosXctestrun`,
+  // pick the newest built xctestrun for the target slice. Mirrors the way
+  // `simulator: "iPhone 16"` is enough to pick a device without hand-rolling
+  // JSON parsing in the config.
+  //   - Physical devices: look under `<rootDir>/ios-agent/.build-device/…`
+  //     (populated by `pilot build-ios-agent`).
+  //   - Simulators: look under `~/Library/Developer/Xcode/DerivedData/PilotAgent-*`
+  //     (populated by the simulator `xcodebuild build-for-testing` command).
+  if (!resolvedIosXctestrun && cfg.platform === 'ios') {
+    const { findDeviceXctestrun, findSimulatorXctestrun } =
+      await import('./ios-device-resolve.js');
+    if (targetIsPhysical) {
+      const found = findDeviceXctestrun(cfg.rootDir);
+      if (found) {
+        resolvedIosXctestrun = found;
+        console.log(dim(`Auto-detected iOS device xctestrun: ${path.relative(cfg.rootDir, found)}`));
+      } else {
+        throw new Error(
+          'No device xctestrun found under ios-agent/.build-device. ' +
+            'Run `pilot build-ios-agent` first, or set `iosXctestrun` explicitly.',
+        );
+      }
+    } else {
+      const found = findSimulatorXctestrun();
+      if (found) {
+        resolvedIosXctestrun = found;
+        console.log(dim(`Auto-detected iOS simulator xctestrun: ${found}`));
+      } else {
+        throw new Error(
+          'No simulator xctestrun found under ~/Library/Developer/Xcode/DerivedData/PilotAgent-*. ' +
+            'Build the simulator agent first (see docs/ios-physical-devices.md for the command) ' +
+            'or set `iosXctestrun` explicitly.',
+        );
+      }
+    }
+  }
+
+  // Physical-iOS provisioning-profile expiry warning, now that we have
+  // the resolved xctestrun path. Three-point surfacing (here + build-ios-agent
+  // tail + setup-ios-device preflight) so users hit the warning whichever
+  // path they took to get to this point.
+  if (cfg.platform === 'ios' && targetIsPhysical && resolvedIosXctestrun) {
+    const { getProfileExpiryInfo, formatExpiryWarning } = await import('./ios-profile-expiry.js');
+    const info = getProfileExpiryInfo(resolvedIosXctestrun);
+    if (info) {
+      const warning = formatExpiryWarning(info);
+      if (warning) console.log(`  \x1b[33m⚠\x1b[0m ${warning}`);
+    }
+  }
 
   try {
     if (cfg.platform === 'ios') {
@@ -450,6 +598,11 @@ async function setupSequentialDevice(
       resolvedAgentApk,
       resolvedAgentTestApk,
       resolvedIosXctestrun,
+      // Only cache the app path on physical iOS — the daemon uses it for
+      // reinstall-based clearAppData. Simulators keep the host-filesystem
+      // app-container clearing path instead.
+      cfg.platform === 'ios' && targetIsPhysical ? resolvedIosAppPath : undefined,
+      networkTracingEnabled,
     );
     if (cfg.platform !== 'ios') {
       await ensureSessionReady({
@@ -461,6 +614,7 @@ async function setupSequentialDevice(
         agentTestApkPath: resolvedAgentTestApk,
         iosXctestrunPath: resolvedIosXctestrun,
         deviceSerial: cfg.device,
+        networkTracingEnabled,
       }, 'startup');
     }
     console.log(dim('Agent connected.'));
@@ -567,9 +721,24 @@ async function ensureSequentialTargetDevice(
   // ─── iOS: use simulator instead of ADB device ───
   if (config.platform === 'ios') {
     const { listBootedSimulators, provisionSimulator, cleanupStaleSimulators } = await import('./ios-simulator.js');
+    // If no simulator is configured, try to auto-resolve a single paired
+    // physical device. Mirrors how simulators are picked by name — the
+    // user should not have to hand-parse `devicectl` JSON in their config.
     if (!config.simulator) {
-      console.error(red('No simulator specified. Set `simulator` in your config (e.g. simulator: "iPhone 16").'));
-      process.exit(1);
+      try {
+        const { resolvePhysicalIosDevice } = await import('./ios-device-resolve.js');
+        const udid = resolvePhysicalIosDevice();
+        process.stderr.write(`${DIM}Auto-detected physical iOS device ${udid}.${RESET}\n`);
+        return { selectedSerial: udid, launched: [] };
+      } catch (e) {
+        console.error(
+          red(
+            `No simulator specified and physical device auto-detect failed: ${(e as Error).message}\n` +
+              `Set \`simulator\` (e.g. simulator: "iPhone 16") or \`device\` in your config.`,
+          ),
+        );
+        process.exit(1);
+      }
     }
     const simulatorName = config.simulator;
 
@@ -775,6 +944,19 @@ function parseArgs(argv: string[]): CliArgs {
       args.tsxReexec = true;
     } else if (!arg.startsWith('-') && !args.command) {
       args.command = arg;
+      // Subcommands with their own argument parsers: stop consuming here
+      // so downstream flags (e.g. `build-ios-agent --verbose --team-id X`)
+      // aren't rejected by the top-level parser. The subcommand handler
+      // re-parses from process.argv after the command name.
+      if (
+        arg === 'build-ios-agent'
+        || arg === 'configure-ios-network'
+        || arg === 'refresh-ios-network'
+        || arg === 'verify-ios-network'
+        || arg === 'list-devices'
+      ) {
+        break;
+      }
     } else if (!arg.startsWith('-')) {
       args.files.push(arg);
     } else {
@@ -904,8 +1086,23 @@ async function provisionDevicesForBucket(
   if (desiredWorkers <= 0) return { serials: [], launched: [] };
 
   if (effectiveConfig.platform === 'ios') {
+    // Physical-device bucket: no `simulator` set → resolve a paired USB
+    // device. Parallel workers against one physical device aren't
+    // supported, so we always return a single serial here regardless of
+    // desiredWorkers; the caller's worker allocation is capped elsewhere.
     if (!effectiveConfig.simulator) {
-      throw new Error('iOS bucket has no `simulator` set in its `use:` block.');
+      if (effectiveConfig.device) {
+        return { serials: [effectiveConfig.device], launched: [] };
+      }
+      const { resolvePhysicalIosDevice } = await import('./ios-device-resolve.js');
+      try {
+        const udid = resolvePhysicalIosDevice();
+        return { serials: [udid], launched: [] };
+      } catch (e) {
+        throw new Error(
+          `iOS physical device bucket failed to resolve: ${(e as Error).message}`,
+        );
+      }
     }
     const { provisionSimulators, listBootedSimulators, cleanupStaleSimulators } =
       await import('./ios-simulator.js');
@@ -1061,7 +1258,14 @@ ${bold('Usage:')}
   pilot show-trace <file.zip>     Open trace viewer in browser
   pilot show-report [dir]         Open HTML test report
   pilot merge-reports [dir]       Merge blob reports from sharded runs
+  pilot list-devices              List connected devices (Android, iOS sim, iOS physical)
+  pilot list-devices --json       Same, as JSON for scripting
   pilot setup-ios                 First-run setup for iOS network capture (macOS only)
+  pilot setup-ios-device          Preflight checklist for physical iOS device testing
+  pilot build-ios-agent           Build the signed PilotAgent runner for physical iOS devices
+  pilot configure-ios-network <udid>   Generate a network capture profile (.mobileconfig) for a physical iOS device
+  pilot refresh-ios-network <udid>     Regenerate the network capture profile after a host Wi-Fi change
+  pilot verify-ios-network <udid>      Verify decrypted HTTPS capture is working on a physical iOS device
   pilot --version                 Print version
   pilot --help                    Show this help
 
@@ -1089,7 +1293,21 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (args.help || !args.command) {
+  // Subcommands that print their own command-specific help on --help.
+  // Other commands (e.g. `pilot test --help`) fall back to the top-level
+  // help below.
+  const subcommandsWithOwnHelp = new Set<string>([
+    'build-ios-agent',
+    'configure-ios-network',
+    'refresh-ios-network',
+    'verify-ios-network',
+  ]);
+
+  if (args.help && !(args.command && subcommandsWithOwnHelp.has(args.command))) {
+    printHelp();
+    return;
+  }
+  if (!args.command) {
     printHelp();
     return;
   }
@@ -1148,9 +1366,56 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (args.command === 'list-devices') {
+    const { runListDevices } = await import('./list-devices.js');
+    const forwardedArgv = process.argv.slice(process.argv.indexOf('list-devices') + 1)
+      .filter((a) => a !== '--__tsx-reexec');
+    await runListDevices(forwardedArgv);
+    return;
+  }
+
   if (args.command === 'setup-ios') {
     const { runSetupIos } = await import('./setup-ios.js');
     await runSetupIos();
+    return;
+  }
+
+  if (args.command === 'setup-ios-device') {
+    const { runSetupIosDevice } = await import('./setup-ios-device.js');
+    await runSetupIosDevice();
+    return;
+  }
+
+  if (args.command === 'configure-ios-network') {
+    const { runConfigureIosNetwork } = await import('./configure-ios-network.js');
+    const forwardedArgv = process.argv.slice(process.argv.indexOf('configure-ios-network') + 1)
+      .filter((a) => a !== '--__tsx-reexec');
+    await runConfigureIosNetwork(forwardedArgv);
+    return;
+  }
+
+  if (args.command === 'refresh-ios-network') {
+    const { runRefreshIosNetwork } = await import('./configure-ios-network.js');
+    const forwardedArgv = process.argv.slice(process.argv.indexOf('refresh-ios-network') + 1)
+      .filter((a) => a !== '--__tsx-reexec');
+    await runRefreshIosNetwork(forwardedArgv);
+    return;
+  }
+
+  if (args.command === 'verify-ios-network') {
+    const { runVerifyIosNetwork } = await import('./verify-ios-network.js');
+    const forwardedArgv = process.argv.slice(process.argv.indexOf('verify-ios-network') + 1)
+      .filter((a) => a !== '--__tsx-reexec');
+    await runVerifyIosNetwork(forwardedArgv);
+    return;
+  }
+
+  if (args.command === 'build-ios-agent') {
+    const { runBuildIosAgent } = await import('./build-ios-agent.js');
+    // Everything after the subcommand name is forwarded; drop the verb.
+    const forwardedArgv = process.argv.slice(process.argv.indexOf('build-ios-agent') + 1)
+      .filter((a) => a !== '--__tsx-reexec');
+    await runBuildIosAgent(forwardedArgv);
     return;
   }
 

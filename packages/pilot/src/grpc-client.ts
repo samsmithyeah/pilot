@@ -73,6 +73,9 @@ export interface DeviceInfoProto {
   state: string;
   isEmulator: boolean;
   platform: string;
+  /** Human-friendly OS version. Empty when the daemon can't determine it
+   * (iOS physical, where CLI-side devicectl enrichment fills it in). */
+  osVersion: string;
 }
 
 export interface ListDevicesResponse {
@@ -336,10 +339,16 @@ export class PilotGrpcClient {
     });
   }
 
-  async setDevice(serial: string): Promise<ActionResponse> {
+  async setDevice(
+    serial: string,
+    networkTracingEnabled = false,
+    networkHosts: string[] = [],
+  ): Promise<ActionResponse> {
     return this.call<ActionResponse>('setDevice', {
       requestId: requestId(),
       serial,
+      networkTracingEnabled,
+      networkHosts,
     }, 120_000);
   }
 
@@ -348,6 +357,8 @@ export class PilotGrpcClient {
     agentApkPath?: string,
     agentTestApkPath?: string,
     iosXctestrunPath?: string,
+    iosAppPath?: string,
+    networkTracingEnabled = false,
   ): Promise<ActionResponse> {
     return this.call<ActionResponse>('startAgent', {
       requestId: requestId(),
@@ -355,6 +366,8 @@ export class PilotGrpcClient {
       agentApkPath: agentApkPath ?? '',
       agentTestApkPath: agentTestApkPath ?? '',
       iosXctestrunPath: iosXctestrunPath ?? '',
+      iosAppPath: iosAppPath ?? '',
+      networkTracingEnabled,
     }, 180_000);
   }
 
@@ -623,6 +636,28 @@ export class PilotGrpcClient {
     return this.call('stopNetworkCapture', {
       requestId: requestId(),
     }, 30_000);
+  }
+
+  // ── Physical iOS device network profile (PILOT-185) ──
+
+  async generateIosNetworkProfile(args: {
+    udid: string
+    ssid?: string
+    deviceName?: string
+  }): Promise<{
+    success: boolean
+    errorMessage: string
+    profilePath: string
+    hostIp: string
+    port: number
+    ssid: string
+  }> {
+    return this.call('generateIosNetworkProfile', {
+      requestId: requestId(),
+      udid: args.udid,
+      ssid: args.ssid ?? '',
+      deviceName: args.deviceName ?? '',
+    });
   }
 
   // ── App State Snapshot (PILOT-115) ──

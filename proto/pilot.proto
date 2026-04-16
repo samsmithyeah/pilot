@@ -66,6 +66,12 @@ service PilotService {
   // ─── Network Capture (PILOT-164) ───
   rpc StartNetworkCapture(StartNetworkCaptureRequest) returns (StartNetworkCaptureResponse);
   rpc StopNetworkCapture(StopNetworkCaptureRequest) returns (StopNetworkCaptureResponse);
+
+  // ─── Physical iOS device network capture (PILOT-185) ───
+  // Generates a `.mobileconfig` profile that the user installs on a
+  // physical iOS device to route Wi-Fi traffic through Pilot's MITM proxy
+  // on a deterministic per-UDID host port.
+  rpc GenerateIosNetworkProfile(GenerateIosNetworkProfileRequest) returns (GenerateIosNetworkProfileResponse);
 }
 
 // ─── Common Types ───
@@ -249,6 +255,10 @@ message DeviceInfo {
   string state = 3;
   bool is_emulator = 4;
   string platform = 5;  // "android" or "ios"
+  // Human-friendly OS version ("14", "18.1", "26.2.1"). Empty when unknown.
+  // Android: ro.build.version.release. iOS sim: runtime version. iOS physical:
+  // filled CLI-side from devicectl (daemon leaves blank).
+  string os_version = 6;
 }
 
 message ListDevicesResponse {
@@ -259,6 +269,20 @@ message ListDevicesResponse {
 message SetDeviceRequest {
   string request_id = 1;
   string serial = 2;
+  // When false, the daemon skips every physical-iOS network-capture code
+  // path for this session — no MITM proxy pre-start, no OCSP passthrough
+  // pre-arming. Default (false) keeps the basic-track failure surface
+  // minimal; the CLI sets this to true only when the user's pilot.config.ts
+  // has tracing enabled (trace.mode !== 'off' && trace.network !== false).
+  // The daemon stays agnostic of pilot.config.ts; the CLI is the single
+  // source of truth.
+  bool network_tracing_enabled = 3;
+  // Host-glob allowlist for the PAC script served at /pilot.pac on
+  // physical iOS. When empty, the PAC routes every host through the
+  // proxy (matching the old ProxyType=Manual behavior). Sourced from
+  // `trace.networkHosts` in pilot.config.ts. Only meaningful when
+  // `network_tracing_enabled == true`.
+  repeated string network_hosts = 4;
 }
 
 message StartAgentRequest {
@@ -267,6 +291,14 @@ message StartAgentRequest {
   string agent_apk_path = 3;       // host path to agent APK (auto-install, Android)
   string agent_test_apk_path = 4;  // host path to agent test APK (auto-install, Android)
   string ios_xctestrun_path = 5;   // host path to .xctestrun file (iOS)
+  // host path to the .app bundle installed on the device. Used by the
+  // daemon on physical iOS devices to reinstall the app on clearAppData
+  // calls (devicectl has no host-side app container access, so reinstall
+  // is the only way to reset persistent state). Empty for simulators.
+  string ios_app_path = 6;
+  // Same semantics as SetDeviceRequest.network_tracing_enabled — gates
+  // `ensure_ios_physical_proxy` pre-arming on the start_agent path.
+  bool network_tracing_enabled = 7;
 }
 
 message PingRequest {}
@@ -544,4 +576,32 @@ message StopNetworkCaptureResponse {
   bool success = 2;
   repeated CapturedNetworkEntry entries = 3;
   string error_message = 4;
+}
+
+// ─── Physical iOS device network capture (PILOT-185) ───
+
+message GenerateIosNetworkProfileRequest {
+  string request_id = 1;
+  // Target device UDID. Must match a physical device returned by ListDevices.
+  string udid = 2;
+  // Optional Wi-Fi SSID to include in the mobileconfig. Empty = auto-detect
+  // the host's current Wi-Fi network.
+  string ssid = 3;
+  // Optional human-readable name for the device (used in PayloadDisplayName).
+  // Defaults to the device's name from devicectl if empty.
+  string device_name = 4;
+}
+
+message GenerateIosNetworkProfileResponse {
+  string request_id = 1;
+  bool success = 2;
+  string error_message = 3;
+  // Absolute path to the generated .mobileconfig file.
+  string profile_path = 4;
+  // Host IP the profile points at.
+  string host_ip = 5;
+  // Deterministic TCP port assigned for this UDID.
+  uint32 port = 6;
+  // SSID captured in the profile.
+  string ssid = 7;
 }

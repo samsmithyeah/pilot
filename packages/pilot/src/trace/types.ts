@@ -256,6 +256,30 @@ export interface TraceConfig {
   attachments: boolean
   /** Whether to capture network traffic via HTTP proxy. */
   network: boolean
+  /**
+   * Glob-style host patterns to retain in captured network entries.
+   * Defaults to `undefined` — keep every captured entry.
+   *
+   * Matters most for physical iOS devices, where Pilot's Wi-Fi MITM
+   * proxy is system-wide and sees every app's traffic, including iOS
+   * background services (captive portal checks, analytics, iCloud).
+   * Set an allowlist of hostnames that match the app(s) under test so
+   * the trace only keeps relevant entries:
+   *
+   *     trace: {
+   *       mode: 'on',
+   *       networkHosts: ['*.myapp.com', 'api.example.com'],
+   *     }
+   *
+   * Simulators already filter per-PID (via the macOS Network Extension
+   * redirector), so leaving this unset is fine for sim-only runs. On
+   * physical iOS, unset = verbose traces with system noise.
+   *
+   * Patterns use glob semantics: `*` matches one hostname segment,
+   * `**` (or a leading `*.`) matches any number. Matching is
+   * case-insensitive. See `filterEntriesByHosts` for the exact rules.
+   */
+  networkHosts?: string[]
 }
 
 /** Parse a string shorthand or object into a full TraceConfig. */
@@ -278,6 +302,35 @@ export function resolveTraceConfig(
   }
 
   return { ...defaults, ...input };
+}
+
+/**
+ * Returns true when a resolved trace config actively wants network capture:
+ * tracing is on in some mode AND the network sub-channel hasn't been
+ * explicitly disabled. Used by the CLI to tell the daemon whether to
+ * pre-arm the physical-iOS MITM proxy — when false, the daemon skips
+ * every OCSP/passthrough code path, eliminating the basic-track failure
+ * surface for users who just want to run tests on a real phone.
+ */
+export function isNetworkTracingEnabled(
+  input: TraceMode | Partial<TraceConfig> | undefined,
+): boolean {
+  const resolved = resolveTraceConfig(input);
+  return resolved.mode !== 'off' && resolved.network !== false;
+}
+
+/**
+ * Return the configured `trace.networkHosts` glob allowlist for the
+ * PAC script served by the daemon. Returns `[]` when tracing is off or
+ * no allowlist is set — the daemon interprets `[]` as "route every
+ * host through the proxy".
+ */
+export function networkHostsForPac(
+  input: TraceMode | Partial<TraceConfig> | undefined,
+): string[] {
+  if (!isNetworkTracingEnabled(input)) return [];
+  const resolved = resolveTraceConfig(input);
+  return resolved.networkHosts ?? [];
 }
 
 // ─── Network Types (Phase 6) ───

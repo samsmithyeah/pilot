@@ -11,6 +11,7 @@
 import * as path from 'node:path';
 import { PilotGrpcClient } from './grpc-client.js';
 import { Device } from './device.js';
+import { isNetworkTracingEnabled, networkHostsForPac } from './trace/types.js';
 import { runTestFile, collectResults } from './runner.js';
 import type { PilotConfig } from './config.js';
 import { isPackageInstalled, waitForPackageIndexed } from './emulator.js';
@@ -34,6 +35,7 @@ let client: PilotGrpcClient | undefined;
 let config: PilotConfig | undefined;
 let assignedSerial: string | undefined;
 let resolvedXctestrunPath: string | undefined;
+let resolvedAppPath: string | undefined;
 
 function send(msg: WorkerToMainMessage): void {
   if (process.send) {
@@ -92,7 +94,11 @@ async function handleInit(msg: InitMessage): Promise<void> {
   config.device = msg.deviceSerial;
   if (msg.deviceSerial) {
     sendProgress(`selecting device ${msg.deviceSerial}`);
-    await device.setDevice(msg.deviceSerial);
+    await device.setDevice(
+      msg.deviceSerial,
+      isNetworkTracingEnabled(config.trace),
+      networkHostsForPac(config.trace),
+    );
   }
 
   // Wake and unlock device screen
@@ -127,17 +133,30 @@ async function handleInit(msg: InitMessage): Promise<void> {
       }
     }
   } else if (config.platform === 'ios' && config.app && msg.deviceSerial) {
-    // iOS: install .app on this simulator if not already present.
-    // The CLI only installs on the primary simulator; cloned workers need it too.
+    // iOS: install the .app on this device/simulator if not already present.
+    // The CLI only installs on the primary target; cloned workers need it too.
     // Same fresh-simulator caveat as Android — reinstall unconditionally on
     // a freshly-cloned simulator since the bundle may be stale.
+    // Physical devices go through devicectl, simulators go through simctl.
     const resolvedApp = path.resolve(config.rootDir, config.app);
-    const alreadyInstalled = !msg.freshEmulator
-      && config.package
-      && isAppInstalled(msg.deviceSerial, config.package);
-    if (!alreadyInstalled) {
-      sendProgress(`installing ${path.basename(resolvedApp)}`);
-      installApp(msg.deviceSerial, resolvedApp);
+    const { isPhysicalDevice, installAppOnDevice, isAppInstalledOnDevice } =
+      await import('./ios-devicectl.js');
+    const isPhys = isPhysicalDevice(msg.deviceSerial);
+    if (isPhys) {
+      const alreadyInstalled =
+        config.package && (await isAppInstalledOnDevice(msg.deviceSerial, config.package));
+      if (!alreadyInstalled) {
+        sendProgress(`installing ${path.basename(resolvedApp)} on device`);
+        await installAppOnDevice(msg.deviceSerial, resolvedApp);
+      }
+    } else {
+      const alreadyInstalled = !msg.freshEmulator
+        && config.package
+        && isAppInstalled(msg.deviceSerial, config.package);
+      if (!alreadyInstalled) {
+        sendProgress(`installing ${path.basename(resolvedApp)}`);
+        installApp(msg.deviceSerial, resolvedApp);
+      }
     }
   }
 
@@ -148,18 +167,43 @@ async function handleInit(msg: InitMessage): Promise<void> {
   const resolvedAgentTestApk = config.agentTestApk
     ? path.resolve(config.rootDir, config.agentTestApk)
     : undefined;
-  const resolvedIosXctestrun = config.iosXctestrun
+  let resolvedIosXctestrun = config.iosXctestrun
     ? path.resolve(config.rootDir, config.iosXctestrun)
     : undefined;
+  // Auto-detect xctestrun if omitted, mirroring the single-worker
+  // resolution in cli.ts. Picks the device-slice xctestrun under
+  // ios-agent/.build-device for physical devices and the newest
+  // simulator-slice xctestrun from Xcode DerivedData for simulators.
+  if (!resolvedIosXctestrun && config.platform === 'ios' && msg.deviceSerial) {
+    const { isPhysicalDevice } = await import('./ios-devicectl.js');
+    const { findDeviceXctestrun, findSimulatorXctestrun } = await import('./ios-device-resolve.js');
+    const isPhys = isPhysicalDevice(msg.deviceSerial);
+    const found = isPhys ? findDeviceXctestrun(config.rootDir) : findSimulatorXctestrun();
+    if (found) {
+      resolvedIosXctestrun = found;
+      sendProgress(`auto-detected xctestrun: ${path.basename(found)}`);
+    }
+  }
+  const resolvedIosAppPath = config.platform === 'ios' && config.app
+    ? path.resolve(config.rootDir, config.app)
+    : undefined;
   resolvedXctestrunPath = resolvedIosXctestrun;
+  resolvedAppPath = resolvedIosAppPath;
   sendProgress('starting Pilot agent');
-  await device.startAgent(config.package ?? '', resolvedAgentApk, resolvedAgentTestApk, resolvedIosXctestrun);
+  await device.startAgent(
+    config.package ?? '',
+    resolvedAgentApk,
+    resolvedAgentTestApk,
+    resolvedIosXctestrun,
+    resolvedIosAppPath,
+    isNetworkTracingEnabled(config.trace),
+  );
 
   try {
     if (config.package) {
       sendProgress(`launching ${config.package}`);
       await launchConfiguredApp(
-        sessionContext(msg.deviceSerial, resolvedAgentApk, resolvedAgentTestApk, resolvedIosXctestrun),
+        sessionContext(msg.deviceSerial, resolvedAgentApk, resolvedAgentTestApk, resolvedIosXctestrun, resolvedIosAppPath),
         'worker initialization',
       );
     } else {
@@ -299,6 +343,7 @@ function sessionContext(
   agentApkPath?: string,
   agentTestApkPath?: string,
   iosXctestrunPath?: string,
+  iosAppPath?: string,
 ): SessionPreflightContext {
   if (!device || !client || !config) {
     throw new Error(`Worker ${workerId}: Not initialized`);
@@ -317,7 +362,9 @@ function sessionContext(
     agentApkPath,
     agentTestApkPath,
     iosXctestrunPath: iosXctestrunPath ?? resolvedXctestrunPath,
+    iosAppPath: iosAppPath ?? resolvedAppPath,
     deviceSerial: serial,
+    networkTracingEnabled: isNetworkTracingEnabled(config.trace),
   };
 }
 

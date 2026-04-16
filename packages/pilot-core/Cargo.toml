@@ -34,13 +34,15 @@ rustls-pemfile = "2"
 webpki-roots = "0.26"
 dirs = "6.0.0"
 async-trait = "0.1"
+crc32fast = "1.4"
+plist = "1.7"
+tempfile = "3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 tokio-util = { version = "0.7", features = ["codec"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 
 [dev-dependencies]
-tempfile = "3"
 
 [build-dependencies]
 tonic-build = "0.12"

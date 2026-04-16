@@ -822,9 +822,27 @@ async function runSuiteContext(
       if (traceConfig.network) {
         try {
           const res = await opts.device._stopNetworkCapture();
-          if (res.success && res.entries.length > 0) {
-            rawNetworkEntries = res.entries;
-          } else if (!res.success) {
+          if (res.success) {
+            // Apply user-supplied host allowlist, if any. On physical iOS
+            // the Wi-Fi proxy is system-wide and captures every app's
+            // traffic — this is how users scrub system services (captive
+            // portal, analytics, iCloud) out of their trace archives.
+            // On simulators the macOS Network Extension redirector
+            // already filters per-PID, so the allowlist is usually
+            // redundant for sim runs but still honoured when set.
+            const { filterEntriesByHosts } = await import('./trace/filter-hosts.js');
+            rawNetworkEntries = filterEntriesByHosts(res.entries, traceConfig.networkHosts);
+            if (
+              traceConfig.networkHosts &&
+              traceConfig.networkHosts.length > 0 &&
+              res.entries.length > 0 &&
+              rawNetworkEntries.length === 0
+            ) {
+              console.warn(
+                `[pilot] trace.networkHosts allowlist matched 0 of ${res.entries.length} captured entries — trace will have no network data.`,
+              );
+            }
+          } else {
             console.warn(`[pilot] Network capture stopped with error: ${res.errorMessage}`);
           }
         } catch (err) {

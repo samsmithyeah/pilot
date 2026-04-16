@@ -8,14 +8,27 @@ type SessionClient = Pick<PilotGrpcClient, 'ping' | 'getUiHierarchy'>
 
 export interface SessionPreflightContext {
   label: string
-  config: Pick<PilotConfig, 'package' | 'activity' | 'platform' | 'resetAppDeepLink' | 'resetAppWaitMs'>
+  config: Pick<PilotConfig, 'package' | 'activity' | 'platform' | 'resetAppDeepLink' | 'resetAppWaitMs' | 'device'>
   device: SessionDevice
   client: SessionClient
   agentApkPath?: string
   agentTestApkPath?: string
   iosXctestrunPath?: string
+  /**
+   * Device-signed .app bundle path. On physical iOS, the daemon caches this
+   * so that `clearAppData` can reinstall the app. Ignored on simulators
+   * and Android.
+   */
+  iosAppPath?: string
   /** ADB serial for this device — enables ADB-level recovery when agent is unavailable */
   deviceSerial?: string
+  /**
+   * Whether this session wants network tracing. Threaded through to
+   * `startAgent` so daemon recovery paths don't spin up the physical-iOS
+   * MITM proxy for a basic-track session. Default false is the safe
+   * no-op. Callers should compute this once via `isNetworkTracingEnabled`.
+   */
+  networkTracingEnabled?: boolean
 }
 
 const DEFAULT_READY_TIMEOUT_MS = 5_000;
@@ -72,6 +85,11 @@ export async function launchConfiguredApp(
     // with fallback mechanisms (in-runner relaunch → simctl relaunch →
     // full agent restart), avoiding the race condition where a separate
     // terminateApp + launchApp sequence can reconnect to a dying process.
+    //
+    // On physical iOS devices the daemon implements clearAppData via
+    // uninstall + reinstall (devicectl), since there's no host-side
+    // app-container access. That path requires StartAgent to have been
+    // called with ios_app_path — pilot's CLI + worker runners always do.
     await ctx.device.clearAppData(ctx.config.package);
     try {
       await ctx.device.restartApp(ctx.config.package);
@@ -119,7 +137,8 @@ export async function launchConfiguredApp(
   // ensureSessionReady's recovery path will retry with a clearer error.
   try {
     await ctx.device.startAgent(
-      ctx.config.package, ctx.agentApkPath, ctx.agentTestApkPath, ctx.iosXctestrunPath,
+      ctx.config.package, ctx.agentApkPath, ctx.agentTestApkPath, ctx.iosXctestrunPath, ctx.iosAppPath,
+      ctx.networkTracingEnabled ?? false,
     );
   } catch {
     // Will be recovered by ensureSessionReady below
@@ -217,7 +236,7 @@ async function recoverSession(ctx: SessionPreflightContext): Promise<void> {
 
   // Then try agent-level dismissal if the agent is reachable
   await dismissBlockingSystemUi(ctx);
-  await ctx.device.startAgent(ctx.config.package ?? '', ctx.agentApkPath, ctx.agentTestApkPath, ctx.iosXctestrunPath);
+  await ctx.device.startAgent(ctx.config.package ?? '', ctx.agentApkPath, ctx.agentTestApkPath, ctx.iosXctestrunPath, ctx.iosAppPath, ctx.networkTracingEnabled ?? false);
   if (!ctx.config.package) return;
 
   try {
