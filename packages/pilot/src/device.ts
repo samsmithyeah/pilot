@@ -27,7 +27,7 @@ import {
 import { ElementHandle, locatorOptionsToSelector, type LocatorOptions } from './element-handle.js';
 import type { PilotConfig } from './config.js';
 import { Tracing } from './trace/tracing.js';
-import { type TraceCollector, getActiveTraceCollector } from './trace/trace-collector.js';
+import { type TraceCollector, getActiveTraceCollector, extractSourceLocation } from './trace/trace-collector.js';
 import type { ActionCategory } from './trace/types.js';
 import { tracedAction } from './trace/traced-action.js';
 import {
@@ -489,8 +489,9 @@ export class Device {
     options?: { times?: number },
   ): Promise<void> {
     const start = Date.now();
+    const source = extractSourceLocation(new Error().stack ?? '');
     await this._ensureRouteManager().addRoute(url, handler, options);
-    this._emitNetworkAction('route', formatPattern(url), start, true);
+    this._emitNetworkAction('route', formatPattern(url), start, true, undefined, source);
   }
 
   /**
@@ -503,16 +504,18 @@ export class Device {
   ): Promise<void> {
     if (!this._routeManager) return;
     const start = Date.now();
+    const source = extractSourceLocation(new Error().stack ?? '');
     await this._routeManager.removeRoute(url, handler);
-    this._emitNetworkAction('unroute', formatPattern(url), start, true);
+    this._emitNetworkAction('unroute', formatPattern(url), start, true, undefined, source);
   }
 
   /** Remove all registered route handlers. */
   async unrouteAll(): Promise<void> {
     if (!this._routeManager) return;
     const start = Date.now();
+    const source = extractSourceLocation(new Error().stack ?? '');
     await this._routeManager.removeAllRoutes();
-    this._emitNetworkAction('unrouteAll', undefined, start, true);
+    this._emitNetworkAction('unrouteAll', undefined, start, true, undefined, source);
   }
 
   /** Wait for a request matching the pattern. */
@@ -606,7 +609,14 @@ export class Device {
   }
 
   /** Emit a trace event for a network management action (route/unroute). */
-  private _emitNetworkAction(action: string, pattern: string | undefined, start: number, success: boolean, error?: string): void {
+  private _emitNetworkAction(
+    action: string,
+    pattern: string | undefined,
+    start: number,
+    success: boolean,
+    error?: string,
+    sourceLocation?: import('./trace/types.js').SourceLocation,
+  ): void {
     const collector = this._traceCollector;
     if (!collector) return;
     collector.addActionEvent({
@@ -621,6 +631,7 @@ export class Device {
       hasScreenshotAfter: false,
       hasHierarchyBefore: false,
       hasHierarchyAfter: false,
+      sourceLocation,
     });
   }
 
