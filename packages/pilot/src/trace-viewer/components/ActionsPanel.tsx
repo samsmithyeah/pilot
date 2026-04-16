@@ -37,6 +37,10 @@ const ACTION_ICONS: Record<string, [string, string]> = {
   'request.patch':  ['\u2192', 'api'],
   'request.delete': ['\u2717', 'api'],   // ✗
   'request.head':   ['\u2190', 'api'],
+  'route.fulfill':  ['\u25a0', 'net'],   // ■
+  'route.abort':    ['\u2298', 'net'],   // ⊘
+  'route.continue': ['\u2192', 'net'],   // →
+  'route.fetch':    ['\u21c4', 'net'],   // ⇄
 };
 
 function getIcon(event: ActionTraceEvent | AssertionTraceEvent): [string, string] {

@@ -10,6 +10,7 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import type * as grpc from '@grpc/grpc-js';
 import type { PilotGrpcClient } from './grpc-client.js';
+import { getActiveTraceCollector } from './trace/trace-collector.js';
 
 // ─── Public Types ───
 
@@ -587,7 +588,13 @@ export class NetworkRouteManager {
       isHttps: msg.isHttps,
     });
 
+    // Track which route action the handler takes for trace events
+    let routeAction = 'continue';
     const sendDecision = (decision: RouteDecisionMsg) => {
+      if (decision.abort) routeAction = 'abort';
+      else if (decision.fulfill || decision.fulfillAfterFetch) routeAction = 'fulfill';
+      else if (decision.fetch) routeAction = 'fetch';
+      else routeAction = 'continue';
       this._stream?.write({ routeDecision: decision });
     };
 
@@ -599,9 +606,14 @@ export class NetworkRouteManager {
 
     const route = new Route(msg.interceptId, request, sendDecision, awaitFetchedResponse);
 
+    const startTime = Date.now();
+
     // Run the handler. If it throws or rejects, continue the request.
     Promise.resolve()
       .then(() => routeInfo.handler(route))
+      .then(() => {
+        this._emitRouteTraceEvent(msg, routeAction, startTime, true);
+      })
       .catch((err) => {
          
         console.warn(`[pilot] Route handler error: ${err}`);
@@ -612,7 +624,46 @@ export class NetworkRouteManager {
             continueRequest: { url: '', method: '', headers: [], postData: Buffer.alloc(0) },
           },
         });
+        this._emitRouteTraceEvent(msg, 'continue', startTime, false, String(err));
       });
+  }
+
+  /** Emit a trace event for a route handler invocation. */
+  private _emitRouteTraceEvent(
+    msg: InterceptedRequestMsg,
+    action: string,
+    startTime: number,
+    success: boolean,
+    error?: string,
+  ): void {
+    const collector = getActiveTraceCollector();
+    if (!collector) return;
+
+    const duration = Date.now() - startTime;
+    let shortUrl: string;
+    try {
+      const url = new URL(msg.url);
+      shortUrl = url.pathname + url.search;
+    } catch {
+      shortUrl = msg.url;
+    }
+
+    collector.addActionEvent({
+      category: 'network',
+      action: `route.${action}`,
+      duration,
+      success,
+      error,
+      log: [
+        `${msg.method} ${msg.url}`,
+        `route.${action}() (${duration}ms)`,
+      ],
+      hasScreenshotBefore: false,
+      hasScreenshotAfter: false,
+      hasHierarchyBefore: false,
+      hasHierarchyAfter: false,
+      selector: shortUrl,
+    });
   }
 
   /** Deliver a fetched response to the pending fetch promise. */
