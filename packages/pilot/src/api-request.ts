@@ -296,9 +296,7 @@ export class APIRequestContext {
 
       const requestHeaders: Record<string, string> = { ...headers };
       const responseHeaders = pilotResponse.headersObject();
-      const requestBodyBuf = body !== undefined
-        ? Buffer.from(typeof body === 'string' ? body : body as Uint8Array)
-        : undefined;
+      const requestBodyBuf = APIRequestContext._bodyToBuffer(body);
       this._networkEntries.push({
         index: this._networkEntries.length,
         actionIndex: collector.currentActionIndex - 1,
@@ -321,6 +319,14 @@ export class APIRequestContext {
     return pilotResponse;
   }
 
+  /** Convert a fetch body to a Buffer for trace serialization. */
+  private static _bodyToBuffer(body: BodyInit | undefined): Buffer | undefined {
+    if (body === undefined) return undefined;
+    if (typeof body === 'string') return Buffer.from(body);
+    if (body instanceof Uint8Array) return Buffer.from(body);
+    return undefined;
+  }
+
   private _resolveUrl(url: string, params?: Record<string, string> | URLSearchParams): URL {
     let resolved: URL;
     if (this._baseURL && !url.startsWith('http://') && !url.startsWith('https://')) {
@@ -328,6 +334,12 @@ export class APIRequestContext {
       const base = this._baseURL.endsWith('/') ? this._baseURL : this._baseURL + '/';
       resolved = new URL(url.startsWith('/') ? url.slice(1) : url, base);
     } else {
+      if (!url.startsWith('http://') && !url.startsWith('https://')) {
+        throw new Error(
+          `Relative URL "${url}" requires baseURL to be configured. ` +
+          'Set baseURL in defineConfig() or test.use().',
+        );
+      }
       resolved = new URL(url);
     }
 

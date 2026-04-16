@@ -782,6 +782,9 @@ async function runSuiteContext(
         );
       }
     } finally {
+      // Ensure request fixture is cleaned up even if hooks threw before the test body
+      requestContext.dispose();
+
       // Run afterEach hooks (always)
       if (allAfterEach.length > 0) {
         traceCollector?.startGroup('afterEach Hooks');

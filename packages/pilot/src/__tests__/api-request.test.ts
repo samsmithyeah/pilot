@@ -142,6 +142,11 @@ describe('APIRequestContext', () => {
       expect(res.ok).toBe(true);
     });
 
+    it('throws descriptive error for relative URL without baseURL', async () => {
+      const ctx = new APIRequestContext();
+      await expect(ctx.get('/users/1')).rejects.toThrow('Relative URL "/users/1" requires baseURL');
+    });
+
     it('uses absolute URLs as-is, ignoring baseURL', async () => {
       const ctx = new APIRequestContext({ baseURL: 'http://should-not-use.invalid' });
       const res = await ctx.get(`${baseURL}/json`);
