@@ -1335,6 +1335,14 @@ async fn handle_mitm_http<C, U>(
         // reads structured fields, not `raw_bytes`).
         if let Some(h) = handler.as_ref() {
             if let Some(mut synth) = h.on_request(&mut req, hostname, is_https).await {
+                if synth.status_code == 0 {
+                    // Abort: drop the connection without writing anything.
+                    // A clean TCP close triggers a network error in the app's
+                    // HTTP client without corrupting its state (important for
+                    // iOS NSURLSession which crashes on malformed responses).
+                    record_entry(&state, &req, &synth, hostname, is_https, start, "aborted").await;
+                    return;
+                }
                 if synth.raw_bytes.is_empty() {
                     synth.raw_bytes = reencode_response(&synth);
                 }
@@ -1342,12 +1350,7 @@ async fn handle_mitm_http<C, U>(
                     return;
                 }
                 let close = has_connection_close(&synth.headers);
-                let action = if synth.status_code == 0 {
-                    "aborted"
-                } else {
-                    "mocked"
-                };
-                record_entry(&state, &req, &synth, hostname, is_https, start, action).await;
+                record_entry(&state, &req, &synth, hostname, is_https, start, "mocked").await;
                 if close {
                     return;
                 }
@@ -1509,17 +1512,38 @@ async fn handle_http(
         };
         let hostname = host.split(':').next().unwrap_or(&host);
         if let Some(mut synth) = h.on_request(&mut parsed_req, hostname, false).await {
+            if synth.status_code == 0 {
+                // Abort: drop the connection without sending anything.
+                // This causes a clean TCP RST / connection-closed error in
+                // the app's HTTP client rather than a malformed response
+                // that could crash iOS's NSURLSession.
+                record_entry(
+                    &state,
+                    &parsed_req,
+                    &synth,
+                    hostname,
+                    false,
+                    start,
+                    "aborted",
+                )
+                .await;
+                return;
+            }
             // Handler returned a synthetic response — send it to the client.
             if synth.raw_bytes.is_empty() {
                 synth.raw_bytes = reencode_response(&synth);
             }
             let _ = client.write_all(&synth.raw_bytes).await;
-            let action = if synth.status_code == 0 {
-                "aborted"
-            } else {
-                "mocked"
-            };
-            record_entry(&state, &parsed_req, &synth, hostname, false, start, action).await;
+            record_entry(
+                &state,
+                &parsed_req,
+                &synth,
+                hostname,
+                false,
+                start,
+                "mocked",
+            )
+            .await;
             return;
         }
         // Handler may have mutated the request — update local vars.
