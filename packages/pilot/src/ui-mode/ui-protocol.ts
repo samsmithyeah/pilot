@@ -149,6 +149,9 @@ export interface HierarchyUpdateMessage {
 export interface WatchEventMessage {
   type: 'watch-event'
   filePath: string
+  /** Present when the watch event is scoped to a specific test fullName or
+   * describe prefix. Omitted for whole-file watches. */
+  testFilter?: string
   event: 'changed' | 'added' | 'removed' | 'watch-enabled' | 'watch-disabled'
 }
 
@@ -277,6 +280,9 @@ export interface ToggleWatchCommand {
   type: 'toggle-watch'
   /** File path to toggle, or 'all' for all files. */
   filePath: string
+  /** Test fullName or describe prefix to scope the watch to. Omit (or
+   * pass undefined) to toggle watching the whole file. */
+  testFilter?: string
 }
 
 export interface RequestHierarchyCommand {

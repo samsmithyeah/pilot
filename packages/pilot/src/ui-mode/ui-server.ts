@@ -170,7 +170,12 @@ export async function startUIServer(
   let screenSeq = 0;
   let screenPollActive = false;
   let watcher: FSWatcher | null = null;
-  const watchedFiles = new Set<string>();
+  /** filePath → set of watched keys. Each key is a test fullName, a describe
+   * prefix, or '*' meaning "watch the whole file". A file is in the map iff
+   * at least one key is watched; the chokidar watcher adds/removes it in
+   * lockstep. */
+  const watchedEntries = new Map<string, Set<string>>();
+  const WHOLE_FILE = '*';
 
   // ─── Multi-worker state ───
   const multiWorker = (ctx.workers ?? 1) > 1 && (ctx.deviceSerials?.length ?? 0) > 1;
@@ -1977,37 +1982,63 @@ export async function startUIServer(
 
   // ─── Watch Mode ───
 
-  function startWatching(filePath: string): void {
-    if (watchedFiles.has(filePath)) return;
-    watchedFiles.add(filePath);
+  function startWatching(filePath: string, testFilter: string | undefined): void {
+    const key = testFilter ?? WHOLE_FILE;
+    let set = watchedEntries.get(filePath);
+    const isNewFile = !set;
+    if (!set) {
+      set = new Set();
+      watchedEntries.set(filePath, set);
+    }
+    if (set.has(key)) return;
+    set.add(key);
 
     if (!watcher) {
       watcher = chokidarWatch([], { ignoreInitial: true });
       watcher.on('change', (changedPath) => {
-        if (watchedFiles.has(changedPath)) {
+        if (watchedEntries.has(changedPath)) {
           broadcast({ type: 'watch-event', filePath: changedPath, event: 'changed' });
           watchQueue.scheduleFiles([changedPath]);
         }
       });
     }
 
-    watcher.add(filePath);
-    broadcast({ type: 'watch-event', filePath, event: 'watch-enabled' });
+    if (isNewFile) watcher.add(filePath);
+    broadcast({ type: 'watch-event', filePath, testFilter, event: 'watch-enabled' });
   }
 
-  function stopWatching(filePath: string): void {
-    if (!watchedFiles.has(filePath)) return;
-    watchedFiles.delete(filePath);
-    watcher?.unwatch(filePath);
-    broadcast({ type: 'watch-event', filePath, event: 'watch-disabled' });
+  function stopWatching(filePath: string, testFilter: string | undefined): void {
+    const key = testFilter ?? WHOLE_FILE;
+    const set = watchedEntries.get(filePath);
+    if (!set || !set.has(key)) return;
+    set.delete(key);
+    if (set.size === 0) {
+      watchedEntries.delete(filePath);
+      watcher?.unwatch(filePath);
+    }
+    broadcast({ type: 'watch-event', filePath, testFilter, event: 'watch-disabled' });
   }
 
-  const watchQueue = new RunQueue(300, (request) => {
-    if (request.type === 'all') {
-      runAllFiles().catch(broadcastError);
-    } else {
+  const watchQueue = new RunQueue(300, async (request) => {
+    try {
+      if (request.type === 'all') {
+        await runAllFiles();
+        return;
+      }
       const file = request.files[0];
-      if (file) runFile(file).catch(broadcastError);
+      if (!file) return;
+      const entries = watchedEntries.get(file);
+      // Whole-file watch (or missing entries — fall back to whole file)
+      // supersedes filter-level watches, since running the file covers them.
+      if (!entries || entries.has(WHOLE_FILE)) {
+        await runFile(file);
+        return;
+      }
+      for (const filter of entries) {
+        await runFile(file, filter);
+      }
+    } catch (err) {
+      broadcastError(err);
     }
   });
 
@@ -2089,14 +2120,19 @@ export async function startUIServer(
         break;
       case 'toggle-watch':
         if (msg.filePath === 'all') {
-          const allWatched = ctx.testFiles.every((f) => watchedFiles.has(f));
+          // The 'all' toggle watches every file at whole-file scope.
+          const allWhole = ctx.testFiles.every((f) => watchedEntries.get(f)?.has(WHOLE_FILE));
           for (const f of ctx.testFiles) {
-            if (allWatched) stopWatching(f);
-            else startWatching(f);
+            if (allWhole) stopWatching(f, undefined);
+            else startWatching(f, undefined);
           }
         } else {
-          if (watchedFiles.has(msg.filePath)) stopWatching(msg.filePath);
-          else startWatching(msg.filePath);
+          const key = msg.testFilter ?? WHOLE_FILE;
+          if (watchedEntries.get(msg.filePath)?.has(key)) {
+            stopWatching(msg.filePath, msg.testFilter);
+          } else {
+            startWatching(msg.filePath, msg.testFilter);
+          }
         }
         break;
       case 'request-hierarchy': {

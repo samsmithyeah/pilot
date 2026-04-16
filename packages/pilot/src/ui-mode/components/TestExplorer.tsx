@@ -282,7 +282,10 @@ function TreeNode({ node, depth, parentProjectName, expandedNodes, selectedTestI
 
   const handleWatch = useCallback((e: Event) => {
     e.stopPropagation();
-    onSend({ type: 'toggle-watch', filePath: node.filePath });
+    // File nodes watch the whole file; test/suite nodes pass their fullName
+    // as the filter so only that test (or describe subtree) re-runs.
+    const testFilter = node.type === 'file' ? undefined : node.fullName;
+    onSend({ type: 'toggle-watch', filePath: node.filePath, testFilter });
   }, [node, onSend]);
 
   const handleClick = useCallback(() => {
@@ -326,11 +329,15 @@ function TreeNode({ node, depth, parentProjectName, expandedNodes, selectedTestI
           <button class="te-action-btn te-run-btn" onClick={handleRun} disabled={isRunning} title="Run">
             <Play size={ICON_SIZE} />
           </button>
-          {node.type === 'file' && (
+          {(node.type === 'file' || node.type === 'suite' || node.type === 'test') && (
             <button
               class={`te-action-btn te-watch-btn ${node.watchEnabled ? 'active' : ''}`}
               onClick={handleWatch}
-              title="Watch"
+              title={node.type === 'file'
+                ? 'Watch file for changes'
+                : node.type === 'suite'
+                  ? 'Watch this describe block'
+                  : 'Watch this test'}
             >
               <Eye size={ICON_SIZE} />
             </button>

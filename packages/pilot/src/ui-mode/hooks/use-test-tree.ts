@@ -101,8 +101,8 @@ export function useTestTree() {
     setFiles((prev) => updateFileStatusInTree(prev, filePath, status, projectName));
   }, []);
 
-  const updateWatchEnabled = useCallback((filePath: string, enabled: boolean) => {
-    setFiles((prev) => updateWatchInTree(prev, filePath, enabled));
+  const updateWatchEnabled = useCallback((filePath: string, enabled: boolean, testFilter?: string) => {
+    setFiles((prev) => updateWatchInTree(prev, filePath, enabled, testFilter));
   }, []);
 
   /** Reset any 'running' nodes back to 'idle' (e.g. after a stopped run). */
@@ -289,19 +289,26 @@ function updateFileStatusInTree(
 }
 
 /**
- * Recursively update a file node's watchEnabled flag, handling project nesting.
+ * Recursively set watchEnabled on a node. If testFilter is undefined, targets
+ * the file node; otherwise targets the test/suite node whose fullName matches
+ * the filter within that file.
  */
 function updateWatchInTree(
   nodes: TestTreeNode[],
   filePath: string,
   enabled: boolean,
+  testFilter: string | undefined,
 ): TestTreeNode[] {
   return nodes.map((node) => {
-    if (node.type === 'file' && node.filePath === filePath) {
+    const isTarget = testFilter === undefined
+      ? (node.type === 'file' && node.filePath === filePath)
+      : (node.filePath === filePath && node.fullName === testFilter
+          && (node.type === 'suite' || node.type === 'test'));
+    if (isTarget) {
       return { ...node, watchEnabled: enabled };
     }
     if (node.children) {
-      const updatedChildren = updateWatchInTree(node.children, filePath, enabled);
+      const updatedChildren = updateWatchInTree(node.children, filePath, enabled, testFilter);
       if (updatedChildren.some((c, i) => c !== node.children![i])) {
         return { ...node, children: updatedChildren };
       }
