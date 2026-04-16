@@ -388,6 +388,22 @@ describe('APIRequestContext', () => {
       setActiveTraceCollector(null);
     });
 
+    it('emits failed trace event on network error', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- mock collector for test
+      setActiveTraceCollector(mockCollector as any);
+      const ctx = new APIRequestContext({ baseURL: 'http://127.0.0.1:1' });
+      await expect(ctx.get('/anything')).rejects.toThrow();
+
+      expect(mockCollector.addActionEvent).toHaveBeenCalledOnce();
+      const event = mockCollector.addActionEvent.mock.calls[0][0];
+      expect(event.category).toBe('api');
+      expect(event.success).toBe(false);
+      expect(event.error).toBeDefined();
+      expect(event.log[1]).toContain('FAILED');
+
+      setActiveTraceCollector(null);
+    });
+
     it('does not emit trace events when no collector is active', async () => {
       setActiveTraceCollector(null);
       const ctx = new APIRequestContext({ baseURL });

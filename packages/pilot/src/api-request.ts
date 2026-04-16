@@ -206,6 +206,31 @@ export class APIRequestContext {
         signal: ac.signal,
       });
       responseBuffer = Buffer.from(await response.arrayBuffer());
+    } catch (fetchError) {
+      // Emit a failed trace event so network errors are visible in the
+      // trace viewer / UI mode (timeouts, DNS failures, aborts, etc.)
+      const duration = Date.now() - startTime;
+      const collector = getActiveTraceCollector();
+      if (collector) {
+        const errMsg = fetchError instanceof Error ? fetchError.message : String(fetchError);
+        collector.addActionEvent({
+          category: 'api',
+          action: `request.${method.toLowerCase()}`,
+          duration,
+          success: false,
+          error: errMsg,
+          log: [
+            `${method} ${resolvedUrl.toString()}`,
+            `FAILED: ${errMsg} (${duration}ms)`,
+          ],
+          hasScreenshotBefore: false,
+          hasScreenshotAfter: false,
+          hasHierarchyBefore: false,
+          hasHierarchyAfter: false,
+          sourceLocation,
+        });
+      }
+      throw fetchError;
     } finally {
       if (timer) clearTimeout(timer);
       parentSignal.removeEventListener('abort', onParentAbort);
@@ -223,7 +248,7 @@ export class APIRequestContext {
       responseBuffer,
     );
 
-    // ── Trace integration ──
+    // ── Trace integration (success path) ──
     const collector = getActiveTraceCollector();
     if (collector) {
       const action = `request.${method.toLowerCase()}`;
@@ -233,7 +258,6 @@ export class APIRequestContext {
         `${response.status} ${response.statusText} (${duration}ms)`,
       ];
 
-      // Emit action event so it appears in the actions panel
       collector.addActionEvent({
         category: 'api',
         action,
@@ -248,15 +272,12 @@ export class APIRequestContext {
         sourceLocation,
       });
 
-      // Build request headers record for the network entry
       const requestHeaders: Record<string, string> = { ...headers };
       const responseHeaders = pilotResponse.headersObject();
-
-      // Build and accumulate NetworkEntry
       const requestBodyBuf = body !== undefined
         ? Buffer.from(typeof body === 'string' ? body : body as Uint8Array)
         : undefined;
-      const entry: NetworkEntry = {
+      this._networkEntries.push({
         index: this._networkEntries.length,
         actionIndex: collector.currentActionIndex - 1,
         startTime,
@@ -272,8 +293,7 @@ export class APIRequestContext {
         responseHeaders,
         requestBody: requestBodyBuf,
         responseBody: responseBuffer,
-      };
-      this._networkEntries.push(entry);
+      });
     }
 
     return pilotResponse;
