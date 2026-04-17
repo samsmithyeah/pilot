@@ -712,15 +712,13 @@ function App() {
         />
       }
       filmstrip={
-        actionEvents.length > 0 ? (
-          <TimelineFilmstrip
-            events={actionEvents}
-            screenshots={screenshots}
-            metadata={metadata}
-            selectedIndex={selectedIndex}
-            onSelect={handleActionPin}
-          />
-        ) : null
+        <TimelineFilmstrip
+          events={actionEvents}
+          screenshots={screenshots}
+          metadata={metadata}
+          selectedIndex={selectedIndex}
+          onSelect={handleActionPin}
+        />
       }
       actionsPanel={
         <ActionsPanel

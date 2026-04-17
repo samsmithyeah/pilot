@@ -404,7 +404,9 @@ style.textContent = `
 
   /* ─── Timeline ─── */
   .timeline { display: flex; flex-direction: column; gap: 0; padding: 0; background: var(--color-bg-secondary); border-bottom: 1px solid var(--color-border); flex-shrink: 0; position: relative; }
-  .timeline-inner { display: flex; align-items: flex-end; gap: 2px; padding: 4px 8px; min-width: 100%; overflow-x: auto; }
+  /* min-height keeps the filmstrip at its normal size even when there are
+   * no thumbnails yet — thumb height (56) + label + gap + padding ≈ 78px. */
+  .timeline-inner { display: flex; align-items: flex-end; gap: 2px; padding: 4px 8px; min-width: 100%; min-height: 78px; overflow-x: auto; }
   .timeline-thumb { height: 56px; width: auto; border-radius: 2px; border: 2px solid transparent; cursor: pointer; opacity: 0.6; transition: all 0.1s; flex-shrink: 0; }
   .timeline-thumb:hover { opacity: 1; }
   .timeline-thumb.selected { opacity: 1; border-color: var(--color-accent); }
