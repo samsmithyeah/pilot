@@ -109,6 +109,9 @@ class ElementFinder(private val device: UiDevice) {
      */
     private val nodeInfoMethodCache = ConcurrentHashMap<Class<*>, java.lang.reflect.Method>()
 
+    /** Names of reflection sites we've already warned about. */
+    private val warnedSites: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
     companion object {
         // Class names that can carry a hint (placeholder) attribute.
         // Used as a candidate filter when only `hint` is supplied; the actual
@@ -588,7 +591,11 @@ class ElementFinder(private val device: UiDevice) {
 
             // 3. Role description set via AccessibilityNodeInfoCompat.
             extras?.getCharSequence(ROLE_DESCRIPTION_EXTRA_KEY)?.toString()?.takeIf { it.isNotEmpty() }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            // Reflection on UiObject2 is the load-bearing path here; if it
+            // breaks (AndroidX rename, restricted API), every role-from-RN
+            // mapping silently regresses. Log so the failure is visible.
+            warnOnce("extractRoleDescription", e)
             null
         }
     }
@@ -609,8 +616,27 @@ class ElementFinder(private val device: UiDevice) {
         }
         return try {
             nodeInfoFor(obj)?.isShowingHintText == true
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            warnOnce("isShowingHintText", e)
             false
+        }
+    }
+
+    /**
+     * Log a reflection failure once per call-site so a future AndroidX /
+     * UiAutomator rename surfaces loudly the first time we see it instead
+     * of silently degrading every textfield-related assertion.
+     */
+    private fun warnOnce(
+        site: String,
+        e: Throwable,
+    ) {
+        if (warnedSites.add(site)) {
+            android.util.Log.w(
+                "ElementFinder",
+                "Reflection failed at '$site' — assertions depending on it will degrade: ${e.message}",
+                e,
+            )
         }
     }
 
@@ -731,19 +757,6 @@ class ElementFinder(private val device: UiDevice) {
         val elementId = UUID.randomUUID().toString()
         elementCache[elementId] = obj
         return toElementInfo(obj, elementId)
-    }
-
-    /**
-     * Filter results by name (text or contentDescription match).
-     * Used when role + name are specified together.
-     */
-    internal fun filterByName(
-        objects: List<UiObject2>,
-        name: String,
-    ): List<UiObject2> {
-        return objects.filter { obj ->
-            obj.text == name || obj.contentDescription == name
-        }
     }
 
     private fun describeSelector(selector: ElementSelector): String {

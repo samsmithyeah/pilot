@@ -161,7 +161,15 @@ class SnapshotElementFinder {
             let displayText: String?
             if isTextFieldType(elType) {
                 let v = value ?? ""
-                displayText = v.isEmpty ? nil : v
+                // Empty textfields sometimes surface their placeholder as
+                // `value` (older iOS, certain RN TextInput configs). Strip
+                // that so toBeEmpty()/toHaveValue("") behave the same way
+                // they do on Android (where isShowingHintText covers this).
+                if v.isEmpty || v == placeholderValue {
+                    displayText = nil
+                } else {
+                    displayText = v
+                }
             } else if let value = value, !value.isEmpty {
                 displayText = value
             } else if !title.isEmpty {
@@ -295,6 +303,23 @@ class SnapshotElementFinder {
             || elType == .textView || elType == .searchField
     }
 
+    /// Tracks whether we've already logged a KVC miss on `traits`, so the
+    /// warning fires once per agent process instead of per snapshot.
+    private static let kvcMissLogged = NSLock()
+    nonisolated(unsafe) private static var kvcMissLoggedFlag = false
+
+    private static func logKvcMissOnce() {
+        kvcMissLogged.lock()
+        defer { kvcMissLogged.unlock() }
+        guard !kvcMissLoggedFlag else { return }
+        kvcMissLoggedFlag = true
+        NSLog(
+            "[PilotSnapshot] KVC `traits` returned nil on a non-empty snapshot. " +
+            "Trait-derived roles (heading/searchfield/link via traits) will not resolve. " +
+            "Likely cause: Xcode renamed/restricted the XCElementSnapshot.traits property."
+        )
+    }
+
     /// Read the UIAccessibilityTraits bitmask out of an annotated snapshot
     /// dictionary. `annotateTraits()` splices the value in via KVC on the
     /// underlying XCElementSnapshot, so we only need to read the canonical
@@ -322,14 +347,23 @@ class SnapshotElementFinder {
     /// nodes). Positional alignment would silently mis-attribute traits to
     /// the wrong nodes whenever the two sequences diverge.
     static func annotateTraits(dict: inout [String: Any], snapshot: XCUIElementSnapshot) {
+        let raw = (snapshot as? NSObject)?.value(forKey: "traits")
         let traits: UInt64 = {
-            let raw = (snapshot as? NSObject)?.value(forKey: "traits")
             if let v = raw as? UInt64 { return v }
             if let v = raw as? NSNumber { return v.uint64Value }
             return 0
         }()
         if traits != 0 {
             dict["traits"] = traits
+        } else if raw == nil {
+            // KVC returned nil for `traits` — Xcode may have renamed or
+            // restricted the private property. All trait-derived role
+            // detection silently degrades to 0, so log the first occurrence
+            // loudly. We only flag at the root (where the tree is non-empty)
+            // to avoid spamming for genuinely traitless leaf nodes.
+            if !snapshot.children.isEmpty {
+                logKvcMissOnce()
+            }
         }
         guard var children = dict["children"] as? [[String: Any]] else { return }
         let snapChildren = snapshot.children

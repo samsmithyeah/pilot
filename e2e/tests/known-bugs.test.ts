@@ -24,12 +24,4 @@ describe("Known bugs (open)", () => {
   test.skip("PILOT-135: tap() should auto-scroll to off-screen elements", () => {
     expect(true).toBe(true)
   })
-
-  // ─── PILOT-149: not.toBeVisible() polling ───
-  // Already fixed in expect.ts (poll() supports negated mode), but the
-  // tracker stays so future regressions of negated-assertion polling are
-  // easy to find.
-  test.skip("PILOT-149: not.toBeVisible() should poll until element disappears", () => {
-    expect(true).toBe(true)
-  })
 })

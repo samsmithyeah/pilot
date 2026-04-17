@@ -23,6 +23,11 @@ enum RoleMapping {
         "spinner": [.picker, .activityIndicator],
         "toolbar": [.toolbar],
         "tab": [.tab, .tabBar],
+        // resolveRole(for:traits:) can publish "searchfield" off the
+        // UIAccessibilityTraitSearchField bit — keep the reverse mapping
+        // here so getByRole("searchfield") is symmetric and doesn't throw
+        // "Unknown role".
+        "searchfield": [.searchField],
     ]
 
     /// Reverse mapping: XCUIElement.ElementType → role name.
