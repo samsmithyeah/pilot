@@ -1648,37 +1648,18 @@ export async function startUIServer(
     }
   }
 
-  /** Stop a parallel run by hard-killing any busy workers so their in-flight
-   * device operation is interrupted immediately, rather than waiting for the
-   * current test (or the whole file) to finish. Retired workers are respawned
-   * by ensureWorkersReady() before the next run. */
+  /** Stop a parallel run: signal each busy worker to abort. The worker's
+   * poll loops bail out immediately via getActiveAbortSignal(), so the
+   * in-flight assertion/action doesn't finish its own timeout; the worker
+   * itself stays alive and ready for the next run. */
   function stopParallelRun(): void {
     parallelRunAborted = true;
 
     for (const worker of uiWorkers) {
       if (!worker.busy) continue;
-
-      // Mark retired FIRST so the worker's exit handler calls maybeResolve()
-      // instead of retireWorker() (which would re-queue the in-flight file
-      // and broadcast an 'error' worker status).
-      worker.retired = true;
-      const inFlight = worker.currentFile;
-      const inFlightTest = worker.currentTest;
-      worker.busy = false;
-      worker.currentFile = undefined;
-      worker.currentTest = undefined;
-
-      if (inFlight) {
-        // Reset the in-flight test to 'idle' so it doesn't stay stuck on
-        // 'running' in the UI after a stop — it'll re-run cleanly next time.
-        if (inFlightTest) {
-          updateTestStatus(inFlightTest, inFlight.filePath, 'idle', undefined, undefined, undefined, worker.id, inFlight.projectName);
-        }
-        broadcastFileStatus(inFlight.filePath, 'done', inFlight.projectName);
-      }
-      broadcastWorkerStatus(worker, 'idle');
-
-      try { worker.process.kill(); } catch { /* already dead */ }
+      try {
+        worker.process.send({ type: 'abort' } satisfies import('./ui-protocol.js').UIWorkerAbortMessage);
+      } catch { /* IPC closed */ }
     }
   }
 

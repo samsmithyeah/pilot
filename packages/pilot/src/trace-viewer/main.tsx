@@ -244,11 +244,15 @@ function App() {
   const [bottomHeight, setBottomHeight] = useState(220);
 
   const handleLeftResize = useCallback((delta: number) => {
-    setLeftWidth(w => Math.max(180, Math.min(600, w + delta)));
+    // Cap dynamically against the window so the right pane still keeps
+    // ~300px, but otherwise let the user drag the left as wide as they want.
+    const max = Math.max(180, window.innerWidth - 300);
+    setLeftWidth(w => Math.max(180, Math.min(max, w + delta)));
   }, []);
 
   const handleBottomResize = useCallback((delta: number) => {
-    setBottomHeight(h => Math.max(80, Math.min(500, h - delta)));
+    const max = Math.max(80, window.innerHeight - 100);
+    setBottomHeight(h => Math.max(80, Math.min(max, h - delta)));
   }, []);
 
   const selectedEvent = actionEvents[selectedIndex];
@@ -477,6 +481,8 @@ style.textContent = `
   .detail-tab:hover { color: var(--color-text-secondary); }
   .detail-tab.active { color: var(--color-text-primary); border-bottom-color: var(--color-accent); }
   .detail-tab.has-error { color: var(--color-error); }
+  .detail-tab-count { margin-left: 6px; padding: 1px 5px; border-radius: 8px; background: var(--color-bg-tertiary); color: var(--color-text-secondary); font-size: 10px; font-weight: 600; letter-spacing: 0; }
+  .detail-tab.active .detail-tab-count { background: var(--color-accent); color: var(--color-bg); }
   .detail-content { flex: 1; overflow-y: auto; padding: 10px 14px; font-size: 12px; }
   .detail-content.detail-content-flush { padding: 0; overflow: hidden; }
 

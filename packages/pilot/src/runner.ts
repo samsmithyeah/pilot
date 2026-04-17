@@ -622,6 +622,12 @@ async function runSuiteContext(
 
   // Run tests
   for (const entry of ctx.tests) {
+    // Abort: stop running remaining tests but don't record them as
+    // 'skipped' — a user-initiated stop should leave untouched tests with
+    // whatever prior status they had, not overwrite them with a synthetic
+    // skipped result.
+    if (opts.abortSignal?.aborted) break;
+
     const fullName = parentPrefix ? `${parentPrefix} > ${entry.name}` : entry.name;
 
     // Determine if this test should be skipped.
@@ -629,8 +635,7 @@ async function runSuiteContext(
     const filteredOut = opts.testFilter
       && fullName !== opts.testFilter
       && !fullName.startsWith(opts.testFilter + ' > ');
-    const shouldSkip = entry.skip || (hasOnly && !entry.only) || filteredOut
-      || opts.abortSignal?.aborted;
+    const shouldSkip = entry.skip || (hasOnly && !entry.only) || filteredOut;
 
     if (shouldSkip) {
       const skippedResult: TestResult = {
@@ -1070,8 +1075,11 @@ async function runSuiteContext(
 
   // Run child suites
   for (const suiteEntry of ctx.suites) {
-    const shouldSkip = suiteEntry.skip || (hasOnly && !suiteEntry.only && !hasOnlyTests)
-      || opts.abortSignal?.aborted;
+    // Abort: same semantics as the test loop — stop here without recording
+    // the remaining suites' tests as 'skipped'.
+    if (opts.abortSignal?.aborted) break;
+
+    const shouldSkip = suiteEntry.skip || (hasOnly && !suiteEntry.only && !hasOnlyTests);
 
     if (shouldSkip) {
       // Mark all tests in skipped suite as skipped (we still need to discover them)
