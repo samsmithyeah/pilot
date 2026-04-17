@@ -79,27 +79,42 @@ export function TestExplorer(props: TestExplorerProps) {
 
   const parentMap = useMemo(() => buildParentMap(files), [files]);
   const [pendingIds, setPendingIds] = useState<Set<string>>(new Set());
+  /** Status snapshot per pending id, captured when play was clicked. Pending
+   * is cleared the moment the node's status moves off its snapshot — this
+   * catches the normal transition to 'running' *and* the edge case where
+   * the server jumps straight to a terminal state ('passed'/'failed'/
+   * 'skipped') without an intermediate 'running'. */
+  const pendingSnapshots = useRef<Map<string, TestTreeNode['status']>>(new Map());
 
-  // Clear pending IDs once the node actually transitions to 'running'.
-  // Previously this cleared pending whenever status wasn't 'idle', but for
-  // re-runs of already-passed/failed tests the status stays at its prior
-  // result until the server reports 'running' — keep them pending meanwhile
-  // so the UI shows immediate feedback on play-button click.
   useEffect(() => {
     if (pendingIds.size === 0) return;
     const stillPending = new Set<string>();
     const check = (node: TestTreeNode) => {
-      if (pendingIds.has(node.id) && node.status !== 'running') stillPending.add(node.id);
+      if (pendingIds.has(node.id)) {
+        const snapshot = pendingSnapshots.current.get(node.id);
+        const unchanged = snapshot === undefined
+          ? node.status !== 'running'
+          : node.status === snapshot;
+        if (unchanged) stillPending.add(node.id);
+      }
       node.children?.forEach(check);
     };
     files.forEach(check);
-    if (stillPending.size !== pendingIds.size) setPendingIds(stillPending);
+    if (stillPending.size !== pendingIds.size) {
+      for (const id of pendingIds) {
+        if (!stillPending.has(id)) pendingSnapshots.current.delete(id);
+      }
+      setPendingIds(stillPending);
+    }
   }, [files, pendingIds]);
 
   // Clear all pending when a run stops
   useEffect(() => {
-    if (!isRunning && pendingIds.size > 0) setPendingIds(new Set());
-  }, [isRunning]);  
+    if (!isRunning && pendingIds.size > 0) {
+      pendingSnapshots.current.clear();
+      setPendingIds(new Set());
+    }
+  }, [isRunning]);
 
   const handleSetPending = useCallback((nodeId: string) => {
     const node = findNode(files, nodeId);
@@ -110,6 +125,10 @@ export function TestExplorer(props: TestExplorerProps) {
     while (cur) {
       ids.push(cur);
       cur = parentMap.get(cur);
+    }
+    for (const id of ids) {
+      const n = findNode(files, id);
+      if (n) pendingSnapshots.current.set(id, n.status);
     }
     setPendingIds((prev) => {
       const next = new Set(prev);

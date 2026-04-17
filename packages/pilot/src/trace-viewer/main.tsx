@@ -419,13 +419,18 @@ style.textContent = `
   .timeline-meta .failed { color: var(--color-error); }
 
   /* ─── Resize handles ─── */
-  .resize-handle { flex-shrink: 0; background: transparent; z-index: 10; }
+  /* 1px grey divider that doubles as the drag handle; ::before widens the
+   * hit area so it's still easy to grab. */
+  .resize-handle { flex-shrink: 0; background: var(--color-border); position: relative; z-index: 10; transition: background 0.15s; }
+  .resize-handle::before { content: ''; position: absolute; inset: 0; }
   .resize-handle:hover, .resize-handle:active { background: var(--color-accent); }
-  .resize-handle-horizontal { width: 4px; cursor: col-resize; transition: background 0.15s; }
-  .resize-handle-vertical { height: 4px; cursor: row-resize; transition: background 0.15s; }
+  .resize-handle-horizontal { width: 1px; cursor: col-resize; }
+  .resize-handle-horizontal::before { left: -3px; right: -3px; top: 0; bottom: 0; }
+  .resize-handle-vertical { height: 1px; cursor: row-resize; }
+  .resize-handle-vertical::before { top: -3px; bottom: -3px; left: 0; right: 0; }
 
   /* ─── Actions panel ─── */
-  .actions-panel { width: 100%; height: 100%; display: flex; flex-direction: column; background: var(--color-bg-secondary); overflow: hidden; border-right: 1px solid var(--color-border); }
+  .actions-panel { width: 100%; height: 100%; display: flex; flex-direction: column; background: var(--color-bg-secondary); overflow: hidden; }
   .actions-header { display: flex; align-items: center; border-bottom: 1px solid var(--color-border); flex-shrink: 0; }
   .actions-header-tab { padding: 6px 14px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--color-text-muted); cursor: pointer; border-bottom: 2px solid transparent; }
   .actions-header-tab.active { color: var(--color-text-primary); border-bottom-color: var(--color-accent); }
@@ -475,7 +480,7 @@ style.textContent = `
   .screenshot-empty { color: var(--color-text-faintest); text-align: center; font-size: 13px; }
 
   /* ─── Detail tabs (bottom panel) ─── */
-  .detail-panel { height: 100%; display: flex; flex-direction: column; background: var(--color-bg); border-top: 1px solid var(--color-border); }
+  .detail-panel { height: 100%; display: flex; flex-direction: column; background: var(--color-bg); }
   .detail-tabs-bar { display: flex; gap: 0; background: var(--color-bg-secondary); border-bottom: 1px solid var(--color-border); flex-shrink: 0; }
   .detail-tab { padding: 6px 14px; cursor: pointer; color: var(--color-text-muted); border-bottom: 2px solid transparent; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
   .detail-tab:hover { color: var(--color-text-secondary); }
@@ -504,8 +509,17 @@ style.textContent = `
   .log-source { font-size: 10px; color: var(--color-text-faintest); min-width: 46px; }
   .log-message { word-break: break-all; }
 
-  /* Source tab */
-  .source-code { font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace; font-size: 12px; line-height: 1.5; white-space: pre; overflow-x: auto; }
+  /* Source tab: filename as a fixed header, code scrolls underneath.
+   * The parent .detail-content uses detail-content-flush for this tab so
+   * this wrapper controls its own padding and scroll. */
+  .source-tab { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
+  .source-filename {
+    flex-shrink: 0; padding: 8px 14px 8px 8px;
+    background: var(--color-bg-secondary); border-bottom: 1px solid var(--color-border);
+    color: var(--color-text-muted); font-size: 11px;
+    font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace;
+  }
+  .source-code { flex: 1; min-height: 0; overflow: auto; padding: 10px 14px; font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace; font-size: 12px; line-height: 1.5; white-space: pre; }
   .source-line { display: flex; }
   .source-line-number { min-width: 40px; text-align: right; padding-right: 12px; color: var(--color-text-faintest); user-select: none; }
   .source-line-content { flex: 1; }

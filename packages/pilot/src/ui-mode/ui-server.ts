@@ -1730,6 +1730,40 @@ export async function startUIServer(
     return runFileSingle(filePath, testFilter, explicitProjectName);
   }
 
+  /** Parallel-mode batch dispatch: send multiple TaggedFile entries to
+   * `dispatchFilesParallel` under a single run-start/run-end envelope so
+   * sibling projects' workers run concurrently. Used by the watch queue
+   * when one file change implicates multiple projects (e.g. watching a
+   * test under Android and a different test under iOS in a multi-device
+   * config). Caller is responsible for ensuring parallel mode is active. */
+  async function runBatchParallel(files: TaggedFile[]): Promise<void> {
+    if (files.length === 0 || isRunning) return;
+    isRunning = true;
+    screenPollActive = true;
+    parallelRunAborted = false;
+
+    broadcast({ type: 'run-start', fileCount: files.length });
+
+    try {
+      const r = await dispatchFilesParallel(files);
+      broadcast({
+        type: 'run-end',
+        status: r.failed > 0 ? 'failed' : 'passed',
+        duration: r.duration,
+        passed: r.passed,
+        failed: r.failed,
+        skipped: r.skipped,
+      });
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      broadcast({ type: 'error', message: errMsg });
+      broadcast({ type: 'run-end', status: 'failed', duration: 0, passed: 0, failed: files.length, skipped: 0 });
+    } finally {
+      isRunning = false;
+      screenPollActive = false;
+    }
+  }
+
   async function runAllFiles(): Promise<void> {
     if (useParallel()) {
       await ensureWorkersReady();
@@ -2016,6 +2050,29 @@ export async function startUIServer(
     }
   }
 
+  /** Expand the watched entries for a file into concrete runs. Within a
+   * project, a whole-file watch supersedes per-test watches (running the
+   * file covers them). */
+  function expandWatchedRuns(entries: WatchedEntry[]): Array<{ projectName: string | undefined; testFilter: string | undefined }> {
+    const byProject = new Map<string, WatchedEntry[]>();
+    for (const e of entries) {
+      const key = e.projectName ?? '';
+      let arr = byProject.get(key);
+      if (!arr) { arr = []; byProject.set(key, arr); }
+      arr.push(e);
+    }
+    const runs: Array<{ projectName: string | undefined; testFilter: string | undefined }> = [];
+    for (const [, group] of byProject) {
+      const wholeFile = group.find((e) => e.testFilter === undefined);
+      if (wholeFile) {
+        runs.push({ projectName: wholeFile.projectName, testFilter: undefined });
+      } else {
+        for (const e of group) runs.push({ projectName: e.projectName, testFilter: e.testFilter });
+      }
+    }
+    return runs;
+  }
+
   const watchQueue = new RunQueue(300, async (request) => {
     try {
       if (request.type === 'all') {
@@ -2029,24 +2086,29 @@ export async function startUIServer(
         await runFile(file);
         return;
       }
-      // Group entries by project: within a project, a whole-file watch
-      // supersedes per-test watches (running the file covers them).
-      const byProject = new Map<string, WatchedEntry[]>();
-      for (const e of entries) {
-        const key = e.projectName ?? '';
-        let arr = byProject.get(key);
-        if (!arr) { arr = []; byProject.set(key, arr); }
-        arr.push(e);
+      const runs = expandWatchedRuns(entries);
+      // Parallel mode with multiple runs: dispatch as one batch so sibling
+      // projects' workers can execute concurrently. The global `isRunning`
+      // lock makes back-to-back `runFile` calls serialize — batching is
+      // the only way to reach the parallelism the worker pool can offer.
+      // Single-worker (or single-run) paths keep the simple sequential
+      // shape since one device can only run one thing at a time.
+      if (runs.length > 1 && useParallel()) {
+        await ensureWorkersReady();
+        const files: TaggedFile[] = runs.map((r) => {
+          const project = projectForFile(file, r.projectName);
+          return {
+            filePath: file,
+            projectUseOptions: project?.use as RunFileUseOptions | undefined,
+            projectName: project && project.name !== 'default' ? project.name : undefined,
+            testFilter: r.testFilter,
+          };
+        });
+        await runBatchParallel(files);
+        return;
       }
-      for (const [, group] of byProject) {
-        const wholeFile = group.find((e) => e.testFilter === undefined);
-        if (wholeFile) {
-          await runFile(file, undefined, wholeFile.projectName);
-        } else {
-          for (const e of group) {
-            await runFile(file, e.testFilter, e.projectName);
-          }
-        }
+      for (const r of runs) {
+        await runFile(file, r.testFilter, r.projectName);
       }
     } catch (err) {
       broadcastError(err);
@@ -2481,15 +2543,27 @@ export async function startUIServer(
  * server for the SPA modules while the WebSocket still talks to this server.
  */
 function buildDevShellHtml(devUrl: string): string {
-  const base = devUrl.replace(/\/+$/, '');
+  // Validate as a URL (fail loudly on garbage) and escape for an attribute
+  // context before interpolation. The value comes from a CLI flag / env var
+  // and isn't attacker-controlled in any realistic threat model, but an
+  // unescaped interpolation would trip future linters and make this
+  // function unsafe if anyone ever wires in untrusted input.
+  let base: string;
+  try {
+    const u = new URL(devUrl);
+    base = u.origin + u.pathname.replace(/\/+$/, '');
+  } catch {
+    throw new Error(`Invalid --ui-dev-url: ${devUrl}`);
+  }
+  const attr = (s: string) => s.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;');
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Pilot UI Mode (dev)</title>
-  <script type="module" src="${base}/@vite/client"></script>
-  <script type="module" src="${base}/main.tsx"></script>
+  <script type="module" src="${attr(base)}/@vite/client"></script>
+  <script type="module" src="${attr(base)}/main.tsx"></script>
 </head>
 <body>
   <div id="app"></div>

@@ -59,6 +59,17 @@ function dechunkHttpBody(body: Buffer): Buffer {
   return Buffer.concat(parts);
 }
 
+/** Case-insensitive header lookup. HTTP header names are case-insensitive
+ * per RFC 7230 §3.2, and the on-device collectors have historically mixed
+ * casing (`Transfer-Encoding`, `transfer-encoding`, `Transfer-encoding`). */
+function headerValue(headers: Record<string, string>, name: string): string | undefined {
+  const target = name.toLowerCase();
+  for (const k of Object.keys(headers)) {
+    if (k.toLowerCase() === target) return headers[k];
+  }
+  return undefined;
+}
+
 /** Decode a captured HTTP body: strip chunked framing per Transfer-Encoding,
  * then decompress per Content-Encoding. Device-level network interception
  * captures raw wire bytes, so we have to reverse any hop-by-hop framing
@@ -66,11 +77,11 @@ function dechunkHttpBody(body: Buffer): Buffer {
 function decodeHttpBody(body: Buffer | undefined, headers: Record<string, string>): Buffer | undefined {
   if (!body || body.length === 0) return body;
   let decoded = body;
-  const te = (headers['transfer-encoding'] ?? headers['Transfer-Encoding'] ?? '').toLowerCase();
+  const te = (headerValue(headers, 'transfer-encoding') ?? '').toLowerCase();
   if (te.split(',').map((s) => s.trim()).includes('chunked')) {
     decoded = dechunkHttpBody(decoded);
   }
-  const ce = (headers['content-encoding'] ?? headers['Content-Encoding'] ?? '').toLowerCase().trim();
+  const ce = (headerValue(headers, 'content-encoding') ?? '').toLowerCase().trim();
   if (!ce || ce === 'identity') return decoded;
   try {
     if (ce === 'gzip' || ce === 'x-gzip') return zlib.gunzipSync(decoded);

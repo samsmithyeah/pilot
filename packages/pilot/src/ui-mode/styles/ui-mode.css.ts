@@ -126,7 +126,6 @@ html, body, #app {
 .ui-explorer {
   flex: 0 0 auto;
   overflow-y: auto;
-  border-right: 1px solid var(--border);
   background: var(--bg-secondary);
 }
 
@@ -140,7 +139,6 @@ html, body, #app {
 
 .ui-filmstrip {
   flex: 0 0 auto;
-  border-bottom: 1px solid var(--border);
   overflow: hidden;
 }
 
@@ -154,7 +152,6 @@ html, body, #app {
 .ui-actions {
   flex: 0 0 auto;
   overflow-y: auto;
-  border-right: 1px solid var(--border);
 }
 
 .ui-screenshot {
@@ -169,37 +166,31 @@ html, body, #app {
 .ui-detail {
   flex: 0 0 auto;
   overflow: hidden;
-  border-top: 1px solid var(--border);
 }
 
+/* 1px grey divider that doubles as the resize handle. The ::before
+ * pseudo widens the drag hit area to ~7px so users can grab it easily
+ * without having a thick white band between panes. */
 .ui-resize-handle {
-  flex: 0 0 6px;
-  background: transparent;
+  flex: 0 0 1px;
+  background: var(--border);
   transition: background 0.15s;
   position: relative;
+  z-index: 10;
 }
-.ui-resize-handle:hover { background: color-mix(in srgb, var(--color-accent) 30%, transparent); }
-.ui-resize-handle:active { background: var(--color-accent); }
-.ui-resize-handle:hover::after {
-  content: '\u2022\u2022\u2022';
+.ui-resize-handle::before {
+  content: '';
   position: absolute;
-  color: var(--color-accent);
-  font-size: 8px;
-  letter-spacing: -1px;
-  pointer-events: none;
+  inset: 0;
 }
+.ui-resize-handle:hover { background: var(--color-accent); }
+.ui-resize-handle:active { background: var(--color-accent); }
+
 .ui-resize-col { cursor: col-resize; }
-.ui-resize-col:hover::after {
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%) rotate(90deg);
-}
+.ui-resize-col::before { left: -3px; right: -3px; top: 0; bottom: 0; }
+
 .ui-resize-row { cursor: row-resize; }
-.ui-resize-row:hover::after {
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-}
+.ui-resize-row::before { top: -3px; bottom: -3px; left: 0; right: 0; }
 
 /* ─── Screen area (Action screenshots) ─── */
 
@@ -247,7 +238,6 @@ html, body, #app {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  border-left: 1px solid var(--border);
   background: var(--bg-secondary);
 }
 
@@ -581,6 +571,7 @@ html, body, #app {
 .te-empty { padding: 20px; text-align: center; color: var(--color-text-faint); font-size: 12px; }
 
 .te-node {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 4px;
@@ -645,10 +636,26 @@ html, body, #app {
 
 .te-duration { font-size: 10px; color: var(--color-text-faint); font-family: var(--font-mono); flex-shrink: 0; }
 
-.te-actions { display: flex; gap: 2px; flex-shrink: 0; }
+/* Actions float over the right edge of the row on hover so the test name
+ * can use the row's full width. Individual buttons control their own
+ * visibility (hover shows all; watch-active persists). Pointer-events are
+ * routed per-button so the invisible buttons don't swallow clicks on the
+ * name. */
+.te-actions {
+  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  display: flex; gap: 2px; flex-shrink: 0;
+  pointer-events: none;
+}
+.te-actions > button { pointer-events: auto; }
 .te-action-btn { opacity: 0; transition: opacity 0.15s; }
 .te-node:hover .te-action-btn { opacity: 1; }
 .te-watch-btn.active { opacity: 1; }
+
+/* Background pill on hover so the floating buttons read cleanly over the
+ * clipped name underneath. Matches the row's hover/selected background so
+ * the overlay blends with the row. */
+.te-node:hover .te-actions { background: var(--bg-hover); border-radius: 3px; padding: 1px 2px; }
+.te-node.selected:hover .te-actions { background: var(--bg-selected); }
 
 .te-action-btn {
   width: 20px; height: 20px;
@@ -794,7 +801,16 @@ html, body, #app {
 .log-source { font-size: 10px; color: var(--color-text-faintest); min-width: 46px; }
 .log-message { word-break: break-all; }
 
-.source-code { font-family: var(--font-mono); font-size: 12px; line-height: 1.5; white-space: pre; overflow-x: auto; }
+/* Source tab: filename as a fixed header, code scrolls underneath.
+ * Parent .detail-content uses detail-content-flush for this tab. */
+.source-tab { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
+.source-filename {
+  flex-shrink: 0; padding: 8px 14px 8px 8px;
+  background: var(--bg-secondary); border-bottom: 1px solid var(--border);
+  color: var(--color-text-muted); font-size: 11px;
+  font-family: var(--font-mono);
+}
+.source-code { flex: 1; min-height: 0; overflow: auto; padding: 10px 14px; font-family: var(--font-mono); font-size: 12px; line-height: 1.5; white-space: pre; }
 .source-line { display: flex; }
 .source-line-number { min-width: 40px; text-align: right; padding-right: 12px; color: var(--color-text-faintest); user-select: none; }
 .source-line-content { flex: 1; }

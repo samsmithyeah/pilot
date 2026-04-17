@@ -70,7 +70,7 @@ export function DetailTabs({ event, events, hierarchies, sources, metadata, netw
           <span class="test-error-banner-text">{testError}</span>
         </div>
       )}
-      <div class={`detail-content${tab === 'hierarchy' ? ' detail-content-flush' : ''}`}>
+      <div class={`detail-content${tab === 'hierarchy' || tab === 'source' ? ' detail-content-flush' : ''}`}>
         {tab === 'call' && <CallTab event={event} />}
         {tab === 'log' && <LogTab event={event} />}
         {tab === 'console' && <ConsoleTab event={event} events={consoleEvents} />}
@@ -351,8 +351,8 @@ function SourceTab({ event, sources }: { event: ActionTraceEvent | AssertionTrac
   }, [highlightLine]);
 
   return (
-    <div>
-      <div style={{ color: 'var(--color-text-muted)', fontSize: '11px', marginBottom: '6px', fontFamily: 'monospace' }}>{filename}</div>
+    <div class="source-tab">
+      <div class="source-filename">{filename}</div>
       <div class="source-code">
         {tokenizedLines.map((tokens, i) => (
           <div

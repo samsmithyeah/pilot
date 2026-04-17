@@ -177,6 +177,8 @@ function splitUrl(url: string): { name: string; domain: string } {
 
 function statusBucket(entry: NetworkEntry): '2xx' | '3xx' | '4xx' | '5xx' | 'aborted' | 'pending' {
   if (entry.routeAction === 'aborted') return 'aborted';
+  // status is typed as number; collectors emit 0 when no response was
+  // received (connection failure, aborted before headers, still in flight).
   if (!entry.status) return 'pending';
   if (entry.status >= 500) return '5xx';
   if (entry.status >= 400) return '4xx';
