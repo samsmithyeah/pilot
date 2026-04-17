@@ -25,6 +25,7 @@ import {
 import { ensureSessionReady, launchConfiguredApp, type SessionPreflightContext } from '../session-preflight.js';
 import type { AnyTraceEvent } from '../trace/types.js';
 import { isNetworkTracingEnabled, networkHostsForPac } from '../trace/types.js';
+import { encodeNetworkBodies } from './encode-bodies.js';
 import type {
   UIWorkerMessage,
   UIWorkerChildMessage,
@@ -402,21 +403,7 @@ async function runFileWithRecovery(
         projectName,
         testFilter,
         onNetworkEntries: (entries) => {
-          const bodies: Record<string, string> = {};
-          const safe = entries.map((e) => {
-            const copy = { ...e, requestBody: undefined, responseBody: undefined };
-            if (e.requestBody && e.requestBody.length > 0) {
-              const p = `network/req-${e.index}.bin`;
-              bodies[p] = e.requestBody.toString('base64');
-              copy.requestBodyPath = p;
-            }
-            if (e.responseBody && e.responseBody.length > 0) {
-              const p = `network/res-${e.index}.bin`;
-              bodies[p] = e.responseBody.toString('base64');
-              copy.responseBodyPath = p;
-            }
-            return copy;
-          });
+          const { entries: safe, bodies } = encodeNetworkBodies(entries);
           send({ type: 'network', workerId, entries: safe, bodies });
         },
       });

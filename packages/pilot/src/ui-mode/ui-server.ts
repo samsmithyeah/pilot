@@ -2555,7 +2555,13 @@ function buildDevShellHtml(devUrl: string): string {
   } catch {
     throw new Error(`Invalid --ui-dev-url: ${devUrl}`);
   }
-  const attr = (s: string) => s.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;');
+  // Covers both attribute-context delimiters (double + single quote) so the
+  // helper stays safe if the template below ever switches to single quotes.
+  const attr = (s: string) => s
+    .replaceAll('&', '&amp;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;')
+    .replaceAll('<', '&lt;');
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
