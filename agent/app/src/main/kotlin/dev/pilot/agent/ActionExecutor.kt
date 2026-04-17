@@ -106,17 +106,54 @@ class ActionExecutor(private val device: UiDevice) {
 
     /**
      * Type text without targeting a specific element.
-     * Uses shell command for reliable text input.
+     *
+     * Uses `input text` for printable runs and `input keyevent` for control
+     * characters (`\n`, `\t`, `\b`, `\r`) so those reach the focused field
+     * instead of being silently dropped by the shell-tokenizer.
+     *
+     * IMPORTANT: do NOT add literal quotes around the text —
+     * UiDevice.executeShellCommand does NOT route through a shell. The
+     * command string is split on whitespace and each token is passed
+     * verbatim to `input`, so quote characters end up typed into the field
+     * (PILOT-133). Spaces inside a printable run are converted to `%s`,
+     * which `input text` interprets as a literal space.
+     *
+     * KNOWN LIMITATION: a literal `%s` substring in `text` is indistinguishable
+     * from an encoded space and will type a space instead. Real-world test
+     * data rarely includes `%s`, but if you need to type that exact pair,
+     * use `pressKey()` or break the input up.
      */
     fun typeTextWithoutFocus(text: String) {
-        // Escape special characters for shell input
-        val escaped =
-            text.replace("\\", "\\\\")
-                .replace("\"", "\\\"")
-                .replace("$", "\\$")
-                .replace("`", "\\`")
-                .replace(" ", "%s")
-        device.executeShellCommand("input text \"${escaped.replace("%s", "\\ ")}\"")
+        if (text.isEmpty()) return
+        val buffer = StringBuilder()
+        for (ch in text) {
+            val keyCode =
+                when (ch) {
+                    '\n' -> "KEYCODE_ENTER"
+                    '\t' -> "KEYCODE_TAB"
+                    '\b', '\u0008' -> "KEYCODE_DEL"
+                    '\r' -> null // swallow CR; real newline is \n
+                    else -> ""
+                }
+            if (keyCode == null) continue
+            if (keyCode.isNotEmpty()) {
+                if (buffer.isNotEmpty()) {
+                    flushPrintableRun(buffer)
+                }
+                device.executeShellCommand("input keyevent $keyCode")
+            } else {
+                buffer.append(ch)
+            }
+        }
+        if (buffer.isNotEmpty()) {
+            flushPrintableRun(buffer)
+        }
+    }
+
+    private fun flushPrintableRun(buffer: StringBuilder) {
+        val tokenized = buffer.toString().replace(" ", "%s")
+        device.executeShellCommand("input text $tokenized")
+        buffer.setLength(0)
     }
 
     /**

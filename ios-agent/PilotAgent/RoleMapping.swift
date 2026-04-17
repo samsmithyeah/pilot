@@ -44,6 +44,35 @@ enum RoleMapping {
         return elementTypeToRole[elementType] ?? ""
     }
 
+    /// Resolve a role name, preferring an accessibility-trait override when
+    /// the element carries one. React Native exposes `accessibilityRole` as
+    /// a trait bit (e.g. UIAccessibilityTraitHeader for `accessibilityRole="header"`),
+    /// and the trait carries semantic intent that the element type doesn't.
+    static func resolveRole(for elementType: XCUIElement.ElementType, traits: UInt64) -> String {
+        let headerTrait: UInt64 = 1 << 16
+        let buttonTrait: UInt64 = 1 << 0
+        let linkTrait: UInt64 = 1 << 1
+        let imageTrait: UInt64 = 1 << 2
+        let adjustableTrait: UInt64 = 1 << 17
+        let searchFieldTrait: UInt64 = 1 << 20
+
+        // Trait-derived semantic roles take priority — these are the ones an
+        // app explicitly declares via `accessibilityRole`.
+        if traits & headerTrait != 0 { return "heading" }
+        if traits & searchFieldTrait != 0 { return "searchfield" }
+        if traits & adjustableTrait != 0 { return "seekbar" }
+        if traits & linkTrait != 0 { return "link" }
+
+        let typeRole = elementTypeToRole[elementType] ?? ""
+        if !typeRole.isEmpty { return typeRole }
+
+        // Generic .other elements with a button/image trait still convey role.
+        if traits & buttonTrait != 0 { return "button" }
+        if traits & imageTrait != 0 { return "image" }
+
+        return ""
+    }
+
     /// Get the XCUIElement.ElementType values for a role name.
     /// - Throws: AgentError.invalidSelector if the role is unknown.
     static func elementTypes(for role: String) throws -> [XCUIElement.ElementType] {

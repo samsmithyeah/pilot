@@ -1027,7 +1027,7 @@ await expect(device.getByText("Loading...", { exact: true })).toBeHidden();
 
 #### `.toBeEmpty(options?): Promise<void>`
 
-Assert that the element has no text content or is an empty input field.
+Assert that the element has no text content or is an empty input field. The agents normalize text-input fields so a placeholder/hint is not reported as text — `toBeEmpty()` after `clear()` passes even when the placeholder is still drawn.
 
 ```typescript
 await expect(device.getByRole("textfield", { name: "Search" })).toBeEmpty();
@@ -1071,6 +1071,8 @@ await expect(device.locator({ id: "counter" })).toHaveText("42");
 #### `.toContainText(expected: string | RegExp, options?): Promise<void>`
 
 Assert that the element's text contains the given substring or matches a regex. Unlike `toHaveText()` which requires an exact match, this allows partial matching.
+
+When the matched element has no own text (e.g. a wrapping `View` around `<Text>` children, common in React Native), the agents aggregate descendant text/labels so the assertion sees the visible string.
 
 ```typescript
 await expect(device.getByTestId("status")).toContainText("Success");
@@ -1116,9 +1118,12 @@ await expect(device.getByRole("image")).toHaveAccessibleDescription("Profile pho
 
 Assert that the element has a specific accessibility role.
 
+The role is derived from a framework-set role description first (React Native's `accessibilityRole`, the `isHeading` flag, the `UIAccessibilityTraitHeader` trait, etc.) and falls back to the platform's class/element-type mapping. `"header"` and `"heading"` are accepted as aliases on both platforms.
+
 ```typescript
 await expect(device.getByText("Submit", { exact: true })).toHaveRole("button");
 await expect(device.getByTestId("toggle")).toHaveRole("switch");
+await expect(device.getByText("Section title", { exact: true })).toHaveRole("heading");
 ```
 
 #### `.toHaveValue(value: string, options?): Promise<void>`

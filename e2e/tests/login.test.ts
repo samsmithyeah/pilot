@@ -39,8 +39,7 @@ describe("Login screen", () => {
   test("can type into email field", async ({ device }) => {
     const login = new LoginScreen(device)
     await login.emailField.type("test@example.com")
-    // PILOT-133: type() wraps text in quotes — check with quotes for now
-    await expect(login.emailField).toContainText("test@example.com")
+    await expect(login.emailField).toHaveValue("test@example.com")
   })
 
   test("can type into password field", async ({ device }) => {

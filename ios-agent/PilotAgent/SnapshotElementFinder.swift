@@ -76,7 +76,12 @@ class SnapshotElementFinder {
         resolvedDict = resolvedSnapshot.dictionaryRepresentation
 
         // Convert to string-keyed dict for easier processing
-        let snapshotDict = convertKeys(resolvedDict)
+        var snapshotDict = convertKeys(resolvedDict)
+        // dictionaryRepresentation omits accessibilityTraits on Xcode 26. Walk
+        // the snapshot tree in parallel and splice each node's `traits` in
+        // so role detection (e.g. "heading" for RN `accessibilityRole="header"`)
+        // works.
+        SnapshotElementFinder.annotateTraits(dict: &snapshotDict, snapshot: resolvedSnapshot)
 
         // Flatten and search
         var matches: [([String: Any], CGRect)] = []
@@ -103,7 +108,12 @@ class SnapshotElementFinder {
             let elTypeRaw = nodeDict["elementType"] as? UInt ?? 0
             let elType = XCUIElement.ElementType(rawValue: elTypeRaw) ?? .other
             let className = RoleMapping.typeName(for: elType)
-            let role = RoleMapping.resolveRole(for: elType)
+            // XCTest's snapshot dictionaryRepresentation doesn't always include
+            // accessibility traits. Try several keys and fall back to 0. Traits
+            // are needed for React Native roles like "header" that map to a
+            // trait bit rather than a dedicated element type.
+            let traits = SnapshotElementFinder.extractTraits(from: nodeDict)
+            let role = RoleMapping.resolveRole(for: elType, traits: traits)
             let isEnabled = nodeDict["enabled"] as? Bool ?? true
             let value = nodeDict["value"] as? String
             let isSelected = nodeDict["selected"] as? Bool ?? false
@@ -142,16 +152,25 @@ class SnapshotElementFinder {
             // For text fields, prefer the "value" property (typed text) over "label"
             // (accessibility label). React Native TextInput has label="Email" and
             // value="test@example.com" — we want the value for toHaveText assertions.
+            // After clear() the value is empty; falling back to label/title would
+            // surface the field name (e.g. "Email") and break toBeEmpty().
             let placeholderValue = nodeDict["placeholderValue"] as? String
             let displayText: String?
-            if let value = value, !value.isEmpty {
+            if isTextFieldType(elType) {
+                let v = value ?? ""
+                displayText = v.isEmpty ? nil : v
+            } else if let value = value, !value.isEmpty {
                 displayText = value
             } else if !title.isEmpty {
                 displayText = title
             } else if !label.isEmpty {
                 displayText = label
             } else {
-                displayText = nil
+                // Wrapping containers (e.g. RN <View accessibilityRole="alert">)
+                // carry their visible text in descendant nodes. Aggregate so
+                // assertions like toContainText see it.
+                let descendant = SnapshotElementFinder.collectDescendantText(nodeDict)
+                displayText = descendant.isEmpty ? nil : descendant
             }
 
             let viewportRatio = computeViewportRatio(bounds, screenSize: screenSize)
@@ -162,7 +181,7 @@ class SnapshotElementFinder {
                 text: displayText,
                 contentDescription: label.isEmpty ? (title.isEmpty ? nil : title) : label,
                 resourceId: identifier.isEmpty ? nil : identifier,
-                hint: nil,
+                hint: (placeholderValue?.isEmpty == false) ? placeholderValue : nil,
                 bounds: bounds,
                 isEnabled: isEnabled,
                 isChecked: isChecked,
@@ -268,6 +287,75 @@ class SnapshotElementFinder {
             || elType == .textView || elType == .searchField
     }
 
+    /// Walk a snapshot subtree and concatenate descendant labels/values so a
+    /// wrapping container (e.g. RN `<View accessibilityRole="alert">`) reports
+    /// its visible text content. Mirrors Android's collectDescendantText().
+    /// Read the UIAccessibilityTraits bitmask out of an annotated snapshot
+    /// dictionary. `annotateTraits()` splices the value in via KVC on the
+    /// underlying XCElementSnapshot, so we only need to read the canonical
+    /// key here.
+    static func extractTraits(from node: [String: Any]) -> UInt64 {
+        guard let raw = node["traits"] else { return 0 }
+        switch raw {
+        case let v as UInt64: return v
+        case let v as UInt: return UInt64(v)
+        case let v as Int: return v >= 0 ? UInt64(v) : 0
+        case let v as NSNumber: return v.uint64Value
+        default: return 0
+        }
+    }
+
+    /// Splice accessibility trait bits back onto each node of the converted
+    /// snapshot dict. dictionaryRepresentation on Xcode 26 omits traits, but
+    /// the underlying XCElementSnapshot exposes them via KVC. Walking the
+    /// snapshot tree in parallel with the dict lets us annotate every node.
+    static func annotateTraits(dict: inout [String: Any], snapshot: XCUIElementSnapshot) {
+        let traits: UInt64 = {
+            let raw = (snapshot as? NSObject)?.value(forKey: "traits")
+            if let v = raw as? UInt64 { return v }
+            if let v = raw as? NSNumber { return v.uint64Value }
+            return 0
+        }()
+        if traits != 0 {
+            dict["traits"] = traits
+        }
+        // Recurse through children in lockstep. Both sequences should have
+        // the same length (dict was built from the same snapshot moments
+        // earlier). If they ever drift, log loudly and process the prefix
+        // we can match — silently dropping trait info would make role
+        // detection look like a flake instead of a misalignment bug.
+        if var children = dict["children"] as? [[String: Any]] {
+            let snapChildren = snapshot.children
+            if children.count != snapChildren.count {
+                NSLog(
+                    "[PilotSnapshot] annotateTraits child mismatch: dict=\(children.count) snapshot=\(snapChildren.count). " +
+                    "Trait data for overflowing nodes will be dropped."
+                )
+            }
+            let count = min(children.count, snapChildren.count)
+            for i in 0..<count {
+                var childDict = children[i]
+                annotateTraits(dict: &childDict, snapshot: snapChildren[i])
+                children[i] = childDict
+            }
+            dict["children"] = children
+        }
+    }
+
+    static func collectDescendantText(_ node: [String: Any]) -> String {
+        var parts: [String] = []
+        if let children = node["children"] as? [[String: Any]] {
+            for child in children {
+                if let v = child["value"] as? String, !v.isEmpty { parts.append(v) }
+                else if let t = child["title"] as? String, !t.isEmpty { parts.append(t) }
+                else if let l = child["label"] as? String, !l.isEmpty { parts.append(l) }
+                let nested = collectDescendantText(child)
+                if !nested.isEmpty { parts.append(nested) }
+            }
+        }
+        return parts.joined(separator: " ")
+    }
+
     // MARK: - Key conversion
 
     /// Convert XCUIElement.AttributeName-keyed dicts to String-keyed dicts recursively.
@@ -292,16 +380,43 @@ class SnapshotElementFinder {
         selector: ElementSelector,
         results: inout [([String: Any], CGRect)]
     ) {
-        // Check this node
-        if matchesSelector(nodeDict, selector: selector) {
-            let frame = parseFrame(nodeDict)
-            results.append((nodeDict, frame))
+        // Recurse first so we know whether any descendant already matched —
+        // we only want this lookahead to decide whether to suppress a
+        // generic .other wrapper that shares an identifier/label with the
+        // native control nested inside.
+        let mark = results.count
+        if let children = nodeDict["children"] as? [[String: Any]] {
+            for child in children {
+                findMatches(in: child, selector: selector, results: &results)
+            }
         }
 
-        // Recurse into children
-        guard let children = nodeDict["children"] as? [[String: Any]] else { return }
-        for child in children {
-            findMatches(in: child, selector: selector, results: &results)
+        if matchesSelector(nodeDict, selector: selector) {
+            // React Native wraps native controls in generic UIViews
+            // (.other) that inherit the same accessibilityIdentifier /
+            // accessibilityLabel as the inner control. When both match,
+            // prefer the inner control — only it is hittable for typeText
+            // and reports an updated `value` after typing. Skip *only* when
+            // a descendant we just collected shares this node's identifier
+            // or label (so we don't drop a legitimate parent match just
+            // because some unrelated descendant happened to satisfy the
+            // selector).
+            let elTypeRaw = parseUInt(nodeDict["elementType"]) ?? 0
+            let elType = XCUIElement.ElementType(rawValue: elTypeRaw) ?? .other
+            if elType == .other && results.count > mark {
+                let myIdentifier = nodeDict["identifier"] as? String ?? ""
+                let myLabel = nodeDict["label"] as? String ?? ""
+                let descendantOverlaps = results[mark...].contains { (descDict, _) in
+                    let descId = descDict["identifier"] as? String ?? ""
+                    let descLabel = descDict["label"] as? String ?? ""
+                    if !myIdentifier.isEmpty && descId == myIdentifier { return true }
+                    if !myLabel.isEmpty && descLabel == myLabel { return true }
+                    return false
+                }
+                if descendantOverlaps { return }
+            }
+            let frame = parseFrame(nodeDict)
+            results.append((nodeDict, frame))
         }
     }
 

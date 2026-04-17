@@ -313,20 +313,33 @@ class CommandHandler {
 
         case "clearText":
             let element = try resolveElement(params)
-            // Tap to focus, triple-tap to select all, then delete
+            // iOS text fields don't have a reliable "select all" gesture
+            // (triple-tap selects a word; Cmd+A often misses on RN-wrapped
+            // controls). The most reliable approach is to focus the field
+            // and send one backspace per grapheme cluster of the current
+            // value. We use the snapshot value (already in `element.text`
+            // for textfields — see SnapshotElementFinder) to avoid an
+            // `xcElem.value` query, which triggers a quiescence wait on
+            // Xcode 26 and can time out.
             if let center = snapshotCenter(for: element.elementId) {
-                // Triple-tap to select all text in the field
                 actionExecutor.tapCoordinates(x: Int(center.x), y: Int(center.y))
+                Thread.sleep(forTimeInterval: 0.1)
+            } else if let xcElem = try? getXCUIElement(element.elementId), xcElem.isHittable {
+                xcElem.tap()
                 Thread.sleep(forTimeInterval: 0.05)
-                actionExecutor.tapCoordinates(x: Int(center.x), y: Int(center.y))
-                Thread.sleep(forTimeInterval: 0.03)
-                actionExecutor.tapCoordinates(x: Int(center.x), y: Int(center.y))
-                Thread.sleep(forTimeInterval: 0.05)
-                // Delete selected text
-                actionExecutor.typeTextWithoutFocus("\u{8}") // backspace
-            } else {
-                let xcElem = try getXCUIElement(element.elementId)
-                try actionExecutor.clearText(xcElem)
+            }
+            // Re-resolve after focus so the value reflects the current state
+            // (the tap may have scrolled the field into view or settled an
+            // animation that left the first snapshot stale). Fall back to the
+            // pre-tap snapshot if re-resolution fails.
+            let refreshed = (try? resolveElement(params)) ?? element
+            let currentValue = refreshed.text ?? element.text ?? ""
+            if !currentValue.isEmpty {
+                // String.count counts grapheme clusters, which matches what a
+                // single backspace deletes on the iOS keyboard for both ASCII
+                // and composed emoji.
+                let backspaces = String(repeating: "\u{8}", count: currentValue.count)
+                actionExecutor.typeTextWithoutFocus(backspaces)
             }
             return ["success": true]
 
