@@ -37,10 +37,15 @@ export function DetailTabs({ event, events, hierarchies, sources, metadata, netw
   }, [testError, event]);
 
   const consoleEvents = events.filter((e): e is ConsoleTraceEvent => e.type === 'console');
-  const failedCount = events.filter(e =>
+  const failedEventsForCount = events.filter((e): e is ActionTraceEvent | AssertionTraceEvent =>
     (e.type === 'action' && !(e as ActionTraceEvent).success) ||
     (e.type === 'assertion' && !(e as AssertionTraceEvent).passed),
-  ).length + (testError ? 1 : 0);
+  );
+  // The test-level error is usually just the failing assertion's message, so
+  // don't double-count it when ErrorsTab would dedupe it visually.
+  const testErrorIsDuplicate = !!testError
+    && failedEventsForCount.some((ev) => ev.error && testError.includes(ev.error));
+  const failedCount = failedEventsForCount.length + (testError && !testErrorIsDuplicate ? 1 : 0);
 
   return (
     <div class="detail-panel">
@@ -483,7 +488,7 @@ function ErrorEntry({ ev, isSelected }: { ev: ActionTraceEvent | AssertionTraceE
         )}
       </div>
 
-      {ev.error && !isAssertion && (
+      {ev.error && (
         <div class="error-message">{ev.error}</div>
       )}
 

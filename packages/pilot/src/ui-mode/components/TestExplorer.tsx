@@ -44,6 +44,7 @@ function findNode(roots: TestTreeNode[], id: string): TestTreeNode | undefined {
   }
 }
 
+
 interface TestExplorerProps {
   files: TestTreeNode[]
   expandedNodes: Set<string>
@@ -282,11 +283,19 @@ function TreeNode({ node, depth, parentProjectName, expandedNodes, selectedTestI
 
   const handleWatch = useCallback((e: Event) => {
     e.stopPropagation();
+    if (node.type === 'project') {
+      // Project-level watch: server iterates every file in the project and
+      // toggles whole-file watch scoped to that project.
+      onSend({ type: 'toggle-watch', filePath: 'project', projectName: node.name });
+      return;
+    }
     // File nodes watch the whole file; test/suite nodes pass their fullName
     // as the filter so only that test (or describe subtree) re-runs.
+    // parentProjectName scopes the watch to one project in multi-device
+    // configs so sibling projects don't inherit it.
     const testFilter = node.type === 'file' ? undefined : node.fullName;
-    onSend({ type: 'toggle-watch', filePath: node.filePath, testFilter });
-  }, [node, onSend]);
+    onSend({ type: 'toggle-watch', filePath: node.filePath, testFilter, projectName: parentProjectName });
+  }, [node, parentProjectName, onSend]);
 
   const handleClick = useCallback(() => {
     if (hasChildren) {
@@ -329,19 +338,19 @@ function TreeNode({ node, depth, parentProjectName, expandedNodes, selectedTestI
           <button class="te-action-btn te-run-btn" onClick={handleRun} disabled={isRunning} title="Run">
             <Play size={ICON_SIZE} />
           </button>
-          {(node.type === 'file' || node.type === 'suite' || node.type === 'test') && (
-            <button
-              class={`te-action-btn te-watch-btn ${node.watchEnabled ? 'active' : ''}`}
-              onClick={handleWatch}
-              title={node.type === 'file'
+          <button
+            class={`te-action-btn te-watch-btn ${node.watchEnabled ? 'active' : ''}`}
+            onClick={handleWatch}
+            title={node.type === 'project'
+              ? 'Watch all files in this project'
+              : node.type === 'file'
                 ? 'Watch file for changes'
                 : node.type === 'suite'
                   ? 'Watch this describe block'
                   : 'Watch this test'}
-            >
-              <Eye size={ICON_SIZE} />
-            </button>
-          )}
+          >
+            <Eye size={ICON_SIZE} />
+          </button>
         </div>
       </div>
       {hasChildren && isExpanded && node.children!.map((child) => (

@@ -490,9 +490,9 @@ function App() {
       }
       case 'watch-event':
         if (msg.event === 'watch-enabled') {
-          treeRef.current.updateWatchEnabled(msg.filePath, true, msg.testFilter);
+          treeRef.current.updateWatchEnabled(msg.filePath, true, msg.testFilter, msg.projectName);
         } else if (msg.event === 'watch-disabled') {
-          treeRef.current.updateWatchEnabled(msg.filePath, false, msg.testFilter);
+          treeRef.current.updateWatchEnabled(msg.filePath, false, msg.testFilter, msg.projectName);
         }
         break;
       case 'device-info':

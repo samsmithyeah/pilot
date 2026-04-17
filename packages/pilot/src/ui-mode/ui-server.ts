@@ -170,12 +170,22 @@ export async function startUIServer(
   let screenSeq = 0;
   let screenPollActive = false;
   let watcher: FSWatcher | null = null;
-  /** filePath → set of watched keys. Each key is a test fullName, a describe
-   * prefix, or '*' meaning "watch the whole file". A file is in the map iff
-   * at least one key is watched; the chokidar watcher adds/removes it in
-   * lockstep. */
-  const watchedEntries = new Map<string, Set<string>>();
-  const WHOLE_FILE = '*';
+  /** A single watched entry: optional project scope + optional test filter.
+   * testFilter = undefined means "whole file"; projectName = undefined means
+   * "whichever project this file resolves to" (non-multi-project configs). */
+  interface WatchedEntry { projectName?: string; testFilter?: string }
+  /** filePath → list of watched entries. chokidar adds the file when the
+   * first entry appears and removes it when the last entry is cleared. */
+  const watchedEntries = new Map<string, WatchedEntry[]>();
+  function entryKey(e: WatchedEntry): string {
+    return `${e.projectName ?? ''}::${e.testFilter ?? '*'}`;
+  }
+  function findEntry(filePath: string, projectName: string | undefined, testFilter: string | undefined): number {
+    const list = watchedEntries.get(filePath);
+    if (!list) return -1;
+    const key = entryKey({ projectName, testFilter });
+    return list.findIndex((e) => entryKey(e) === key);
+  }
 
   // ─── Multi-worker state ───
   const multiWorker = (ctx.workers ?? 1) > 1 && (ctx.deviceSerials?.length ?? 0) > 1;
@@ -1982,16 +1992,15 @@ export async function startUIServer(
 
   // ─── Watch Mode ───
 
-  function startWatching(filePath: string, testFilter: string | undefined): void {
-    const key = testFilter ?? WHOLE_FILE;
-    let set = watchedEntries.get(filePath);
-    const isNewFile = !set;
-    if (!set) {
-      set = new Set();
-      watchedEntries.set(filePath, set);
+  function startWatching(filePath: string, projectName: string | undefined, testFilter: string | undefined, emitEvent = true): void {
+    let list = watchedEntries.get(filePath);
+    const isNewFile = !list;
+    if (!list) {
+      list = [];
+      watchedEntries.set(filePath, list);
     }
-    if (set.has(key)) return;
-    set.add(key);
+    if (findEntry(filePath, projectName, testFilter) >= 0) return;
+    list.push({ projectName, testFilter });
 
     if (!watcher) {
       watcher = chokidarWatch([], { ignoreInitial: true });
@@ -2004,19 +2013,23 @@ export async function startUIServer(
     }
 
     if (isNewFile) watcher.add(filePath);
-    broadcast({ type: 'watch-event', filePath, testFilter, event: 'watch-enabled' });
+    if (emitEvent) {
+      broadcast({ type: 'watch-event', filePath, testFilter, projectName, event: 'watch-enabled' });
+    }
   }
 
-  function stopWatching(filePath: string, testFilter: string | undefined): void {
-    const key = testFilter ?? WHOLE_FILE;
-    const set = watchedEntries.get(filePath);
-    if (!set || !set.has(key)) return;
-    set.delete(key);
-    if (set.size === 0) {
+  function stopWatching(filePath: string, projectName: string | undefined, testFilter: string | undefined, emitEvent = true): void {
+    const list = watchedEntries.get(filePath);
+    const idx = findEntry(filePath, projectName, testFilter);
+    if (!list || idx < 0) return;
+    list.splice(idx, 1);
+    if (list.length === 0) {
       watchedEntries.delete(filePath);
       watcher?.unwatch(filePath);
     }
-    broadcast({ type: 'watch-event', filePath, testFilter, event: 'watch-disabled' });
+    if (emitEvent) {
+      broadcast({ type: 'watch-event', filePath, testFilter, projectName, event: 'watch-disabled' });
+    }
   }
 
   const watchQueue = new RunQueue(300, async (request) => {
@@ -2028,14 +2041,28 @@ export async function startUIServer(
       const file = request.files[0];
       if (!file) return;
       const entries = watchedEntries.get(file);
-      // Whole-file watch (or missing entries — fall back to whole file)
-      // supersedes filter-level watches, since running the file covers them.
-      if (!entries || entries.has(WHOLE_FILE)) {
+      if (!entries || entries.length === 0) {
         await runFile(file);
         return;
       }
-      for (const filter of entries) {
-        await runFile(file, filter);
+      // Group entries by project: within a project, a whole-file watch
+      // supersedes per-test watches (running the file covers them).
+      const byProject = new Map<string, WatchedEntry[]>();
+      for (const e of entries) {
+        const key = e.projectName ?? '';
+        let arr = byProject.get(key);
+        if (!arr) { arr = []; byProject.set(key, arr); }
+        arr.push(e);
+      }
+      for (const [, group] of byProject) {
+        const wholeFile = group.find((e) => e.testFilter === undefined);
+        if (wholeFile) {
+          await runFile(file, undefined, wholeFile.projectName);
+        } else {
+          for (const e of group) {
+            await runFile(file, e.testFilter, e.projectName);
+          }
+        }
       }
     } catch (err) {
       broadcastError(err);
@@ -2120,18 +2147,38 @@ export async function startUIServer(
         break;
       case 'toggle-watch':
         if (msg.filePath === 'all') {
-          // The 'all' toggle watches every file at whole-file scope.
-          const allWhole = ctx.testFiles.every((f) => watchedEntries.get(f)?.has(WHOLE_FILE));
+          // The 'all' toggle watches every file at whole-file scope,
+          // unscoped by project (applies across all projects that include
+          // the file).
+          const allWhole = ctx.testFiles.every((f) => findEntry(f, undefined, undefined) >= 0);
           for (const f of ctx.testFiles) {
-            if (allWhole) stopWatching(f, undefined);
-            else startWatching(f, undefined);
+            if (allWhole) stopWatching(f, undefined, undefined);
+            else startWatching(f, undefined, undefined);
           }
+        } else if (msg.filePath === 'project' && msg.projectName) {
+          // Watch every file within a specific project at whole-file scope.
+          // Per-file events are suppressed so only the project-level icon
+          // lights up in the UI — the child file icons stay dark. A single
+          // project-scoped event is broadcast to flip the project node.
+          const project = ctx.projects?.find((p) => p.name === msg.projectName);
+          if (!project) break;
+          const allWatched = project.testFiles.every((f) => findEntry(f, msg.projectName, undefined) >= 0);
+          for (const f of project.testFiles) {
+            if (allWatched) stopWatching(f, msg.projectName, undefined, false);
+            else startWatching(f, msg.projectName, undefined, false);
+          }
+          broadcast({
+            type: 'watch-event',
+            filePath: 'project',
+            projectName: msg.projectName,
+            event: allWatched ? 'watch-disabled' : 'watch-enabled',
+          });
         } else {
-          const key = msg.testFilter ?? WHOLE_FILE;
-          if (watchedEntries.get(msg.filePath)?.has(key)) {
-            stopWatching(msg.filePath, msg.testFilter);
+          const exists = findEntry(msg.filePath, msg.projectName, msg.testFilter) >= 0;
+          if (exists) {
+            stopWatching(msg.filePath, msg.projectName, msg.testFilter);
           } else {
-            startWatching(msg.filePath, msg.testFilter);
+            startWatching(msg.filePath, msg.projectName, msg.testFilter);
           }
         }
         break;
