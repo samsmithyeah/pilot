@@ -898,15 +898,18 @@ async function runSuiteContext(
         try {
           const res = await opts.device._stopNetworkCapture();
           if (res.success) {
-            // Apply user-supplied host allowlist, if any. On physical iOS
-            // the Wi-Fi proxy is system-wide and captures every app's
-            // traffic — this is how users scrub system services (captive
-            // portal, analytics, iCloud) out of their trace archives.
-            // On simulators the macOS Network Extension redirector
-            // already filters per-PID, so the allowlist is usually
-            // redundant for sim runs but still honoured when set.
+            // Apply user-supplied host filters, if any. On physical iOS
+            // and Android emulators the proxy is system-wide and captures
+            // every app's traffic — this is how users scrub system
+            // services (captive portal, analytics, Google/iCloud sync)
+            // out of their trace archives. iOS simulators filter per-PID
+            // via the macOS Network Extension redirector, so filters are
+            // usually redundant for sim runs but still honoured.
             const { filterEntriesByHosts } = await import('./trace/filter-hosts.js');
-            rawNetworkEntries = filterEntriesByHosts(res.entries, traceConfig.networkHosts);
+            rawNetworkEntries = filterEntriesByHosts(res.entries, {
+              allow: traceConfig.networkHosts,
+              deny: traceConfig.networkIgnoreHosts,
+            });
             if (
               traceConfig.networkHosts &&
               traceConfig.networkHosts.length > 0 &&
