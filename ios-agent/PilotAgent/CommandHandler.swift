@@ -332,11 +332,13 @@ class CommandHandler {
             }
             // iOS text fields don't have a reliable "select all" gesture
             // (triple-tap selects a word; Cmd+A often misses on RN-wrapped
-            // controls). Focus the field, then send backspaces in batches
-            // until a fresh snapshot reports the value is empty. We loop
-            // because autocorrect / suggestion bar / RN bridge updates can
-            // grow or shrink the value between batches, so a single batch
-            // sized off the initial snapshot is brittle.
+            // controls). Focus the field, try Cmd+A+Delete as a fast path,
+            // then fall through to per-character backspaces if the field
+            // isn't yet empty (common on RN wrappers that intercept Cmd+A).
+            // We loop the backspace path because autocorrect / suggestion
+            // bar / RN bridge updates can grow or shrink the value between
+            // batches, so a single batch sized off the initial snapshot is
+            // brittle.
             if let center = snapshotCenter(for: element.elementId) {
                 actionExecutor.tapCoordinates(x: Int(center.x), y: Int(center.y))
                 Thread.sleep(forTimeInterval: 0.1)
@@ -353,6 +355,22 @@ class CommandHandler {
                         "snapshot bounds were off-screen and the XCUIElement is not hittable"
                 )
             }
+
+            // Fast path: Cmd+A + Delete. Works on native UITextField and on
+            // simulators with a hardware-keyboard mapping; skipped silently
+            // on RN-wrapped controls (which typically don't honor Cmd+A),
+            // where we fall through to the per-character loop.
+            if EventSynthesizer.keyPress(key: "a", modifiers: .command) {
+                Thread.sleep(forTimeInterval: 0.05)
+                _ = EventSynthesizer.keyPress(key: XCUIKeyboardKey.delete.rawValue)
+                Thread.sleep(forTimeInterval: 0.05)
+                let afterSelectAll = (try? resolveElement(params)) ?? element
+                if (afterSelectAll.text ?? "").isEmpty {
+                    return ["success": true]
+                }
+                // Cmd+A didn't clear the field. Continue to the backspace loop.
+            }
+
             // Cap iterations so a misbehaving field can't hang the agent. The
             // per-iteration cap of 256 keystrokes covers any realistic field
             // length; multiple iterations let us mop up post-autocorrect

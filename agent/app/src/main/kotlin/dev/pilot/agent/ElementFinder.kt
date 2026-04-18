@@ -426,14 +426,19 @@ class ElementFinder(private val device: UiDevice) {
             }
 
         // Post-filter by hint — UIAutomator can't query hint directly so we
-        // filter the candidate set ourselves. extractHint() reads via
-        // reflection (AccessibilityNodeInfo.getHintText) and returns null on
-        // some node sources, so also accept the `text` attribute matching the
-        // hint (UIAutomator surfaces an empty EditText's placeholder as
-        // `text`). Both signals are safe because we already restricted the
-        // candidate set to EditText classes in buildBySelector().
+        // filter the candidate set ourselves. `buildBySelector` narrows the
+        // initial candidates to EditText variants only when `hint` is the
+        // *only* selector; when combined with another selector (e.g.
+        // `locator({ className: "TextView", hint: "Email" })`) the initial
+        // set can include arbitrary classes, so we require the EditText
+        // class here too before accepting the `obj.text == hint` fallback.
+        // Without that guard a TextView with the literal visible label
+        // "Email" would match a getByPlaceholder("Email") query.
         if (selector.hint != null) {
             return byName.filter { obj ->
+                val className = obj.className ?: ""
+                val isEditText = EDIT_TEXT_HINT_CLASS_PATTERN.matcher(className).matches()
+                if (!isEditText) return@filter false
                 extractHint(obj) == selector.hint || obj.text == selector.hint
             }
         }
