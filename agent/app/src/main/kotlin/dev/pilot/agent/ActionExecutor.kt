@@ -126,6 +126,18 @@ class ActionExecutor(private val device: UiDevice) {
     fun typeTextWithoutFocus(text: String) {
         if (text.isEmpty()) return
         val buffer = StringBuilder()
+        // Batch consecutive control chars into a single
+        // `input keyevent KEYCODE_X KEYCODE_X ...` call. Each shell
+        // invocation spawns a process, so a long backspace string
+        // (clearText sends one per character of current value) was
+        // previously O(N) process spawns.
+        val pendingKeys = mutableListOf<String>()
+
+        fun flushPendingKeys() {
+            if (pendingKeys.isEmpty()) return
+            device.executeShellCommand("input keyevent ${pendingKeys.joinToString(" ")}")
+            pendingKeys.clear()
+        }
         for (ch in text) {
             val keyCode =
                 when (ch) {
@@ -143,7 +155,7 @@ class ActionExecutor(private val device: UiDevice) {
                 if (buffer.isNotEmpty()) {
                     flushPrintableRun(buffer)
                 }
-                device.executeShellCommand("input keyevent $keyCode")
+                pendingKeys.add(keyCode)
             } else if (ch.code < 0x20) {
                 // Drop other ASCII control codes (NUL, BEL, vertical tab, etc.).
                 // `input text` would garble them; routing each to a key event
@@ -151,9 +163,11 @@ class ActionExecutor(private val device: UiDevice) {
                 // are handled above.
                 continue
             } else {
+                if (pendingKeys.isNotEmpty()) flushPendingKeys()
                 buffer.append(ch)
             }
         }
+        flushPendingKeys()
         if (buffer.isNotEmpty()) {
             flushPrintableRun(buffer)
         }

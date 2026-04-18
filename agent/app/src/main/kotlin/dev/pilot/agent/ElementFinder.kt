@@ -143,6 +143,14 @@ class ElementFinder(private val device: UiDevice) {
         const val COMPAT_HEADING_EXTRA_KEY: String =
             "androidx.view.accessibility.AccessibilityNodeInfoCompat.HEADING_KEY"
 
+        // Cap on collectDescendantText recursion. Each level of recursion
+        // makes an IPC call (UiObject2.children) — unbounded recursion on a
+        // deeply nested matched container becomes O(N) IPC per find. 6 is
+        // enough for typical RN compositions (<View><Text/></View> is depth
+        // 1; alerts / toasts / list items rarely exceed 4) while bounding
+        // worst-case cost for unexpectedly deep matches.
+        const val MAX_DESCENDANT_TEXT_DEPTH: Int = 6
+
         // Cross-platform aliases so users can pass either the Pilot/Playwright
         // role name ("heading") or the React Native one ("header").
         val ROLE_ALIASES: Map<String, String> =
@@ -671,15 +679,24 @@ class ElementFinder(private val device: UiDevice) {
     }
 
     private fun nodeInfoFor(obj: UiObject2): android.view.accessibility.AccessibilityNodeInfo? {
-        val method = nodeInfoMethodFor(obj.javaClass)
+        val method = nodeInfoMethod()
         return method.invoke(obj) as? android.view.accessibility.AccessibilityNodeInfo
     }
 
-    private fun nodeInfoMethodFor(cls: Class<*>): java.lang.reflect.Method {
-        nodeInfoMethodCache[cls]?.let { return it }
-        val method = cls.getDeclaredMethod("getAccessibilityNodeInfo")
+    /**
+     * Look up the private `getAccessibilityNodeInfo` method on `UiObject2`
+     * itself rather than on `obj.javaClass`. R8 / proxy / instrumented
+     * subclasses might not redeclare the method, in which case
+     * `getDeclaredMethod` on the subclass throws NoSuchMethodException
+     * and silently degrades every textfield-related assertion.
+     * `Method.invoke` works on subclass instances regardless.
+     */
+    private fun nodeInfoMethod(): java.lang.reflect.Method {
+        val target = UiObject2::class.java
+        nodeInfoMethodCache[target]?.let { return it }
+        val method = target.getDeclaredMethod("getAccessibilityNodeInfo")
         method.isAccessible = true
-        nodeInfoMethodCache[cls] = method
+        nodeInfoMethodCache[target] = method
         return method
     }
 
@@ -709,8 +726,20 @@ class ElementFinder(private val device: UiDevice) {
      * Per child we take `text` *or* `contentDescription` (preferring text)
      * to avoid duplicating the same string when both attributes carry it,
      * matching the iOS aggregation in SnapshotElementFinder.
+     *
+     * Recursion is capped at MAX_DESCENDANT_TEXT_DEPTH because each
+     * `obj.children` access is an IPC to the accessibility service —
+     * unbounded recursion on a deeply nested screen turns into O(N) IPC
+     * calls per matched container. The cap covers the common
+     * `<View><Text/></View>` toast / alert pattern (depth 1) and typical
+     * RN compositions, while bounding worst-case cost for accidental
+     * deep matches.
      */
-    private fun collectDescendantText(obj: UiObject2): String {
+    private fun collectDescendantText(
+        obj: UiObject2,
+        depth: Int = 0,
+    ): String {
+        if (depth >= MAX_DESCENDANT_TEXT_DEPTH) return ""
         val parts = mutableListOf<String>()
         for (child in obj.children.orEmpty()) {
             val ownText =
@@ -723,7 +752,7 @@ class ElementFinder(private val device: UiDevice) {
                 // ("Hello Hello").
                 parts.add(ownText)
             } else {
-                val nested = collectDescendantText(child)
+                val nested = collectDescendantText(child, depth + 1)
                 if (nested.isNotEmpty()) parts.add(nested)
             }
         }

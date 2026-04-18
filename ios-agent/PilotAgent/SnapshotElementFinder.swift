@@ -373,7 +373,18 @@ class SnapshotElementFinder {
     /// so the cost is intrinsic until iOS exposes traits in
     /// dictionaryRepresentation directly.
     static func annotateTraits(dict: inout [String: Any], snapshot: XCUIElementSnapshot) {
-        let raw = (snapshot as? NSObject)?.value(forKey: "traits")
+        // Bare `value(forKey:)` on an NSObject that doesn't have the key
+        // throws an Objective-C NSUnknownKeyException, which is *not*
+        // catchable from Swift and crashes the agent. Check
+        // `responds(to:)` first; if the property went away on a future
+        // Xcode, fall through cleanly and log once instead of crashing.
+        let raw: Any?
+        if let nsSnap = snapshot as? NSObject,
+           nsSnap.responds(to: NSSelectorFromString("traits")) {
+            raw = nsSnap.value(forKey: "traits")
+        } else {
+            raw = nil
+        }
         let traits: UInt64 = {
             if let v = raw as? UInt64 { return v }
             if let v = raw as? NSNumber { return v.uint64Value }
@@ -382,11 +393,12 @@ class SnapshotElementFinder {
         if traits != 0 {
             dict["traits"] = traits
         } else if raw == nil {
-            // KVC returned nil for `traits` — Xcode may have renamed or
-            // restricted the private property. All trait-derived role
-            // detection silently degrades to 0, so log the first occurrence
-            // loudly. We only flag at the root (where the tree is non-empty)
-            // to avoid spamming for genuinely traitless leaf nodes.
+            // KVC returned nil (or the property was missing entirely) —
+            // Xcode may have renamed or restricted the private property.
+            // All trait-derived role detection silently degrades to 0, so
+            // log the first occurrence loudly. We only flag at the root
+            // (where the tree is non-empty) to avoid spamming for
+            // genuinely traitless leaf nodes.
             if !snapshot.children.isEmpty {
                 logKvcMissOnce()
             }
@@ -435,11 +447,21 @@ class SnapshotElementFinder {
         dict["children"] = children
     }
 
+    /// Maximum recursion depth for `collectDescendantText`. Mirrors
+    /// Android's `MAX_DESCENDANT_TEXT_DEPTH` so both platforms bound
+    /// worst-case aggregation cost identically.
+    static let maxDescendantTextDepth = 6
+
     /// Walk a snapshot subtree and concatenate descendant labels/values so a
     /// wrapping container (e.g. RN `<View accessibilityRole="alert">`)
     /// reports its visible text content. Mirrors Android's
     /// `collectDescendantText`.
-    static func collectDescendantText(_ node: [String: Any]) -> String {
+    ///
+    /// Bounded by `maxDescendantTextDepth` so a misconfigured deeply
+    /// nested match doesn't drag the snapshot walk into pathological
+    /// behavior.
+    static func collectDescendantText(_ node: [String: Any], depth: Int = 0) -> String {
+        if depth >= maxDescendantTextDepth { return "" }
         var parts: [String] = []
         if let children = node["children"] as? [[String: Any]] {
             for child in children {
@@ -460,7 +482,7 @@ class SnapshotElementFinder {
                     // duplicate ("Hello Hello").
                     parts.append(own)
                 } else {
-                    let nested = collectDescendantText(child)
+                    let nested = collectDescendantText(child, depth: depth + 1)
                     if !nested.isEmpty { parts.append(nested) }
                 }
             }
@@ -845,11 +867,10 @@ class SnapshotElementFinder {
         let elType = element.elementType
         let label = element.label
         let identifier = element.identifier
-        // XCUIElement doesn't expose placeholderValue directly; pull it via
-        // KVC so re-fetched elements report `hint` consistently with the
-        // snapshot path (review #7).
-        let placeholderValue =
-            ((element as NSObject).value(forKey: "placeholderValue") as? String) ?? ""
+        // `XCUIElement` conforms to `XCUIElementAttributes` so
+        // `placeholderValue` is a normal Swift property — no KVC needed.
+        let placeholderValue = element.placeholderValue ?? ""
+        let value = element.value as? String
 
         let bounds = ElementBounds(
             left: Int(frame.origin.x), top: Int(frame.origin.y),
@@ -861,16 +882,36 @@ class SnapshotElementFinder {
         let isSelected = element.isSelected
         let isChecked = checkedState(
             for: elType,
-            value: element.value as? String,
+            value: value,
             label: label,
             selected: isSelected
         )
 
         let viewportRatio = computeViewportRatio(bounds, screenSize: screenSize)
 
+        // Mirror the snapshot path's text-derivation rules so a re-fetched
+        // element reports the same `text` as a freshly-resolved one. For
+        // text fields we only surface the typed value (and treat the
+        // placeholder as empty); other element types prefer value/title/label.
+        // Container aggregation isn't possible here (we don't have a tree
+        // walk on a single XCUIElement) so we fall back to label only.
+        let displayText: String?
+        if isTextFieldType(elType) {
+            let v = value ?? ""
+            if v.isEmpty || v == placeholderValue {
+                displayText = nil
+            } else {
+                displayText = v
+            }
+        } else if let v = value, !v.isEmpty {
+            displayText = v
+        } else {
+            displayText = label.isEmpty ? nil : label
+        }
+
         return ElementInfo(
             elementId: elementId, className: className,
-            text: label.isEmpty ? nil : label,
+            text: displayText,
             contentDescription: label.isEmpty ? nil : label,
             resourceId: identifier.isEmpty ? nil : identifier,
             hint: placeholderValue.isEmpty ? nil : placeholderValue, bounds: bounds,
