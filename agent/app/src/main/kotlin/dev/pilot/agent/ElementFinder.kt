@@ -104,6 +104,90 @@ class ElementFinder(private val device: UiDevice) {
     private val elementCache = ConcurrentHashMap<String, UiObject2>()
 
     /**
+     * Lazily-resolved reflective handle for `UiObject2.getAccessibilityNodeInfo`.
+     * The method lives on the base class regardless of the runtime subclass
+     * `obj.javaClass` reports, so a single lookup is enough.
+     *
+     * Wrapped in `runCatching` so a future UIAutomator that renames or
+     * removes the method doesn't crash every textfield-related assertion
+     * via an `ExceptionInInitializerError` on first access. Callers route
+     * the null through `extractHint` / `extractRoleDescription` /
+     * `isShowingHintText`, all of which already handle null cleanly.
+     */
+    private val nodeInfoMethod: java.lang.reflect.Method? by lazy {
+        runCatching {
+            UiObject2::class.java
+                .getDeclaredMethod("getAccessibilityNodeInfo")
+                .apply { isAccessible = true }
+        }.onFailure { e ->
+            warnOnce("nodeInfoMethod-init", e)
+        }.getOrNull()
+    }
+
+    /** Names of reflection sites we've already warned about. */
+    private val warnedSites: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    companion object {
+        // Class names that can carry a hint (placeholder) attribute.
+        // Used as a candidate filter when only `hint` is supplied; the actual
+        // hint match is applied as a post-filter via extractHint().
+        // Shared with WaitEngine.buildWaitSelector() so the wait phase
+        // matches the same EditText variants the find phase resolves.
+        val EDIT_TEXT_HINT_CLASS_PATTERN: java.util.regex.Pattern =
+            java.util.regex.Pattern.compile(
+                "(?:" +
+                    listOf(
+                        "android.widget.EditText",
+                        "android.widget.AutoCompleteTextView",
+                        "com.google.android.material.textfield.TextInputEditText",
+                        "androidx.appcompat.widget.AppCompatEditText",
+                    ).joinToString("|") { Regex.escape(it) } +
+                    ")",
+            )
+
+        // Bundle key used by AccessibilityNodeInfoCompat#setRoleDescription.
+        // Current AndroidX writes the literal
+        // `"AccessibilityNodeInfo.roleDescription"`. We also probe the
+        // older namespaced variant because some shipped AndroidX versions
+        // (pre-1.0) used it; not free to verify them all, so keep the
+        // fallback as defensive.
+        val ROLE_DESCRIPTION_EXTRA_KEY: String = "AccessibilityNodeInfo.roleDescription"
+        val ROLE_DESCRIPTION_LONG_FORM_KEY: String =
+            "androidx.view.accessibility.AccessibilityNodeInfoCompat.ROLE_DESCRIPTION_KEY"
+
+        // Bundle key + bitmask used by AccessibilityNodeInfoCompat to flag
+        // a heading on API levels < 28 (the framework itself gained
+        // setHeading() in API 28). The compat lib packs several boolean
+        // properties (heading, screen-reader-focusable, showing-hint, …)
+        // into a single int under this extras key. Bit 2 (`0x2`) is
+        // `BOOLEAN_PROPERTY_IS_HEADING`. Verified against
+        // androidx.core 1.15.0 source.
+        const val COMPAT_BOOLEAN_PROPERTY_KEY: String =
+            "androidx.view.accessibility.AccessibilityNodeInfoCompat.BOOLEAN_PROPERTY_KEY"
+        const val COMPAT_BOOLEAN_PROPERTY_IS_HEADING: Int = 0x2
+
+        // Cap on collectDescendantText recursion. Each level of recursion
+        // makes an IPC call (UiObject2.children) — unbounded recursion on a
+        // deeply nested matched container becomes O(N) IPC per find. 6 is
+        // enough for typical RN compositions (<View><Text/></View> is depth
+        // 1; alerts / toasts / list items rarely exceed 4) while bounding
+        // worst-case cost for unexpectedly deep matches.
+        const val MAX_DESCENDANT_TEXT_DEPTH: Int = 6
+
+        // Cross-platform aliases so users can pass either the Pilot/Playwright
+        // role name ("heading") or the React Native one ("header").
+        val ROLE_ALIASES: Map<String, String> =
+            mapOf(
+                "header" to "heading",
+                "slider" to "seekbar",
+                // RN's accessibilityRole="search" surfaces as a role
+                // description of "search"; normalize to the canonical
+                // "searchfield" so toHaveRole("searchfield") matches.
+                "search" to "searchfield",
+            )
+    }
+
+    /**
      * Role-to-class-name mappings. Each role maps to a list of Android class names
      * that could represent that role (including Material/AppCompat variants).
      */
@@ -204,6 +288,17 @@ class ElementFinder(private val device: UiDevice) {
                 listOf(
                     "android.widget.TabWidget",
                     "com.google.android.material.tabs.TabLayout",
+                ),
+            // Mirrors iOS RoleMapping ("searchfield" -> .searchField).
+            // Native SearchView only — RN renders accessibilityRole="search"
+            // as an EditText with a roleDescription; that path is handled
+            // through extractRoleDescription + the "search" → "searchfield"
+            // alias rather than the class map, so the reverse map
+            // (className → role) doesn't fight with "textfield".
+            "searchfield" to
+                listOf(
+                    "android.widget.SearchView",
+                    "androidx.appcompat.widget.SearchView",
                 ),
         )
 
@@ -337,15 +432,50 @@ class ElementFinder(private val device: UiDevice) {
                 ?: emptyList()
 
         // Post-filter by role name: match contentDescription, text, or descendant text
-        if (selector.role != null && selector.name != null) {
-            return results.filter { obj ->
-                obj.contentDescription == selector.name ||
-                    obj.text == selector.name ||
-                    (obj.findObjects(By.text(selector.name))?.isNotEmpty() == true)
+        val byName =
+            if (selector.role != null && selector.name != null) {
+                results.filter { obj ->
+                    obj.contentDescription == selector.name ||
+                        obj.text == selector.name ||
+                        (obj.findObjects(By.text(selector.name))?.isNotEmpty() == true)
+                }
+            } else {
+                results
+            }
+
+        // Post-filter by hint — UIAutomator can't query hint directly so we
+        // filter the candidate set ourselves. `buildBySelector` narrows the
+        // initial candidates to EditText variants only when `hint` is the
+        // *only* selector; when combined with another selector (e.g.
+        // `locator({ className: "TextView", hint: "Email" })`) the initial
+        // set can include arbitrary classes, so we require the EditText
+        // class here too before accepting the `obj.text == hint` fallback.
+        // Without that guard a TextView with the literal visible label
+        // "Email" would match a getByPlaceholder("Email") query.
+        if (selector.hint != null) {
+            return byName.filter { obj ->
+                val className = obj.className ?: ""
+                val isEditText = EDIT_TEXT_HINT_CLASS_PATTERN.matcher(className).matches()
+                if (!isEditText) return@filter false
+                extractHint(obj) == selector.hint || obj.text == selector.hint
             }
         }
 
-        return results
+        return byName
+    }
+
+    /**
+     * Compiled class-name pattern for a role, or null if the role is
+     * unknown. Public so WaitEngine can use the same matcher during the
+     * wait phase as ElementFinder uses for the find phase.
+     */
+    fun roleClassPattern(role: String): java.util.regex.Pattern? {
+        val lowered = role.lowercase()
+        val normalized = ROLE_ALIASES[lowered] ?: lowered
+        val classNames = roleClassMap[normalized] ?: return null
+        return java.util.regex.Pattern.compile(
+            classNames.joinToString("|") { Regex.escape(it) },
+        )
     }
 
     private fun buildBySelector(selector: ElementSelector): BySelector? {
@@ -353,8 +483,10 @@ class ElementFinder(private val device: UiDevice) {
 
         // Role-based selection
         if (selector.role != null) {
+            val lowered = selector.role.lowercase()
+            val normalizedRole = ROLE_ALIASES[lowered] ?: lowered
             val classNames =
-                roleClassMap[selector.role.lowercase()]
+                roleClassMap[normalizedRole]
                     ?: throw InvalidSelectorException("Unknown role: '${selector.role}'. Known roles: ${roleClassMap.keys.joinToString()}")
 
             // Use regex to match any of the class variants
@@ -395,18 +527,30 @@ class ElementFinder(private val device: UiDevice) {
             by = if (by != null) by.res(selector.id) else By.res(selector.id)
         }
 
-        // Test ID (convention: stored in content description with "testid:" prefix, or view tag)
+        // Test ID — React Native's `testID` prop is exposed as `resource-id`
+        // in the UIAutomator hierarchy (no package namespace). Treat it as a
+        // resource-id lookup.
         if (selector.testId != null) {
-            val desc = "testid:${selector.testId}"
-            by = if (by != null) by.desc(desc) else By.desc(desc)
+            by = if (by != null) by.res(selector.testId) else By.res(selector.testId)
         }
 
-        // Hint text — search by hint property via UiSelector as BySelector doesn't
-        // directly support hint. We do an XML hierarchy search instead.
-        if (selector.hint != null && by == null) {
-            return By.textContains("").also {
-                // Hint-based search will be handled via hierarchy filtering
-            }
+        // Hint text — UIAutomator has no By.hint(), so narrow to EditText
+        // candidates here and post-filter on the actual hint value in
+        // findUiObjects(). Always intersect with the EditText pattern,
+        // even when other selector fields are also set: the post-filter
+        // requires EditText anyway, so without this the candidate set
+        // would include non-EditText elements that get rejected and the
+        // call would return [] instead of the matching placeholder.
+        // Note: BySelector.clazz() replaces any prior `clazz` constraint,
+        // so combining `hint` with `className` is incoherent — `hint`
+        // wins. Documented in the post-filter and in the SDK API.
+        if (selector.hint != null) {
+            by =
+                if (by != null) {
+                    by.clazz(EDIT_TEXT_HINT_CLASS_PATTERN)
+                } else {
+                    By.clazz(EDIT_TEXT_HINT_CLASS_PATTERN)
+                }
         }
 
         return by
@@ -482,14 +626,156 @@ class ElementFinder(private val device: UiDevice) {
     private fun extractHint(obj: UiObject2): String? {
         if (android.os.Build.VERSION.SDK_INT < 26) return null
         return try {
-            val nodeInfoField = obj.javaClass.getDeclaredMethod("getAccessibilityNodeInfo")
-            nodeInfoField.isAccessible = true
-            val nodeInfo = nodeInfoField.invoke(obj) as? android.view.accessibility.AccessibilityNodeInfo
+            val nodeInfo = nodeInfoFor(obj)
             nodeInfo?.hintText?.toString()
         } catch (e: Exception) {
             android.util.Log.w("ElementFinder", "Failed to extract hint text for ${obj.className}", e)
             null
         }
+    }
+
+    /**
+     * Read the semantic role published by frameworks like React Native, which
+     * surfaces `accessibilityRole` via two channels:
+     *   - `AccessibilityNodeInfo.setHeading(true)` for "header"
+     *   - `AccessibilityNodeInfoCompat.setRoleDescription(...)` for other roles
+     *
+     * The role description is returned verbatim — including custom or
+     * localized values the SDK doesn't otherwise know about. This lets apps
+     * surface their own roles to tests without us maintaining an allowlist.
+     * The trade-off is that an app setting `accessibilityRole="Überschrift"`
+     * will surface `role: "Überschrift"` rather than the normalized
+     * `"heading"`. The Android `isHeading` check above returns the
+     * normalized "heading" first to avoid this for the common case.
+     *
+     * Returns null when no role is published.
+     */
+    private fun extractRoleDescription(obj: UiObject2): String? {
+        return try {
+            val nodeInfo = nodeInfoFor(obj) ?: return null
+
+            // 1. Heading flag (API 28+) — React Native writes here for
+            //    `accessibilityRole="header"`.
+            if (android.os.Build.VERSION.SDK_INT >= 28 && nodeInfo.isHeading) {
+                return "heading"
+            }
+
+            // 2. Compat-shimmed heading flag for older API levels: read the
+            // packed boolean-properties int and test the IS_HEADING bit.
+            val extras = nodeInfo.extras
+            if (extras != null) {
+                val packed = extras.getInt(COMPAT_BOOLEAN_PROPERTY_KEY, 0)
+                if ((packed and COMPAT_BOOLEAN_PROPERTY_IS_HEADING) != 0) {
+                    return "heading"
+                }
+            }
+
+            // 3. Role description set via AccessibilityNodeInfoCompat.
+            // Try both the canonical and the older long-form key — older
+            // AndroidX shims wrote under the namespaced variant.
+            val raw =
+                extras?.getCharSequence(ROLE_DESCRIPTION_EXTRA_KEY)?.toString()
+                    ?: extras?.getCharSequence(ROLE_DESCRIPTION_LONG_FORM_KEY)?.toString()
+            // Lowercase the value before returning so the SDK's
+            // case-insensitive normalizeRole + ROLE_ALIASES table can
+            // match. Without this, an app setting accessibilityRole="Header"
+            // (capitalized) would surface as the literal "Header" and
+            // toHaveRole("heading") would not match through the alias.
+            raw?.takeIf { it.isNotEmpty() }?.lowercase()
+        } catch (e: Exception) {
+            // Reflection on UiObject2 is the load-bearing path here; if it
+            // breaks (AndroidX rename, restricted API), every role-from-RN
+            // mapping silently regresses. Log so the failure is visible.
+            warnOnce("extractRoleDescription", e)
+            null
+        }
+    }
+
+    /**
+     * Whether the field is currently displaying its hint/placeholder rather
+     * than user-entered text. AccessibilityNodeInfo.isShowingHintText is
+     * available on API 26+. On older devices this returns false (we fall
+     * back to a less precise equality check in toElementInfo).
+     */
+    private fun isShowingHintText(obj: UiObject2): Boolean {
+        if (android.os.Build.VERSION.SDK_INT < 26) {
+            // Approximation: the placeholder is being displayed when the
+            // surfaced `text` matches `getHintText()`. Wrong if the user
+            // typed exactly the placeholder, but unavoidable on older APIs.
+            val hint = extractHint(obj)
+            return hint != null && obj.text == hint
+        }
+        return try {
+            nodeInfoFor(obj)?.isShowingHintText == true
+        } catch (e: Exception) {
+            warnOnce("isShowingHintText", e)
+            false
+        }
+    }
+
+    /**
+     * Log a reflection failure once per call-site so a future AndroidX /
+     * UiAutomator rename surfaces loudly the first time we see it instead
+     * of silently degrading every textfield-related assertion.
+     */
+    private fun warnOnce(
+        site: String,
+        e: Throwable,
+    ) {
+        if (warnedSites.add(site)) {
+            android.util.Log.w(
+                "ElementFinder",
+                "Reflection failed at '$site' — assertions depending on it will degrade: ${e.message}",
+                e,
+            )
+        }
+    }
+
+    private fun nodeInfoFor(obj: UiObject2): android.view.accessibility.AccessibilityNodeInfo? {
+        val method = nodeInfoMethod ?: return null
+        return method.invoke(obj) as? android.view.accessibility.AccessibilityNodeInfo
+    }
+
+    /**
+     * Recursively walk the element subtree and concatenate any text or
+     * content-description from descendants. Used so locator assertions like
+     * `toContainText` see the visible label of a wrapping View whose own
+     * `text` attribute is empty (common with React Native).
+     *
+     * Per child we take `text` *or* `contentDescription` (preferring text)
+     * to avoid duplicating the same string when both attributes carry it,
+     * matching the iOS aggregation in SnapshotElementFinder.
+     *
+     * Recursion is capped at MAX_DESCENDANT_TEXT_DEPTH because each
+     * `obj.children` access is an IPC to the accessibility service —
+     * unbounded recursion on a deeply nested screen turns into O(N) IPC
+     * calls per matched container. The cap covers the common
+     * `<View><Text/></View>` toast / alert pattern (depth 1) and typical
+     * RN compositions, while bounding worst-case cost for accidental
+     * deep matches.
+     */
+    private fun collectDescendantText(
+        obj: UiObject2,
+        depth: Int = 0,
+    ): String {
+        if (depth >= MAX_DESCENDANT_TEXT_DEPTH) return ""
+        val parts = mutableListOf<String>()
+        for (child in obj.children.orEmpty()) {
+            val ownText =
+                child.text?.takeIf { it.isNotEmpty() }
+                    ?: child.contentDescription?.takeIf { it.isNotEmpty() }
+            if (ownText != null) {
+                // Child labels its own visible content — accessibility
+                // services typically already absorb descendant text into
+                // the parent label, so recursing further would duplicate
+                // ("Hello Hello").
+                parts.add(ownText)
+            } else {
+                val nested = collectDescendantText(child, depth + 1)
+                if (nested.isNotEmpty()) parts.add(nested)
+            }
+        }
+        return parts.joinToString(" ")
     }
 
     private fun toElementInfo(
@@ -503,13 +789,44 @@ class ElementFinder(private val device: UiDevice) {
                 Rect(0, 0, 0, 0)
             }
         val className = obj.className ?: ""
+        val rawText = obj.text
+        val hint = extractHint(obj)
+
+        // PILOT-133/toBeEmpty: UIAutomator surfaces the placeholder/hint as
+        // `text` when an EditText is empty. Strip it so callers see the actual
+        // typed value (empty after clear). We gate on
+        // AccessibilityNodeInfo.isShowingHintText (API 26+) so an EditText
+        // whose user-typed value happens to equal its placeholder isn't
+        // mis-reported as empty. Pre-API-26 we fall back to the equality
+        // check, which is wrong for the equal-typed-value edge case but
+        // preserves the toBeEmpty behavior most users rely on.
+        val effectiveText: String? =
+            if (rawText.isNullOrEmpty()) {
+                // Aggregate descendant text so wrapping containers (RN
+                // ReactViewGroup, plain ViewGroup, ConstraintLayout, etc.)
+                // expose their visible label. Earlier this was gated on a
+                // small allowlist of class names — that excluded the actual
+                // RN class users have on real apps. Aggregation cost is
+                // bounded by MAX_DESCENDANT_TEXT_DEPTH so unconditional
+                // recursion on empty-own-text elements is safe.
+                collectDescendantText(obj).ifEmpty { null }
+            } else if (isShowingHintText(obj)) {
+                null
+            } else {
+                rawText
+            }
+
+        // Prefer the framework-set RoleDescription (React Native's
+        // accessibilityRole) over the className-based mapping when present.
+        val role = extractRoleDescription(obj) ?: resolveRole(className)
+
         return ElementInfo(
             elementId = elementId,
             className = className,
-            text = obj.text,
+            text = effectiveText,
             contentDescription = obj.contentDescription,
             resourceId = obj.resourceName,
-            hint = extractHint(obj),
+            hint = hint,
             bounds = bounds,
             isEnabled = obj.isEnabled,
             isChecked = obj.isChecked,
@@ -520,7 +837,7 @@ class ElementFinder(private val device: UiDevice) {
             isVisible = bounds.width() > 0 && bounds.height() > 0,
             isSelected = obj.isSelected,
             childCount = obj.childCount,
-            role = resolveRole(className),
+            role = role,
             viewportRatio = computeViewportRatio(bounds),
         )
     }
@@ -529,19 +846,6 @@ class ElementFinder(private val device: UiDevice) {
         val elementId = UUID.randomUUID().toString()
         elementCache[elementId] = obj
         return toElementInfo(obj, elementId)
-    }
-
-    /**
-     * Filter results by name (text or contentDescription match).
-     * Used when role + name are specified together.
-     */
-    internal fun filterByName(
-        objects: List<UiObject2>,
-        name: String,
-    ): List<UiObject2> {
-        return objects.filter { obj ->
-            obj.text == name || obj.contentDescription == name
-        }
     }
 
     private fun describeSelector(selector: ElementSelector): String {

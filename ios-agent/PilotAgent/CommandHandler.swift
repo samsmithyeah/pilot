@@ -312,21 +312,120 @@ class CommandHandler {
             return ["success": true]
 
         case "clearText":
+            // The clearText backspace loop calls `resolveElement(params)`
+            // between iterations to read a fresh `value`. If the caller
+            // passed `elementId` only, that path returns the cached
+            // snapshot info (whose `text` was captured at original
+            // snapshot time) and the loop exits on iteration 1 thinking
+            // "no progress" even when backspaces are working. Selectors
+            // re-snapshot via the snapshot finder, so we require one.
+            let selectorKeys = ["role", "id", "contentDesc", "className",
+                                "testId", "hint", "textContains", "text"]
+            let hasSelector = selectorKeys.contains { params[$0] != nil }
+            if params["elementId"] != nil && !hasSelector {
+                throw AgentError.invalidRequest(
+                    "clearText requires a selector — elementId-only would " +
+                        "reuse a stale snapshot value between iterations"
+                )
+            }
             let element = try resolveElement(params)
-            // Tap to focus, triple-tap to select all, then delete
+            // Refuse to "clear" non-text elements. The backspace loop below
+            // assumes `element.text` reflects the editable value; on a
+            // wrapper / button / static text it would compare against the
+            // accessibility label, decide there's no progress, and exit
+            // having typed up to one batch of backspaces — silently
+            // mis-targeting whichever field happens to be focused.
+            let textFieldClassNames: Set<String> = [
+                "XCUIElementTypeTextField",
+                "XCUIElementTypeSecureTextField",
+                "XCUIElementTypeTextView",
+                "XCUIElementTypeSearchField",
+            ]
+            guard textFieldClassNames.contains(element.className) else {
+                throw AgentError.actionFailed(
+                    "clearText only works on text input elements (got className=\(element.className))"
+                )
+            }
+            // iOS text fields don't have a reliable "select all" gesture
+            // (triple-tap selects a word; Cmd+A often misses on RN-wrapped
+            // controls). Focus the field, try Cmd+A+Delete as a fast path,
+            // then fall through to per-character backspaces if the field
+            // isn't yet empty (common on RN wrappers that intercept Cmd+A).
+            // We loop the backspace path because autocorrect / suggestion
+            // bar / RN bridge updates can grow or shrink the value between
+            // batches, so a single batch sized off the initial snapshot is
+            // brittle.
             if let center = snapshotCenter(for: element.elementId) {
-                // Triple-tap to select all text in the field
                 actionExecutor.tapCoordinates(x: Int(center.x), y: Int(center.y))
-                Thread.sleep(forTimeInterval: 0.05)
-                actionExecutor.tapCoordinates(x: Int(center.x), y: Int(center.y))
-                Thread.sleep(forTimeInterval: 0.03)
-                actionExecutor.tapCoordinates(x: Int(center.x), y: Int(center.y))
-                Thread.sleep(forTimeInterval: 0.05)
-                // Delete selected text
-                actionExecutor.typeTextWithoutFocus("\u{8}") // backspace
+                Thread.sleep(forTimeInterval: 0.1)
+            } else if let xcElem = try? getXCUIElement(element.elementId), xcElem.isHittable {
+                xcElem.tap()
+                // Match the snapshot path's 0.1s wait so the upcoming
+                // Cmd+A / backspace keypress doesn't race the field
+                // becoming first-responder.
+                Thread.sleep(forTimeInterval: 0.1)
             } else {
-                let xcElem = try getXCUIElement(element.elementId)
-                try actionExecutor.clearText(xcElem)
+                // Neither path could focus the field. Sending backspaces with
+                // nothing focused either silently no-ops or mis-targets
+                // whichever element happens to be focused — both worse than
+                // failing loudly.
+                throw AgentError.actionFailed(
+                    "clearText could not focus element \(element.elementId): " +
+                        "snapshot bounds were off-screen and the XCUIElement is not hittable"
+                )
+            }
+
+            // Fast path: Cmd+A + Delete. Works on native UITextField and on
+            // simulators with a hardware-keyboard mapping; skipped silently
+            // on RN-wrapped controls (which typically don't honor Cmd+A),
+            // where we fall through to the per-character loop.
+            if EventSynthesizer.keyPress(key: "a", modifiers: .command) {
+                Thread.sleep(forTimeInterval: 0.05)
+                _ = EventSynthesizer.keyPress(key: XCUIKeyboardKey.delete.rawValue)
+                Thread.sleep(forTimeInterval: 0.05)
+                let afterSelectAll = (try? resolveElement(params)) ?? element
+                if (afterSelectAll.text ?? "").isEmpty {
+                    return ["success": true]
+                }
+                // Cmd+A didn't clear the field. Continue to the backspace loop.
+            }
+
+            // Cap iterations so a misbehaving field can't hang the agent. The
+            // per-iteration cap of 256 keystrokes covers any realistic field
+            // length; multiple iterations let us mop up post-autocorrect
+            // residue.
+            let maxIterations = 16
+            let perIterationCap = 256
+            var lastLength: Int = .max
+            var finalLength: Int = .max
+            var iterationsRun = 0
+            for _ in 0..<maxIterations {
+                iterationsRun += 1
+                let refreshed = (try? resolveElement(params)) ?? element
+                let value = refreshed.text ?? ""
+                finalLength = value.count
+                if value.isEmpty { break }
+                // Exit only if the value isn't *shrinking*. Comparing whole
+                // strings would prematurely stop on attributed-string /
+                // autocorrect compositions where the visible text changes
+                // but length still drops between batches; comparing length
+                // tolerates that as progress.
+                if value.count >= lastLength { break }
+                lastLength = value.count
+                // String.count counts grapheme clusters — matches keyboard
+                // backspace granularity for ASCII and composed emoji.
+                let count = min(value.count, perIterationCap)
+                actionExecutor.typeTextWithoutFocus(String(repeating: "\u{8}", count: count))
+            }
+            // If we didn't fully clear, surface the failure rather than
+            // silently returning success with residual text in the field.
+            if finalLength > 0 {
+                throw AgentError.actionFailed(
+                    "clearText could not empty element \(element.elementId): " +
+                        "\(finalLength) grapheme cluster(s) remain after " +
+                        "\(iterationsRun) iteration\(iterationsRun == 1 ? "" : "s") " +
+                        "(cap=\(maxIterations); typically exits early when no progress)"
+                )
             }
             return ["success": true]
 

@@ -720,6 +720,14 @@ Type text into this element.
 await device.getByPlaceholder("Email").type("user@example.com");
 ```
 
+> **Control characters.** `\n`, `\t`, and `\b` are dispatched as
+> `KEYCODE_ENTER` / `KEYCODE_TAB` / `KEYCODE_DEL` key events on Android
+> and the equivalent key events on iOS. Notably `\b` is **destructive**
+> — `type("foo\bbar")` deletes the `o` and types `bar`, ending with
+> `fobar`. CR (`\r`) is dropped (Android keyboards send `\n` for the
+> Enter key). Other ASCII control codes below `0x20` are dropped with
+> a one-shot warning log.
+
 #### `elementHandle.clearAndType(text: string): Promise<void>`
 
 Clear existing text and type new text.
@@ -735,6 +743,15 @@ Clear the text content of this element.
 ```typescript
 await device.locator({ id: "search_box" }).clear();
 ```
+
+> **iOS very-long-field ceiling.** On iOS, `clear()` first attempts
+> Cmd+A + Delete; if that misses (common on React Native wrapped
+> controls), it falls back to a per-character backspace loop capped at
+> 16 iterations × 256 keystrokes = 4096 backspaces. A field with more
+> than ~4000 grapheme clusters of content will throw `actionFailed`
+> rather than partially clearing. The cap exists so a misbehaving
+> field can't hang the agent. Android uses the native `UiObject2.clear()`
+> API and isn't subject to this limit.
 
 #### `elementHandle.scroll(direction: string, options?: { distance?: number }): Promise<void>`
 
@@ -1027,7 +1044,9 @@ await expect(device.getByText("Loading...", { exact: true })).toBeHidden();
 
 #### `.toBeEmpty(options?): Promise<void>`
 
-Assert that the element has no text content or is an empty input field.
+Assert that the element has no text content or is an empty input field. The agents normalize text-input fields so a placeholder/hint is not reported as text — `toBeEmpty()` after `clear()` passes even when the placeholder is still drawn.
+
+> **Android API < 26 limitation.** The precise placeholder-vs-value distinction uses `AccessibilityNodeInfo.isShowingHintText()` and `getHintText()`, both of which are only available from API 26 (Android 8.0). On API 21–25 we cannot tell whether a textfield is displaying its placeholder or a real typed value, so `toBeEmpty()` after `clear()` may incorrectly report the field as non-empty (it sees the placeholder text). Bump `minSdk` to 26 if your tests rely on this behavior. iOS is unaffected.
 
 ```typescript
 await expect(device.getByRole("textfield", { name: "Search" })).toBeEmpty();
@@ -1071,6 +1090,8 @@ await expect(device.locator({ id: "counter" })).toHaveText("42");
 #### `.toContainText(expected: string | RegExp, options?): Promise<void>`
 
 Assert that the element's text contains the given substring or matches a regex. Unlike `toHaveText()` which requires an exact match, this allows partial matching.
+
+When the matched element has no own text (e.g. a wrapping `View` around `<Text>` children, common in React Native), the agents aggregate descendant text/labels so the assertion sees the visible string.
 
 ```typescript
 await expect(device.getByTestId("status")).toContainText("Success");
@@ -1116,9 +1137,12 @@ await expect(device.getByRole("image")).toHaveAccessibleDescription("Profile pho
 
 Assert that the element has a specific accessibility role.
 
+The role is derived from a framework-set role description first (React Native's `accessibilityRole`, the `isHeading` flag, the `UIAccessibilityTraitHeader` trait, etc.) and falls back to the platform's class/element-type mapping. `"header"` and `"heading"` are accepted as aliases on both platforms.
+
 ```typescript
 await expect(device.getByText("Submit", { exact: true })).toHaveRole("button");
 await expect(device.getByTestId("toggle")).toHaveRole("switch");
+await expect(device.getByText("Section title", { exact: true })).toHaveRole("heading");
 ```
 
 #### `.toHaveValue(value: string, options?): Promise<void>`

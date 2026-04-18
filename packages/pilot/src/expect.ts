@@ -138,6 +138,10 @@ const ROLE_CLASS_MAP: Record<string, string[]> = {
     "android.widget.TabWidget",
     "com.google.android.material.tabs.TabLayout",
   ],
+  searchfield: [
+    "android.widget.SearchView",
+    "androidx.appcompat.widget.SearchView",
+  ],
 };
 
 const EDITABLE_CLASSES = new Set(ROLE_CLASS_MAP["textfield"]);
@@ -756,6 +760,7 @@ function createAssertions(
     async toHaveRole(role, options) {
       const timeout = timeoutFor(options);
       const desc = selectorDescription(handle);
+      const expected = normalizeRole(role);
       let lastRole = "";
       const result = await poll(async () => {
         try {
@@ -764,7 +769,7 @@ function createAssertions(
             // Use the role field from the agent if available, otherwise compute from className
             lastRole =
               res.element.role || classNameToRole(res.element.className);
-            return lastRole === role;
+            return normalizeRole(lastRole) === expected;
           }
           return false;
         } catch {
@@ -904,6 +909,28 @@ function createAssertions(
  */
 function classNameToRole(className: string): string {
   return CLASS_TO_ROLE_MAP[className] || "";
+}
+
+/**
+ * Cross-platform role aliases. Lets `toHaveRole("header")` succeed when the
+ * agent reports "heading" (and vice versa), and similarly for "slider" /
+ * "seekbar". Mirrors the alias map in agent's ElementFinder.kt.
+ */
+const ROLE_ALIASES: Record<string, string> = {
+  header: "heading",
+  heading: "heading",
+  slider: "seekbar",
+  seekbar: "seekbar",
+  // RN's accessibilityRole="search" surfaces as a role description of
+  // "search" via extractRoleDescription; normalize so toHaveRole("searchfield")
+  // matches.
+  search: "searchfield",
+  searchfield: "searchfield",
+};
+
+function normalizeRole(role: string): string {
+  const lower = role.toLowerCase();
+  return ROLE_ALIASES[lower] ?? lower;
 }
 
 // ─── PILOT-42: Generic value assertions ───
