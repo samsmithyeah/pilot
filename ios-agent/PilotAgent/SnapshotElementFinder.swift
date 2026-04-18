@@ -84,11 +84,22 @@ class SnapshotElementFinder {
         SnapshotElementFinder.annotateTraits(dict: &snapshotDict, snapshot: resolvedSnapshot)
 
         // Flatten and search (pre-order — `.first()` callers depend on it).
+        // Wrapper suppression happens inline via an ancestor stack so the
+        // whole walk is O(N + wrapperMatches) rather than O(matches²).
         var matches: [([String: Any], CGRect)] = []
-        findMatches(in: snapshotDict, selector: selector, results: &matches)
-        // Drop RN-style wrappers (`XCUIElementTypeOther`) whose identifier
-        // or label is shadowed by a real native control nested inside.
-        matches = suppressOverlappingWrappers(matches)
+        var otherAncestors: [WrapperAncestor] = []
+        var suppressed = Set<Int>()
+        findMatches(
+            in: snapshotDict,
+            selector: selector,
+            results: &matches,
+            otherAncestors: &otherAncestors,
+            suppressed: &suppressed
+        )
+        if !suppressed.isEmpty {
+            matches = matches.enumerated()
+                .compactMap { (i, m) in suppressed.contains(i) ? nil : m }
+        }
 
         // Check once if keyboard is visible (for focus detection).
         // Keyboard = elementType 56 (XCUIElement.ElementType.keyboard).
@@ -348,7 +359,13 @@ class SnapshotElementFinder {
         switch raw {
         case let v as UInt64: return v
         case let v as UInt: return UInt64(v)
-        case let v as Int: return v >= 0 ? UInt64(v) : 0
+        case let v as Int:
+            // Preserve the raw bit pattern rather than zeroing the mask.
+            // iOS traits use bits up to 1 << 20; when the full 64-bit
+            // value is sign-extended into `Int` on platforms where `Int`
+            // is 64-bit, a negative value could legitimately carry
+            // high-order trait bits we'd otherwise discard.
+            return UInt64(bitPattern: Int64(v))
         case let v as NSNumber: return v.uint64Value
         default: return 0
         }
@@ -411,13 +428,19 @@ class SnapshotElementFinder {
             )
         }
         // Build a quick index of snapshot children keyed by (identifier,
-        // elementType, frame). Multiple children can share the same key
-        // (anonymous siblings); track which slots are still unclaimed.
+        // elementType, full frame). Multiple children can share the same
+        // key (anonymous siblings with identical bounds); track which
+        // slots are still unclaimed. Including width/height in the key
+        // (rather than origin only) reduces collisions when RN mounts
+        // sibling hidden-a11y views that start at the same origin but
+        // differ in size.
         struct ChildKey: Hashable {
             let identifier: String
             let elementType: UInt
             let originX: Int
             let originY: Int
+            let width: Int
+            let height: Int
         }
         var available: [ChildKey: [Int]] = [:]
         for (idx, snap) in snapChildren.enumerated() {
@@ -425,7 +448,9 @@ class SnapshotElementFinder {
                 identifier: snap.identifier,
                 elementType: UInt(snap.elementType.rawValue),
                 originX: Int(snap.frame.origin.x),
-                originY: Int(snap.frame.origin.y)
+                originY: Int(snap.frame.origin.y),
+                width: Int(snap.frame.size.width),
+                height: Int(snap.frame.size.height)
             )
             available[key, default: []].append(idx)
         }
@@ -435,7 +460,9 @@ class SnapshotElementFinder {
                 identifier: child["identifier"] as? String ?? "",
                 elementType: SnapshotElementFinder.parseUInt(child["elementType"]) ?? 0,
                 originX: Int(frame.origin.x),
-                originY: Int(frame.origin.y)
+                originY: Int(frame.origin.y),
+                width: Int(frame.size.width),
+                height: Int(frame.size.height)
             )
             guard var slots = available[key], let first = slots.first else { continue }
             slots.removeFirst()
@@ -509,74 +536,76 @@ class SnapshotElementFinder {
 
     // MARK: - Snapshot parsing and matching
 
+    /// Ancestor descriptor used during `findMatches` to mark generic
+    /// `.other` wrappers whose identifier or label is shadowed by a real
+    /// native descendant. Maintaining an ancestor stack keeps suppression
+    /// linear in the match count, instead of the O(N²) post-pass the
+    /// earlier implementation used.
+    private struct WrapperAncestor {
+        let identifier: String
+        let label: String
+        let resultIndex: Int
+    }
+
     private func findMatches(
         in nodeDict: [String: Any],
         selector: ElementSelector,
-        results: inout [([String: Any], CGRect)]
+        results: inout [([String: Any], CGRect)],
+        otherAncestors: inout [WrapperAncestor],
+        suppressed: inout Set<Int>
     ) {
         // Pre-order: parent first, then descendants. Callers (e.g.
         // `.first()`) rely on document/snapshot order, so we must NOT
-        // reorder here. Wrapper-vs-inner deduplication is handled by
-        // suppressOverlappingWrappers() once the full result list is built.
+        // reorder here. We use an ancestor stack to suppress RN-style
+        // `.other` wrappers whose identifier/label matches a native
+        // descendant in one linear pass.
+        var pushedAncestor = false
         if matchesSelector(nodeDict, selector: selector) {
+            let myId = nodeDict["identifier"] as? String ?? ""
+            let myLabel = nodeDict["label"] as? String ?? ""
+
+            // If an in-scope `.other` ancestor shares our identifier (or
+            // label when identifier is empty), mark it for suppression —
+            // we're the "real" inner control.
+            for anc in otherAncestors {
+                if !anc.identifier.isEmpty && anc.identifier == myId {
+                    suppressed.insert(anc.resultIndex)
+                } else if anc.identifier.isEmpty && !anc.label.isEmpty && anc.label == myLabel {
+                    suppressed.insert(anc.resultIndex)
+                }
+            }
+
             let frame = parseFrame(nodeDict)
             results.append((nodeDict, frame))
+            let myIndex = results.count - 1
+
+            // Push this node onto the ancestor stack if it's a generic
+            // wrapper — any matching descendant will suppress us.
+            let raw = parseUInt(nodeDict["elementType"]) ?? 0
+            let elType = XCUIElement.ElementType(rawValue: raw) ?? .other
+            if elType == .other {
+                otherAncestors.append(
+                    WrapperAncestor(identifier: myId, label: myLabel, resultIndex: myIndex)
+                )
+                pushedAncestor = true
+            }
         }
+
         if let children = nodeDict["children"] as? [[String: Any]] {
             for child in children {
-                findMatches(in: child, selector: selector, results: &results)
-            }
-        }
-    }
-
-    /// Drop generic `.other` wrappers that share an `identifier` (or, when
-    /// no identifier is set, a `label`) with another result that came
-    /// later in pre-order traversal — i.e. one of their own descendants.
-    /// React Native wraps native controls in `.other` UIViews that inherit
-    /// the inner control's accessibility attributes; only the inner
-    /// control is hittable for typeText and reports an updated `value`
-    /// after typing.
-    private func suppressOverlappingWrappers(
-        _ matches: [([String: Any], CGRect)]
-    ) -> [([String: Any], CGRect)] {
-        guard matches.count > 1 else { return matches }
-        // Pre-compute keys (id, label) so we don't repeatedly key into dicts.
-        let keys: [(elType: XCUIElement.ElementType, id: String, label: String)] =
-            matches.map { (dict, _) in
-                let raw = parseUInt(dict["elementType"]) ?? 0
-                return (
-                    XCUIElement.ElementType(rawValue: raw) ?? .other,
-                    dict["identifier"] as? String ?? "",
-                    dict["label"] as? String ?? ""
+                findMatches(
+                    in: child,
+                    selector: selector,
+                    results: &results,
+                    otherAncestors: &otherAncestors,
+                    suppressed: &suppressed
                 )
             }
-        var keep = [Bool](repeating: true, count: matches.count)
-        for i in matches.indices where keys[i].elType == .other {
-            let me = keys[i]
-            let myFrame = matches[i].1
-            // Suppress only if a later match is an actual *descendant* of
-            // this wrapper (frame strictly contained), not a sibling that
-            // happens to share the identifier or label. Pre-order alone
-            // would catch sibling duplicates and silently drop one.
-            for j in (i + 1)..<matches.count {
-                let other = keys[j]
-                let otherFrame = matches[j].1
-                // Allow equal frames as ancestry — RN often wraps native
-                // controls in a zero-padding `.other` whose frame matches
-                // the inner control exactly. We're only considering j > i
-                // (later in pre-order), so self-comparison can't happen.
-                guard myFrame.contains(otherFrame) else { continue }
-                if !me.id.isEmpty && other.id == me.id {
-                    keep[i] = false
-                    break
-                }
-                if me.id.isEmpty && !me.label.isEmpty && other.label == me.label {
-                    keep[i] = false
-                    break
-                }
-            }
         }
-        return zip(matches, keep).compactMap { $1 ? $0 : nil }
+
+        if pushedAncestor {
+            otherAncestors.removeLast()
+        }
     }
 
     private func matchesSelector(_ node: [String: Any], selector: ElementSelector) -> Bool {

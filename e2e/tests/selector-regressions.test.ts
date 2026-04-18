@@ -99,15 +99,20 @@ describe("Selector & assertion regressions", () => {
   // Android's typeTextWithoutFocus replaces ' ' with the `input text` token
   // `%s` so spaces survive shell-arg tokenization. The reverse round-trip
   // means a literal "%s" in user text comes out as a space. iOS doesn't
-  // have this issue (no shell). Locked here so a future fix can flip the
-  // assertion if the limitation is removed.
-  test("type() — documented %s literal limitation", async ({ device }) => {
+  // have this issue. Split per-platform so a regression that silently
+  // inverts the behavior on either one fails loudly.
+  test("type() — documented %s limitation (Android → literal space)", async ({ device, projectName }) => {
+    if (!(projectName ?? "").startsWith("android")) return
     await device.getByDescription("Login Form").tap()
     await device.getByTestId("email-input").type("a%sb")
-    const el = await device.getByTestId("email-input").find()
-    // On Android the documented behavior is "a b"; on iOS the literal
-    // "a%sb" survives because there's no shell-token substitution.
-    expect(["a b", "a%sb"]).toContain(el.text ?? "")
+    await expect(device.getByTestId("email-input")).toHaveValue("a b")
+  })
+
+  test("type() — %s round-trips verbatim on iOS", async ({ device, projectName }) => {
+    if (!(projectName ?? "").startsWith("ios")) return
+    await device.getByDescription("Login Form").tap()
+    await device.getByTestId("email-input").type("a%sb")
+    await expect(device.getByTestId("email-input")).toHaveValue("a%sb")
   })
 
   // ─── getByPlaceholder negative case: unknown placeholder returns nothing ───

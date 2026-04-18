@@ -83,9 +83,11 @@ describe("Login screen", () => {
     const login = new LoginScreen(device)
     await login.emailField.clearAndType("test@example.com")
     await login.passwordField.clearAndType("password123")
-    // Button enabling is the actionable signal that the credentials were
-    // accepted by the form. The post-submit success state is exercised by
-    // auth.setup.ts, which has the proper hideKeyboard sequencing.
     await expect(login.signInButton).toBeEnabled()
+    // hideKeyboard mirrors auth.setup.ts — without it, the keyboard
+    // intercepts the submit tap on some iOS configurations.
+    await device.hideKeyboard()
+    await login.signInButton.tap()
+    await expect(device.getByText("Login successful!", { exact: true })).toBeVisible()
   })
 })

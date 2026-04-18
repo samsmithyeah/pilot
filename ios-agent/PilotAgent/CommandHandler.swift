@@ -378,9 +378,11 @@ class CommandHandler {
             let maxIterations = 16
             let perIterationCap = 256
             var lastLength: Int = .max
+            var finalLength: Int = .max
             for _ in 0..<maxIterations {
                 let refreshed = (try? resolveElement(params)) ?? element
                 let value = refreshed.text ?? ""
+                finalLength = value.count
                 if value.isEmpty { break }
                 // Exit only if the value isn't *shrinking*. Comparing whole
                 // strings would prematurely stop on attributed-string /
@@ -393,6 +395,14 @@ class CommandHandler {
                 // backspace granularity for ASCII and composed emoji.
                 let count = min(value.count, perIterationCap)
                 actionExecutor.typeTextWithoutFocus(String(repeating: "\u{8}", count: count))
+            }
+            // If we didn't fully clear, surface the failure rather than
+            // silently returning success with residual text in the field.
+            if finalLength > 0 {
+                throw AgentError.actionFailed(
+                    "clearText could not empty element \(element.elementId): " +
+                        "\(finalLength) grapheme cluster(s) remain after \(maxIterations) iterations"
+                )
             }
             return ["success": true]
 
