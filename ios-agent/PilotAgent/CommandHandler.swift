@@ -313,6 +313,23 @@ class CommandHandler {
 
         case "clearText":
             let element = try resolveElement(params)
+            // Refuse to "clear" non-text elements. The backspace loop below
+            // assumes `element.text` reflects the editable value; on a
+            // wrapper / button / static text it would compare against the
+            // accessibility label, decide there's no progress, and exit
+            // having typed up to one batch of backspaces — silently
+            // mis-targeting whichever field happens to be focused.
+            let textFieldClassNames: Set<String> = [
+                "XCUIElementTypeTextField",
+                "XCUIElementTypeSecureTextField",
+                "XCUIElementTypeTextView",
+                "XCUIElementTypeSearchField",
+            ]
+            guard textFieldClassNames.contains(element.className) else {
+                throw AgentError.actionFailed(
+                    "clearText only works on text input elements (got className=\(element.className))"
+                )
+            }
             // iOS text fields don't have a reliable "select all" gesture
             // (triple-tap selects a word; Cmd+A often misses on RN-wrapped
             // controls). Focus the field, then send backspaces in batches

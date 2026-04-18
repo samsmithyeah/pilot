@@ -131,8 +131,11 @@ class ActionExecutor(private val device: UiDevice) {
                 when (ch) {
                     '\n' -> "KEYCODE_ENTER"
                     '\t' -> "KEYCODE_TAB"
-                    '\b', '\u0008' -> "KEYCODE_DEL"
-                    '\r' -> null // swallow CR; real newline is \n
+                    '\b' -> "KEYCODE_DEL" // '\b' is U+0008 (backspace)
+                    // Drop CR — Android keyboards send '\n' for the
+                    // Enter key; '\r' alone has no useful target and
+                    // would emit an extra keyevent in CRLF input.
+                    '\r' -> null
                     else -> ""
                 }
             if (keyCode == null) continue

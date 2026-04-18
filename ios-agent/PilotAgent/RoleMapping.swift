@@ -81,12 +81,22 @@ enum RoleMapping {
     /// Get the XCUIElement.ElementType values for a role name.
     /// - Throws: AgentError.invalidSelector if the role is unknown.
     static func elementTypes(for role: String) throws -> [XCUIElement.ElementType] {
-        guard let types = roleToElementTypes[role.lowercased()] else {
+        let normalized = ROLE_ALIASES[role.lowercased()] ?? role.lowercased()
+        guard let types = roleToElementTypes[normalized] else {
             let known = roleToElementTypes.keys.sorted().joined(separator: ", ")
             throw AgentError.invalidSelector("Unknown role: '\(role)'. Known roles: \(known)")
         }
         return types
     }
+
+    /// Cross-platform role aliases — kept in sync with Android's
+    /// `ROLE_ALIASES` map and the SDK's `normalizeRole`. Lets users pass
+    /// either the React Native spelling ("header", "slider") or the
+    /// Pilot/Playwright canonical ("heading", "seekbar").
+    static let ROLE_ALIASES: [String: String] = [
+        "header": "heading",
+        "slider": "seekbar",
+    ]
 
     /// Check if a UIAccessibilityTraits bitmask matches a role.
     /// This handles React Native components (Pressable, TouchableOpacity) that

@@ -675,12 +675,18 @@ class ElementFinder(private val device: UiDevice) {
      * content-description from descendants. Used so locator assertions like
      * `toContainText` see the visible label of a wrapping View whose own
      * `text` attribute is empty (common with React Native).
+     *
+     * Per child we take `text` *or* `contentDescription` (preferring text)
+     * to avoid duplicating the same string when both attributes carry it,
+     * matching the iOS aggregation in SnapshotElementFinder.
      */
     private fun collectDescendantText(obj: UiObject2): String {
         val parts = mutableListOf<String>()
         for (child in obj.children.orEmpty()) {
-            child.text?.takeIf { it.isNotEmpty() }?.let { parts.add(it) }
-            child.contentDescription?.takeIf { it.isNotEmpty() }?.let { parts.add(it) }
+            val ownText =
+                child.text?.takeIf { it.isNotEmpty() }
+                    ?: child.contentDescription?.takeIf { it.isNotEmpty() }
+            ownText?.let { parts.add(it) }
             val nested = collectDescendantText(child)
             if (nested.isNotEmpty()) parts.add(nested)
         }

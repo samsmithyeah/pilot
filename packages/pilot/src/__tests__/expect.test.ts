@@ -1220,6 +1220,31 @@ describe("toHaveRole()", () => {
     await pilotExpect(handle).toHaveRole("slider", { timeout: 50 });
     await pilotExpect(handle).toHaveRole("seekbar", { timeout: 50 });
   });
+
+  it("aliases work in both directions (agent reports alias, user passes canonical)", async () => {
+    // RN sometimes surfaces the role as the user-facing alias rather than the
+    // canonical Pilot spelling — make sure normalizeRole works either way.
+    const client = makeMockClient(async () => ({
+      requestId: "1",
+      found: true,
+      element: makeElementInfo({ role: "header" }),
+      errorMessage: "",
+    }));
+    const handle = makeHandle(client);
+    await pilotExpect(handle).toHaveRole("heading", { timeout: 50 });
+    await pilotExpect(handle).toHaveRole("header", { timeout: 50 });
+  });
+
+  it("normalizes role case", async () => {
+    const client = makeMockClient(async () => ({
+      requestId: "1",
+      found: true,
+      element: makeElementInfo({ role: "Heading" }),
+      errorMessage: "",
+    }));
+    const handle = makeHandle(client);
+    await pilotExpect(handle).toHaveRole("HEADER", { timeout: 50 });
+  });
 });
 
 // ─── toHaveValue() (PILOT-39) ───

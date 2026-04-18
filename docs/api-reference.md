@@ -1029,6 +1029,8 @@ await expect(device.getByText("Loading...", { exact: true })).toBeHidden();
 
 Assert that the element has no text content or is an empty input field. The agents normalize text-input fields so a placeholder/hint is not reported as text — `toBeEmpty()` after `clear()` passes even when the placeholder is still drawn.
 
+> **Android API < 26 limitation.** The precise placeholder-vs-value distinction uses `AccessibilityNodeInfo.isShowingHintText()`, which is only available from API 26 (Android 8.0). On older devices we fall back to comparing the surfaced text against the field's hint, so a user who literally typed the placeholder string and then queried `toHaveValue(...)` against that exact value would see the value mis-reported as empty. iOS is unaffected.
+
 ```typescript
 await expect(device.getByRole("textfield", { name: "Search" })).toBeEmpty();
 ```

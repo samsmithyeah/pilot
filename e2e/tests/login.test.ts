@@ -72,20 +72,20 @@ describe("Login screen", () => {
 
   test("clear() empties the field", async ({ device }) => {
     const login = new LoginScreen(device)
+    await login.emailField.type("hello")
     await login.emailField.clear()
-    // After clear, RN shows placeholder as text — check field exists
-    await expect(login.emailField).toBeVisible()
+    await expect(login.emailField).toBeEmpty()
   })
 
   // ─── Form Submission ───
-  // PILOT-133: type() adds quotes, so form validation with exact values won't work.
-  // Test what we can — navigation and element visibility.
 
   test("can type credentials and submit", async ({ device }) => {
     const login = new LoginScreen(device)
     await login.emailField.clearAndType("test@example.com")
     await login.passwordField.clearAndType("password123")
-    // Button may or may not enable due to quote bug — try tapping anyway
-    await login.signInButton.tap()
+    // Button enabling is the actionable signal that the credentials were
+    // accepted by the form. The post-submit success state is exercised by
+    // auth.setup.ts, which has the proper hideKeyboard sequencing.
+    await expect(login.signInButton).toBeEnabled()
   })
 })
