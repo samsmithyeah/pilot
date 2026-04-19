@@ -914,7 +914,20 @@ function classNameToRole(className: string): string {
 /**
  * Cross-platform role aliases. Lets `toHaveRole("header")` succeed when the
  * agent reports "heading" (and vice versa), and similarly for "slider" /
- * "seekbar". Mirrors the alias map in agent's ElementFinder.kt.
+ * "seekbar".
+ *
+ * **Parity contract — three places, one canonical list:**
+ * 1. This file (SDK side, used by `toHaveRole` normalization).
+ * 2. `agent/.../ElementFinder.kt` (Android `ROLE_ALIASES`, used during
+ *    role-description extraction).
+ * 3. `ios-agent/PilotAgent/RoleMapping.swift` (`roleAliases`, used by
+ *    `RoleMapping.elementTypes(for:)`).
+ *
+ * Drift here causes silent per-platform mismatch — the SDK normalizes
+ * one way, the agent matches the other, and `toHaveRole` either fails
+ * loudly or (worse) matches the wrong elements. The parity test in
+ * `expect.test.ts > ROLE_ALIASES parity` pins the SDK side; if you add
+ * or rename an alias, update all three files AND that test.
  */
 const ROLE_ALIASES: Record<string, string> = {
   header: "heading",

@@ -152,6 +152,15 @@ class CommandHandler {
     // MARK: - Element Resolution
 
     /// Resolve an element from params, supporting both elementId (cached) and selector-based lookup.
+    ///
+    /// **Cost:** elementId path is several live `XCUIElement` property
+    /// reads (~6–10 IPC) via `getElementInfo`; selector path is one
+    /// `app.snapshot()` IPC + tree walk. The selector path is usually
+    /// cheaper for repeated lookups against a fresh state because it
+    /// re-reads the whole tree in one IPC instead of N attribute IPCs.
+    /// Loops that re-resolve the same element across iterations (e.g.
+    /// the `clearText` backspace loop) should prefer the selector
+    /// form so each pass sees a fresh snapshot.
     private func resolveElement(_ params: [String: Any]) throws -> ElementInfo {
         if let elementId = params["elementId"] as? String {
             // Try snapshot finder cache first, then fall back to old cache
@@ -166,6 +175,13 @@ class CommandHandler {
     }
 
     /// Get the XCUIElement for an element ID, checking both caches.
+    ///
+    /// **Cost:** O(1) cache lookup, no IPC. The IPC happens later when
+    /// the caller reads a property off the returned element — each
+    /// `.value`, `.label`, `.frame`, `.isHittable` access crosses
+    /// the test runner ↔ app boundary. Batch property reads or
+    /// prefer `resolveElement` (which dumps everything in one
+    /// snapshot pass) when you need more than one attribute.
     private func getXCUIElement(_ elementId: String) throws -> XCUIElement {
         if let elem = try? snapshotFinder.getElement(elementId) {
             return elem
@@ -287,6 +303,13 @@ class CommandHandler {
 
         case "typeText":
             let text = params["text"] as? String ?? ""
+            // No-op fast path: typing an empty string would still
+            // resolve the element, tap to focus, and burn a 0.5s
+            // keyboard-wait sleep before passing "" to the event
+            // synthesizer (which is itself a no-op). Skip everything.
+            if text.isEmpty {
+                return ["success": true]
+            }
             let selectorKeys = ["role", "id", "contentDesc", "className", "testId", "hint", "textContains", "elementId"]
             let hasSelector = selectorKeys.contains { params[$0] != nil }
             if hasSelector {

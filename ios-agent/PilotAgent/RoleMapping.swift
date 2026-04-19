@@ -93,6 +93,16 @@ enum RoleMapping {
     /// `ROLE_ALIASES` map and the SDK's `normalizeRole`. Lets users pass
     /// either the React Native spelling ("header", "slider", "search") or the
     /// Pilot/Playwright canonical ("heading", "seekbar", "searchfield").
+    ///
+    /// **Parity contract:** this map MUST stay in sync with
+    /// `packages/pilot/src/expect.ts ROLE_ALIASES` and
+    /// `agent/app/.../ElementFinder.kt ROLE_ALIASES`. The SDK side has
+    /// the locking parity test (`expect.test.ts > ROLE_ALIASES parity`);
+    /// when you add an alias here, also update both other files and
+    /// extend that test. Drift causes silent per-platform mismatches
+    /// where the SDK normalizes one way and this side reports the
+    /// other, leading `toHaveRole` to either fail loudly or (worse)
+    /// match the wrong element.
     static let roleAliases: [String: String] = [
         "header": "heading",
         "slider": "seekbar",

@@ -38,6 +38,13 @@ class SnapshotElementFinder {
     // MARK: - Snapshot-based finding
 
     /// Find a single element matching the selector using snapshot.
+    ///
+    /// **Cost:** one `app.snapshot()` IPC (~50ms steady state, up to
+    /// ~1s on first call before the accessibility connection is warm) +
+    /// one O(N) tree walk + one O(N) KVC pass for trait annotation,
+    /// where N is total accessibility-tree node count. See
+    /// `findElements` for the underlying budget; `findElement` adds no
+    /// extra IPC, just a `.first` on the result list.
     func findElement(_ selector: ElementSelector, parentId: String? = nil) throws -> ElementInfo {
         let elements = try findElements(selector, parentId: parentId)
         guard let first = elements.first else {
@@ -47,6 +54,17 @@ class SnapshotElementFinder {
     }
 
     /// Find all elements matching the selector using snapshot.
+    ///
+    /// **Cost:** 1 × `app.snapshot()` IPC (the only IPC on the happy
+    /// path; ~50ms steady state, up to 5×0.2s retries before the
+    /// accessibility connection is established on cold start) +
+    /// 1 × `dictionaryRepresentation` conversion (cheap, no IPC) +
+    /// O(N) `KVC traits` reads via `annotateTraits` (each is a
+    /// Swift↔ObjC bridge call but stays in-process; no IPC) +
+    /// O(N) tree walk for `findMatches`. N is total snapshot-tree
+    /// node count. The wrapper-suppression pass is folded into the
+    /// walk via the ancestor stack, so it does not add an extra
+    /// O(N²) post-pass.
     func findElements(_ selector: ElementSelector, parentId: String? = nil) throws -> [ElementInfo] {
         // Take a snapshot of the entire accessibility tree in one IPC call.
         // With _XCTSetApplicationStateTimeout(0), the first snapshot may return
@@ -254,6 +272,11 @@ class SnapshotElementFinder {
     }
 
     /// Get cached snapshot bounds for an element (for coordinate-based actions).
+    ///
+    /// **Cost:** O(1) dictionary lookup, no IPC. Bounds were captured
+    /// during the original `findElements` snapshot walk and frozen at
+    /// that time — do NOT use this for "is the element still on
+    /// screen?" checks, take a fresh snapshot for that.
     func getBounds(_ elementId: String) -> CGRect? {
         lock.lock()
         let bounds = boundsCache[elementId]
@@ -262,6 +285,14 @@ class SnapshotElementFinder {
     }
 
     /// Get the ElementInfo for a cached element.
+    ///
+    /// **Cost:** several live `XCUIElement` property reads (label,
+    /// identifier, value, isEnabled, hasFocus, isSelected, frame),
+    /// each one an IPC. Order of magnitude ~6–10 IPC per call.
+    /// Strictly more expensive than re-running `findElement` for a
+    /// fresh snapshot if you need >1 attribute read; only useful when
+    /// the snapshot is known stale and you have an elementId you want
+    /// to re-resolve.
     func getElementInfo(_ elementId: String) throws -> ElementInfo {
         let elem = try getElement(elementId)
         return toElementInfo(elem, elementId: elementId)
@@ -451,6 +482,18 @@ class SnapshotElementFinder {
         // (rather than origin only) reduces collisions when RN mounts
         // sibling hidden-a11y views that start at the same origin but
         // differ in size.
+        //
+        // Tie-break invariant: when two snapshot children share a key,
+        // we pop slots in first-found order. This is only safe because
+        // identical (identifier, type, frame) siblings produce identical
+        // accessibility traits in practice — they're either both
+        // hidden-a11y wrappers or both null-identifier `.other`
+        // containers. Splicing the wrong one's traits onto the other
+        // is therefore a no-op. If a future change makes traits depend
+        // on something *other* than these key components (e.g. a
+        // semantic element type that varies across siblings with
+        // identical frames), this assumption breaks and the matching
+        // needs a more discriminating key.
         struct ChildKey: Hashable {
             let identifier: String
             let elementType: UInt
