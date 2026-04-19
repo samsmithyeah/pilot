@@ -502,27 +502,38 @@ class SnapshotElementFinder {
             let width: Int
             let height: Int
         }
+        // Round (rather than truncate) frame coords when keying. Sub-pixel
+        // layouts (RN sometimes produces frames at e.g. y=12.333 vs 12.0)
+        // would otherwise hash both into the same `Int(...)` slot
+        // (Int truncates toward zero) and mis-attribute traits between
+        // siblings. Rounding yields a stable Int boundary at the nearest
+        // whole pixel, so two siblings only collide when they're truly
+        // pixel-aligned at the same position.
+        func keyOf(identifier: String, elementType: UInt, frame: CGRect) -> ChildKey {
+            ChildKey(
+                identifier: identifier,
+                elementType: elementType,
+                originX: Int(frame.origin.x.rounded()),
+                originY: Int(frame.origin.y.rounded()),
+                width: Int(frame.size.width.rounded()),
+                height: Int(frame.size.height.rounded())
+            )
+        }
         var available: [ChildKey: [Int]] = [:]
         for (idx, snap) in snapChildren.enumerated() {
-            let key = ChildKey(
+            let key = keyOf(
                 identifier: snap.identifier,
                 elementType: UInt(snap.elementType.rawValue),
-                originX: Int(snap.frame.origin.x),
-                originY: Int(snap.frame.origin.y),
-                width: Int(snap.frame.size.width),
-                height: Int(snap.frame.size.height)
+                frame: snap.frame
             )
             available[key, default: []].append(idx)
         }
         for (i, child) in children.enumerated() {
             let frame = SnapshotElementFinder.parseFrame(child)
-            let key = ChildKey(
+            let key = keyOf(
                 identifier: child["identifier"] as? String ?? "",
                 elementType: SnapshotElementFinder.parseUInt(child["elementType"]) ?? 0,
-                originX: Int(frame.origin.x),
-                originY: Int(frame.origin.y),
-                width: Int(frame.size.width),
-                height: Int(frame.size.height)
+                frame: frame
             )
             guard var slots = available[key], let first = slots.first else { continue }
             slots.removeFirst()

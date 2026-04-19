@@ -452,16 +452,41 @@ class ElementFinder(private val device: UiDevice) {
         // class here too before accepting the `obj.text == hint` fallback.
         // Without that guard a TextView with the literal visible label
         // "Email" would match a getByPlaceholder("Email") query.
-        if (selector.hint != null) {
-            return byName.filter { obj ->
-                val className = obj.className ?: ""
-                val isEditText = EDIT_TEXT_HINT_CLASS_PATTERN.matcher(className).matches()
-                if (!isEditText) return@filter false
-                extractHint(obj) == selector.hint || obj.text == selector.hint
+        val byHint =
+            if (selector.hint != null) {
+                byName.filter { obj ->
+                    val className = obj.className ?: ""
+                    val isEditText = EDIT_TEXT_HINT_CLASS_PATTERN.matcher(className).matches()
+                    if (!isEditText) return@filter false
+                    extractHint(obj) == selector.hint || obj.text == selector.hint
+                }
+            } else {
+                byName
+            }
+
+        // Post-filter for trait-derived roles (heading, link). Their
+        // class-set in `roleClassMap` is `["android.widget.TextView"]` —
+        // every TextView on screen passes the BySelector. Without this
+        // narrowing, `getByRole("heading").first()` returns the
+        // document-first TextView (usually NOT a heading), and
+        // `getByRole("heading").all()` returns the entire text content
+        // of the screen. The role attribute we'd assign during
+        // `toElementInfo` (via `extractRoleDescription`) IS the one
+        // that distinguishes these — apply it here so the find-phase
+        // candidate set matches the role attribute the SDK eventually
+        // checks against. Other roles (button, textfield, …) have
+        // class sets that already uniquely identify them and don't
+        // need this filter.
+        if (selector.role != null) {
+            val normalized = ROLE_ALIASES[selector.role.lowercase()] ?: selector.role.lowercase()
+            if (normalized == "heading" || normalized == "link") {
+                return byHint.filter { obj ->
+                    extractRoleDescription(obj) == normalized
+                }
             }
         }
 
-        return byName
+        return byHint
     }
 
     /**
@@ -489,6 +514,30 @@ class ElementFinder(private val device: UiDevice) {
     }
 
     private fun buildBySelector(selector: ElementSelector): BySelector? {
+        // Reject incompatible combinations up front so the failure mode
+        // is "loud and obvious" rather than "silent contract drift".
+        // `hint` always narrows to the EditText pattern below and
+        // `BySelector.clazz()` replaces any prior `clazz` constraint,
+        // so combining `hint` with `className`, `role`, or `id` is
+        // incoherent — the latter constraint silently wins. Throwing
+        // here means callers either drop the conflicting field or
+        // restructure the lookup.
+        if (selector.hint != null) {
+            val conflicting = mutableListOf<String>()
+            if (selector.className != null) conflicting.add("className")
+            if (selector.role != null) conflicting.add("role")
+            if (selector.id != null) conflicting.add("id")
+            if (selector.testId != null) conflicting.add("testId")
+            if (conflicting.isNotEmpty()) {
+                throw InvalidSelectorException(
+                    "`hint` cannot be combined with [${conflicting.joinToString(", ")}] — " +
+                        "the hint post-filter narrows the candidate set to EditText variants only, " +
+                        "so the other fields would be silently dropped. Drop the conflicting field " +
+                        "or use `getByPlaceholder` (hint-only) for placeholder-text matching.",
+                )
+            }
+        }
+
         var by: BySelector? = null
 
         // Role-based selection
@@ -546,14 +595,11 @@ class ElementFinder(private val device: UiDevice) {
 
         // Hint text — UIAutomator has no By.hint(), so narrow to EditText
         // candidates here and post-filter on the actual hint value in
-        // findUiObjects(). Always intersect with the EditText pattern,
-        // even when other selector fields are also set: the post-filter
-        // requires EditText anyway, so without this the candidate set
-        // would include non-EditText elements that get rejected and the
-        // call would return [] instead of the matching placeholder.
-        // Note: BySelector.clazz() replaces any prior `clazz` constraint,
-        // so combining `hint` with `className` is incoherent — `hint`
-        // wins. Documented in the post-filter and in the SDK API.
+        // findUiObjects(). Conflicting combinations (hint + className /
+        // role / id / testId) were rejected up front, so by the time
+        // we get here `hint` is either the only selector or paired
+        // with text/textContains/contentDesc/enabled-style filters
+        // that compose cleanly with the EditText class constraint.
         if (selector.hint != null) {
             by =
                 if (by != null) {

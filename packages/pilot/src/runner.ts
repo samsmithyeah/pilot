@@ -334,6 +334,44 @@ function getPackageVersion(): string {
   }
 }
 
+/**
+ * Resolve the `platform` fixture value from the effective config and
+ * validate against silent misconfiguration.
+ *
+ * Defaulting an unset `platform` to `'android'` matches the documented
+ * `PilotConfig.platform` default and keeps the fixture non-optional so
+ * platform-conditional tests can't silently skip both branches. But
+ * blindly defaulting hides a sharp class of misconfig: the user
+ * supplies an iOS app bundle, simulator, or xctestrun (clear iOS
+ * intent) yet forgets `platform: 'ios'`, and every iOS-conditional
+ * test runs against an Android target — usually failing in confusing
+ * ways further down the stack. Catching it at fixture-injection time
+ * means the failure surfaces immediately with a message that names
+ * the missing field, instead of cascading through device setup and
+ * snapshot finder errors.
+ */
+function resolvePlatformFixture(config: PilotConfig): Platform {
+  if (config.platform != null) {
+    return config.platform;
+  }
+  const iosIndicators: Array<[keyof PilotConfig, string]> = [
+    ['app', 'app'],
+    ['simulator', 'simulator'],
+    ['iosXctestrun', 'iosXctestrun'],
+  ];
+  const present = iosIndicators
+    .filter(([key]) => config[key] != null)
+    .map(([, label]) => label);
+  if (present.length > 0) {
+    throw new Error(
+      `Pilot config has iOS-only field(s) [${present.join(', ')}] but ` +
+        `\`platform\` is not set. Add \`platform: 'ios'\` to the config (or to the ` +
+        `relevant project's \`use\`) so iOS-conditional tests target the right device.`,
+    );
+  }
+  return 'android';
+}
+
 // ─── Runner engine ───
 
 export interface RunOptions {
@@ -795,9 +833,7 @@ async function runSuiteContext(
         ...(opts.device ? { device: opts.device } : {}),
         request: requestContext,
         ...(opts.projectName != null ? { projectName: opts.projectName } : {}),
-        // Always set so platform-conditional tests can't silently skip
-        // both branches when a caller forgets `config.platform`.
-        platform: opts.config.platform ?? 'android',
+        platform: resolvePlatformFixture(opts.config),
         ...(opts.workerFixtures ?? {}),
       };
 
@@ -1279,7 +1315,7 @@ export async function runTestFile(
   const baseFixtures: Record<string, unknown> = {
     ...(opts.device ? { device: opts.device } : {}),
     ...(opts.projectName != null ? { projectName: opts.projectName } : {}),
-    platform: opts.config.platform ?? 'android',
+    platform: resolvePlatformFixture(opts.config),
   };
   let workerFixtures: Record<string, unknown> = opts.workerFixtures ?? {};
   let workerTeardown: (() => Promise<void>) | undefined;
@@ -1359,4 +1395,4 @@ function discoverSuiteContext(ctx: SuiteContext, parentPrefix: string): Discover
 }
 
 /** @internal — exposed for unit testing only. */
-export const _internal = { pushContext, popContext, runSuiteContext };
+export const _internal = { pushContext, popContext, runSuiteContext, resolvePlatformFixture };

@@ -335,23 +335,15 @@ class CommandHandler {
             return ["success": true]
 
         case "clearText":
-            // The clearText backspace loop calls `resolveElement(params)`
-            // between iterations to read a fresh `value`. If the caller
-            // passed `elementId` only, that path returns the cached
-            // snapshot info (whose `text` was captured at original
-            // snapshot time) and the loop exits on iteration 1 thinking
-            // "no progress" even when backspaces are working. Selectors
-            // re-snapshot via the snapshot finder, so we require one.
-            let selectorKeys = ["role", "id", "contentDesc", "className",
-                                "testId", "hint", "textContains", "text",
-                                "xpath"]
-            let hasSelector = selectorKeys.contains { params[$0] != nil }
-            if params["elementId"] != nil && !hasSelector {
-                throw AgentError.invalidRequest(
-                    "clearText requires a selector — elementId-only would " +
-                        "reuse a stale snapshot value between iterations"
-                )
-            }
+            // Either a selector or an elementId is fine — the backspace
+            // loop below reads `XCUIElement.value` directly via the
+            // cached element reference, not via a per-iteration snapshot
+            // re-resolve, so neither a stale-snapshot elementId nor a
+            // text-only selector that goes stale across backspaces can
+            // mislead the loop. (Earlier revisions required a selector
+            // because the loop re-resolved from snapshots; that
+            // requirement was lifted when the loop switched to live
+            // value reads.)
             let element = try resolveElement(params)
             // Refuse to "clear" non-text elements. The backspace loop below
             // assumes `element.text` reflects the editable value; on a
@@ -421,6 +413,45 @@ class CommandHandler {
                 )
             }
 
+            // Resolve the XCUIElement once and read its live `.value`
+            // each iteration instead of re-resolving via selector. The
+            // selector path was prone to a subtle stale-selector bug:
+            // the SDK's `_actionSelector()` can fall back to text-only
+            // addressing when no id/desc/testId is available, which
+            // means the selector matches on the *current* value. After
+            // the first backspace the value changes, the selector no
+            // longer matches, `resolveElement` returns the frozen
+            // pre-clear `element`, the length comparison sees the
+            // stored count, the stall detector trips, and clearText
+            // throws "stalled" on a field it could have cleared.
+            // Reading the XCUIElement reference directly bypasses
+            // selector resolution entirely — the elementId stays
+            // cached for the lifetime of the call, and `.value` is
+            // always live.
+            let xcElement: XCUIElement
+            do {
+                xcElement = try getXCUIElement(element.elementId)
+            } catch {
+                throw AgentError.actionFailed(
+                    "clearText could not access element \(element.elementId) for value reads: \(error)"
+                )
+            }
+            let placeholder = element.hint ?? ""
+
+            // Read the current grapheme-cluster count off the live
+            // XCUIElement. Treat "empty" and "showing placeholder" as
+            // 0 — `XCUIElement.value` returns the placeholder when
+            // the field is empty in iOS's accessibility model, so we
+            // can't distinguish that from a typed value that
+            // happens to equal the placeholder string. Counting
+            // grapheme clusters (rather than UTF-16 length) matches
+            // keyboard backspace granularity for composed emoji.
+            func currentLength() -> Int {
+                let live = (xcElement.value as? String) ?? ""
+                if live.isEmpty || live == placeholder { return 0 }
+                return live.count
+            }
+
             // Fast path: Cmd+A then a single backspace. Works on native
             // UITextField and on simulators with a hardware-keyboard
             // mapping; silently no-ops on RN-wrapped controls (which
@@ -441,8 +472,7 @@ class CommandHandler {
                 Thread.sleep(forTimeInterval: 0.05)
                 actionExecutor.typeTextWithoutFocus("\u{8}")
                 Thread.sleep(forTimeInterval: 0.05)
-                let afterSelectAll = (try? resolveElement(params)) ?? element
-                if (afterSelectAll.text ?? "").isEmpty {
+                if currentLength() == 0 {
                     return ["success": true]
                 }
                 // Cmd+A didn't take (or deleted only one char). Fall
@@ -462,53 +492,20 @@ class CommandHandler {
             var stalled = false
             for _ in 0..<maxIterations {
                 iterationsRun += 1
-                let refreshed = (try? resolveElement(params)) ?? element
-                let displayed = refreshed.text ?? ""
-                finalLength = displayed.count
-                if displayed.isEmpty {
-                    // `deriveDisplayText` returns nil when the field's
-                    // value equals its placeholder, so a snapshot-empty
-                    // `text` could mean either "field is truly empty
-                    // (placeholder showing)" or "user typed content that
-                    // happens to differ from the placeholder but the
-                    // snapshot lagged". Read the live `XCUIElement.value`
-                    // directly to disambiguate. If the live value is
-                    // non-empty AND differs from the placeholder, we have
-                    // residual content the snapshot mis-classified —
-                    // backspace a fresh batch instead of declaring success.
-                    if let xc = try? getXCUIElement(refreshed.elementId),
-                       let live = xc.value as? String,
-                       !live.isEmpty,
-                       live != (refreshed.hint ?? "") {
-                        finalLength = live.count
-                        // Update lastLength so the stall detector sees this
-                        // iteration's length. Without it, lastLength stays
-                        // at .max and the next iteration always passes the
-                        // shrinking check — a true stall on this branch
-                        // would never trip and we'd burn the full
-                        // iteration cap before failing.
-                        lastLength = finalLength
-                        let count = min(finalLength, perIterationCap)
-                        actionExecutor.typeTextWithoutFocus(
-                            String(repeating: "\u{8}", count: count)
-                        )
-                        continue
-                    }
-                    break
-                }
+                let length = currentLength()
+                finalLength = length
+                if length == 0 { break }
                 // Exit only if the value isn't *shrinking*. Comparing whole
                 // strings would prematurely stop on attributed-string /
                 // autocorrect compositions where the visible text changes
                 // but length still drops between batches; comparing length
                 // tolerates that as progress.
-                if displayed.count >= lastLength {
+                if length >= lastLength {
                     stalled = true
                     break
                 }
-                lastLength = displayed.count
-                // String.count counts grapheme clusters — matches keyboard
-                // backspace granularity for ASCII and composed emoji.
-                let count = min(displayed.count, perIterationCap)
+                lastLength = length
+                let count = min(length, perIterationCap)
                 actionExecutor.typeTextWithoutFocus(String(repeating: "\u{8}", count: count))
             }
             // If we didn't fully clear, surface the failure rather than
