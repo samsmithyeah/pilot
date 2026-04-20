@@ -437,7 +437,7 @@ class ElementFinder(private val device: UiDevice) {
                 results.filter { obj ->
                     obj.contentDescription == selector.name ||
                         obj.text == selector.name ||
-                        (obj.findObjects(By.text(selector.name))?.isNotEmpty() == true)
+                        collectDescendantText(obj).contains(selector.name!!)
                 }
             } else {
                 results
@@ -487,30 +487,6 @@ class ElementFinder(private val device: UiDevice) {
         }
 
         return byHint
-    }
-
-    /**
-     * Compiled class-name pattern for a role. Public so WaitEngine can use
-     * the same matcher during the wait phase as ElementFinder uses for the
-     * find phase.
-     *
-     * Throws [InvalidSelectorException] for unknown roles — matching the
-     * behavior of [buildBySelector] so wait and find fail with the same
-     * actionable message rather than wait silently degrading to the slow
-     * `waitForIdle` fallback (which then masks the typo until the find
-     * phase finally throws).
-     */
-    fun roleClassPattern(role: String): java.util.regex.Pattern {
-        val lowered = role.lowercase()
-        val normalized = ROLE_ALIASES[lowered] ?: lowered
-        val classNames =
-            roleClassMap[normalized]
-                ?: throw InvalidSelectorException(
-                    "Unknown role: '$role'. Known roles: ${roleClassMap.keys.joinToString()}",
-                )
-        return java.util.regex.Pattern.compile(
-            classNames.joinToString("|") { Regex.escape(it) },
-        )
     }
 
     private fun buildBySelector(selector: ElementSelector): BySelector? {

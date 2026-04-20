@@ -65,7 +65,7 @@ class WaitEngine(private val device: UiDevice) {
         val startTime = SystemClock.uptimeMillis()
 
         // Build a BySelector for event-driven waiting
-        val bySelector = buildWaitSelector(selector, elementFinder)
+        val bySelector = buildWaitSelector(selector)
 
         if (bySelector != null) {
             // Phase 1: Wait for the element to exist using event-driven Until.hasObject
@@ -147,10 +147,7 @@ class WaitEngine(private val device: UiDevice) {
      * Build a BySelector from an ElementSelector for use with Until conditions.
      * Returns null if the selector type cannot be expressed as a BySelector.
      */
-    private fun buildWaitSelector(
-        selector: ElementSelector,
-        elementFinder: ElementFinder,
-    ): androidx.test.uiautomator.BySelector? {
+    private fun buildWaitSelector(selector: ElementSelector): androidx.test.uiautomator.BySelector? {
         return when {
             selector.text != null -> By.text(selector.text)
             selector.textContains != null -> By.textContains(selector.textContains)
