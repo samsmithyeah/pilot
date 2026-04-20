@@ -1,5 +1,6 @@
-import { useState, useRef, useCallback } from 'preact/hooks';
+import { useState, useRef, useCallback, useEffect } from 'preact/hooks';
 import type { ActionTraceEvent, AssertionTraceEvent } from '../../trace/types.js';
+import { PickButton } from './SelectorPlayground.js';
 
 // ─── Injected Styles ───
 
@@ -10,6 +11,7 @@ const SCREENSHOT_STYLES = `
   .bounds-overlay { position: absolute; pointer-events: none; border-radius: 8px; overflow: hidden; }
   .bounds-rect { position: absolute; border: 2px solid var(--color-accent); background: rgba(79,193,255,0.15); border-radius: 2px; }
   .bounds-rect-hierarchy { position: absolute; border: 2px solid var(--color-success); background: rgba(78,201,176,0.15); border-radius: 2px; }
+  .bounds-rect-selector { position: absolute; border: 2px solid #c084fc; background: rgba(192,132,252,0.18); border-radius: 2px; }
   .bounds-point { position: absolute; width: 16px; height: 16px; margin-left: -8px; margin-top: -8px; border-radius: 50%; background: rgba(255,80,80,0.5); border: 2px solid #ff5050; box-shadow: 0 0 8px rgba(255,80,80,0.4); }
 `;
 
@@ -28,7 +30,12 @@ interface Props {
   event: ActionTraceEvent | AssertionTraceEvent | undefined
   screenshots: Map<string, string>
   highlightBounds?: { left: number; top: number; right: number; bottom: number } | null
+  selectorHighlights?: { left: number; top: number; right: number; bottom: number }[]
+  hoverBounds?: { left: number; top: number; right: number; bottom: number } | null
   onScreenshotClick?: (point: { x: number; y: number }) => void
+  onScreenshotHover?: (point: { x: number; y: number } | null) => void
+  pickMode?: boolean
+  onPickModeToggle?: () => void
   /** Device pixel ratio — bounds are in logical points, screenshots in pixels. */
   devicePixelRatio?: number
 }
@@ -40,13 +47,25 @@ interface NaturalSize {
   height: number
 }
 
-export function ScreenshotPanel({ event, screenshots, highlightBounds, onScreenshotClick, devicePixelRatio }: Props) {
+export function ScreenshotPanel({ event, screenshots, highlightBounds, selectorHighlights, hoverBounds, onScreenshotClick, onScreenshotHover, pickMode, onPickModeToggle, devicePixelRatio }: Props) {
   injectStyles();
 
   const [tab, setTab] = useState<ScreenshotTab>('action');
   const [scale, setScale] = useState(1);
   const [naturalSize, setNaturalSize] = useState<NaturalSize | null>(null);
+  const [renderedSize, setRenderedSize] = useState<{ width: number; height: number } | null>(null);
   const imgRef = useRef<HTMLImageElement>(null);
+
+  // Track rendered image size via ResizeObserver so overlays stay in sync
+  useEffect(() => {
+    const img = imgRef.current;
+    if (!img) return;
+    const update = () => setRenderedSize({ width: img.clientWidth, height: img.clientHeight });
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(img);
+    return () => ro.disconnect();
+  }, [event, tab]);
 
   const handleWheel = useCallback((e: WheelEvent) => {
     e.preventDefault();
@@ -60,19 +79,37 @@ export function ScreenshotPanel({ event, screenshots, highlightBounds, onScreens
     const img = imgRef.current;
     if (img) {
       setNaturalSize({ width: img.naturalWidth, height: img.naturalHeight });
+      setRenderedSize({ width: img.clientWidth, height: img.clientHeight });
     }
   }, []);
 
-  const handleImageClick = useCallback((e: MouseEvent) => {
-    if (!onScreenshotClick || !imgRef.current || !naturalSize) return;
+  const toNaturalCoords = useCallback((e: MouseEvent): { x: number; y: number } | null => {
+    if (!imgRef.current || !naturalSize) return null;
     const img = imgRef.current;
     const rect = img.getBoundingClientRect();
     const clickX = e.clientX - rect.left;
     const clickY = e.clientY - rect.top;
-    const naturalX = Math.round(clickX * (naturalSize.width / rect.width));
-    const naturalY = Math.round(clickY * (naturalSize.height / rect.height));
-    onScreenshotClick({ x: naturalX, y: naturalY });
-  }, [onScreenshotClick, naturalSize]);
+    return {
+      x: Math.round(clickX * (naturalSize.width / rect.width)),
+      y: Math.round(clickY * (naturalSize.height / rect.height)),
+    };
+  }, [naturalSize]);
+
+  const handleImageClick = useCallback((e: MouseEvent) => {
+    if (!onScreenshotClick) return;
+    const point = toNaturalCoords(e);
+    if (point) onScreenshotClick(point);
+  }, [onScreenshotClick, toNaturalCoords]);
+
+  const handleImageMouseMove = useCallback((e: MouseEvent) => {
+    if (!onScreenshotHover) return;
+    const point = toNaturalCoords(e);
+    onScreenshotHover(point);
+  }, [onScreenshotHover, toNaturalCoords]);
+
+  const handleImageMouseLeave = useCallback(() => {
+    onScreenshotHover?.(null);
+  }, [onScreenshotHover]);
 
   if (!event) {
     return (
@@ -132,7 +169,10 @@ export function ScreenshotPanel({ event, screenshots, highlightBounds, onScreens
           <div class="screenshot-zoom-label">{Math.round(scale * 100)}%</div>
         )}
       </div>
-      <div class="screenshot-container" onWheel={handleWheel}>
+      <div class="screenshot-container" onWheel={handleWheel} style={{ position: 'relative' }}>
+        {onPickModeToggle && (
+          <PickButton active={!!pickMode} onToggle={onPickModeToggle} />
+        )}
         {currentUrl ? (
           <div class="screenshot-image-wrapper" style={scale !== 1 ? { transform: `scale(${scale})`, transformOrigin: 'center center' } : undefined}>
             <img
@@ -141,24 +181,44 @@ export function ScreenshotPanel({ event, screenshots, highlightBounds, onScreens
               alt={`Screenshot ${tab}`}
               onLoad={handleImageLoad}
               onClick={handleImageClick}
+              onMouseMove={handleImageMouseMove}
+              onMouseLeave={handleImageMouseLeave}
               style={onScreenshotClick ? { cursor: 'crosshair' } : undefined}
             />
-            {showOverlay && naturalSize && imgRef.current && (
+            {showOverlay && naturalSize && renderedSize && (
               <BoundsOverlay
                 bounds={bounds}
                 point={point}
                 naturalSize={naturalSize}
-                renderedWidth={imgRef.current.clientWidth}
-                renderedHeight={imgRef.current.clientHeight}
+                renderedWidth={renderedSize.width}
+                renderedHeight={renderedSize.height}
                 devicePixelRatio={devicePixelRatio}
               />
             )}
-            {highlightBounds && naturalSize && imgRef.current && (
+            {highlightBounds && naturalSize && renderedSize && (
               <HierarchyHighlightOverlay
                 bounds={highlightBounds}
                 naturalSize={naturalSize}
-                renderedWidth={imgRef.current.clientWidth}
-                renderedHeight={imgRef.current.clientHeight}
+                renderedWidth={renderedSize.width}
+                renderedHeight={renderedSize.height}
+                devicePixelRatio={devicePixelRatio}
+              />
+            )}
+            {hoverBounds && naturalSize && renderedSize && (
+              <HierarchyHighlightOverlay
+                bounds={hoverBounds}
+                naturalSize={naturalSize}
+                renderedWidth={renderedSize.width}
+                renderedHeight={renderedSize.height}
+                devicePixelRatio={devicePixelRatio}
+              />
+            )}
+            {selectorHighlights && selectorHighlights.length > 0 && naturalSize && renderedSize && (
+              <SelectorHighlightOverlay
+                boundsList={selectorHighlights}
+                naturalSize={naturalSize}
+                renderedWidth={renderedSize.width}
+                renderedHeight={renderedSize.height}
                 devicePixelRatio={devicePixelRatio}
               />
             )}
@@ -255,6 +315,45 @@ function HierarchyHighlightOverlay({ bounds, naturalSize, renderedWidth, rendere
           height: `${(bounds.bottom - bounds.top) * scaleY}px`,
         }}
       />
+    </div>
+  );
+}
+
+// ─── Selector Highlight Overlay (multiple bounds) ───
+
+interface SelectorHighlightProps {
+  boundsList: { left: number; top: number; right: number; bottom: number }[]
+  naturalSize: NaturalSize
+  renderedWidth: number
+  renderedHeight: number
+  devicePixelRatio?: number
+}
+
+function SelectorHighlightOverlay({ boundsList, naturalSize, renderedWidth, renderedHeight, devicePixelRatio }: SelectorHighlightProps) {
+  const dpr = devicePixelRatio ?? 1;
+  const scaleX = renderedWidth / naturalSize.width * dpr;
+  const scaleY = renderedHeight / naturalSize.height * dpr;
+
+  return (
+    <div
+      class="bounds-overlay"
+      style={{
+        width: `${renderedWidth}px`,
+        height: `${renderedHeight}px`,
+      }}
+    >
+      {boundsList.map((bounds, i) => (
+        <div
+          key={i}
+          class="bounds-rect-selector"
+          style={{
+            left: `${bounds.left * scaleX}px`,
+            top: `${bounds.top * scaleY}px`,
+            width: `${(bounds.right - bounds.left) * scaleX}px`,
+            height: `${(bounds.bottom - bounds.top) * scaleY}px`,
+          }}
+        />
+      ))}
     </div>
   );
 }
