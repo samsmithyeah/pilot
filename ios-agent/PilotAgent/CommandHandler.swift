@@ -152,6 +152,15 @@ class CommandHandler {
     // MARK: - Element Resolution
 
     /// Resolve an element from params, supporting both elementId (cached) and selector-based lookup.
+    ///
+    /// **Cost:** elementId path is several live `XCUIElement` property
+    /// reads (~6–10 IPC) via `getElementInfo`; selector path is one
+    /// `app.snapshot()` IPC + tree walk. The selector path is usually
+    /// cheaper for repeated lookups against a fresh state because it
+    /// re-reads the whole tree in one IPC instead of N attribute IPCs.
+    /// Loops that re-resolve the same element across iterations (e.g.
+    /// the `clearText` backspace loop) should prefer the selector
+    /// form so each pass sees a fresh snapshot.
     private func resolveElement(_ params: [String: Any]) throws -> ElementInfo {
         if let elementId = params["elementId"] as? String {
             // Try snapshot finder cache first, then fall back to old cache
@@ -166,6 +175,13 @@ class CommandHandler {
     }
 
     /// Get the XCUIElement for an element ID, checking both caches.
+    ///
+    /// **Cost:** O(1) cache lookup, no IPC. The IPC happens later when
+    /// the caller reads a property off the returned element — each
+    /// `.value`, `.label`, `.frame`, `.isHittable` access crosses
+    /// the test runner ↔ app boundary. Batch property reads or
+    /// prefer `resolveElement` (which dumps everything in one
+    /// snapshot pass) when you need more than one attribute.
     private func getXCUIElement(_ elementId: String) throws -> XCUIElement {
         if let elem = try? snapshotFinder.getElement(elementId) {
             return elem
@@ -287,6 +303,13 @@ class CommandHandler {
 
         case "typeText":
             let text = params["text"] as? String ?? ""
+            // No-op fast path: typing an empty string would still
+            // resolve the element, tap to focus, and burn a 0.5s
+            // keyboard-wait sleep before passing "" to the event
+            // synthesizer (which is itself a no-op). Skip everything.
+            if text.isEmpty {
+                return ["success": true]
+            }
             let selectorKeys = ["role", "id", "contentDesc", "className", "testId", "hint", "textContains", "elementId"]
             let hasSelector = selectorKeys.contains { params[$0] != nil }
             if hasSelector {
@@ -312,21 +335,174 @@ class CommandHandler {
             return ["success": true]
 
         case "clearText":
+            // The backspace loop re-resolves via `resolveElement(params)`
+            // each iteration to get a fresh snapshot-based text value.
+            // Reading `XCUIElement.value` directly was tried (cold-10 #1)
+            // and reverted (32b0fa7): the cached XCUIElement query uses
+            // `descendants(matching: .any).firstMatch` without a type
+            // filter, so it can resolve to a non-input sibling (e.g. an
+            // "Email" header) instead of the textfield — making the loop
+            // think the field is already empty. The snapshot path's
+            // role/type filter avoids this.
             let element = try resolveElement(params)
-            // Tap to focus, triple-tap to select all, then delete
+            // Refuse to "clear" non-text elements. The backspace loop below
+            // assumes `element.text` reflects the editable value; on a
+            // wrapper / button / static text it would compare against the
+            // accessibility label, decide there's no progress, and exit
+            // having typed up to one batch of backspaces — silently
+            // mis-targeting whichever field happens to be focused.
+            let textFieldClassNames: Set<String> = [
+                "XCUIElementTypeTextField",
+                "XCUIElementTypeSecureTextField",
+                "XCUIElementTypeTextView",
+                "XCUIElementTypeSearchField",
+            ]
+            guard textFieldClassNames.contains(element.className) else {
+                throw AgentError.actionFailed(
+                    "clearText only works on text input elements (got className=\(element.className))"
+                )
+            }
+            // No-op fast path: if the snapshot already shows the field
+            // empty AND the live `XCUIElement.value` agrees (placeholder-
+            // mis-classification disambiguation, mirroring the iter-1
+            // guard in the backspace loop below), skip everything —
+            // tap-to-focus, Cmd+A, the resolve round-trips, all of it.
+            // Test setup commonly calls `clear()` defensively on every
+            // field; a no-op clear used to cost ~150ms per call (one tap,
+            // 0.1s wait, Cmd+A, 0.05s wait, backspace, 0.05s wait,
+            // resolveElement). For a setup that pre-clears a half-dozen
+            // fields that adds up to roughly a second per test.
+            if (element.text ?? "").isEmpty {
+                let xc = try? getXCUIElement(element.elementId)
+                if let xc = xc {
+                    let live = (xc.value as? String) ?? ""
+                    if live.isEmpty || live == (element.hint ?? "") {
+                        return ["success": true]
+                    }
+                }
+                // If getXCUIElement failed, don't trust a potentially
+                // stale snapshot — fall through and attempt the clear.
+            }
+            // iOS text fields don't have a reliable "select all" gesture
+            // (triple-tap selects a word; Cmd+A often misses on RN-wrapped
+            // controls). Focus the field, try Cmd+A+Delete as a fast path,
+            // then fall through to per-character backspaces if the field
+            // isn't yet empty (common on RN wrappers that intercept Cmd+A).
+            // We loop the backspace path because autocorrect / suggestion
+            // bar / RN bridge updates can grow or shrink the value between
+            // batches, so a single batch sized off the initial snapshot is
+            // brittle.
             if let center = snapshotCenter(for: element.elementId) {
-                // Triple-tap to select all text in the field
                 actionExecutor.tapCoordinates(x: Int(center.x), y: Int(center.y))
-                Thread.sleep(forTimeInterval: 0.05)
-                actionExecutor.tapCoordinates(x: Int(center.x), y: Int(center.y))
-                Thread.sleep(forTimeInterval: 0.03)
-                actionExecutor.tapCoordinates(x: Int(center.x), y: Int(center.y))
-                Thread.sleep(forTimeInterval: 0.05)
-                // Delete selected text
-                actionExecutor.typeTextWithoutFocus("\u{8}") // backspace
+                Thread.sleep(forTimeInterval: 0.1)
+            } else if let xcElem = try? getXCUIElement(element.elementId), xcElem.isHittable {
+                xcElem.tap()
+                // Match the snapshot path's 0.1s wait so the upcoming
+                // Cmd+A / backspace keypress doesn't race the field
+                // becoming first-responder.
+                Thread.sleep(forTimeInterval: 0.1)
             } else {
-                let xcElem = try getXCUIElement(element.elementId)
-                try actionExecutor.clearText(xcElem)
+                // Neither path could focus the field. Sending backspaces with
+                // nothing focused either silently no-ops or mis-targets
+                // whichever element happens to be focused — both worse than
+                // failing loudly.
+                throw AgentError.actionFailed(
+                    "clearText could not focus element \(element.elementId): " +
+                        "snapshot bounds were off-screen and the XCUIElement is not hittable"
+                )
+            }
+
+            // Fast path: Cmd+A then a single backspace. Works on native
+            // UITextField and on simulators with a hardware-keyboard
+            // mapping; silently no-ops on RN-wrapped controls (which
+            // typically don't honor Cmd+A) where we fall through to the
+            // per-character loop.
+            //
+            // We deliberately use `\u{8}` (backspace) instead of
+            // `XCUIKeyboardKey.delete` because:
+            //   - if Cmd+A took, the keyboard backspace deletes the
+            //     entire selection — fast clear in one event
+            //   - if Cmd+A didn't take, the cursor is at the end and
+            //     backspace deletes one trailing character. That's
+            //     still progress; the loop below handles the rest.
+            // Sending Delete after a failed selection would either
+            // forward-delete (data loss past the cursor) or no-op
+            // depending on the IME, hence the safer backspace.
+            if EventSynthesizer.keyPress(key: "a", modifiers: .command) {
+                Thread.sleep(forTimeInterval: 0.05)
+                actionExecutor.typeTextWithoutFocus("\u{8}")
+                Thread.sleep(forTimeInterval: 0.05)
+                let afterSelectAll = (try? resolveElement(params)) ?? element
+                if (afterSelectAll.text ?? "").isEmpty {
+                    return ["success": true]
+                }
+                // Cmd+A didn't take (or deleted only one char). Fall
+                // through to the per-character backspace loop, which
+                // re-reads the value before each batch.
+            }
+
+            // Cap iterations so a misbehaving field can't hang the agent. The
+            // per-iteration cap of 256 keystrokes covers any realistic field
+            // length; multiple iterations let us mop up post-autocorrect
+            // residue.
+            //
+            // We re-resolve via the snapshot finder rather than reading
+            // `XCUIElement.value` directly: the snapshot path applies the
+            // selector's role/type filter during its tree walk, so it
+            // matches the right textfield. The cached XCUIElement query
+            // is built with `descendants(matching: .any).firstMatch` (no
+            // type constraint, to support RN's `.other`-typed buttons),
+            // and `firstMatch` can resolve to the wrong element when
+            // multiple nodes share a label — e.g. an "Email" header label
+            // sitting above the email textfield will be picked instead of
+            // the textfield, and its missing `.value` then makes the loop
+            // think the field is already empty.
+            let maxIterations = 16
+            let perIterationCap = 256
+            var lastLength: Int = .max
+            var finalLength: Int = .max
+            var iterationsRun = 0
+            var stalled = false
+            for _ in 0..<maxIterations {
+                iterationsRun += 1
+                let refreshed = (try? resolveElement(params)) ?? element
+                let displayed = refreshed.text ?? ""
+                finalLength = displayed.count
+                if displayed.isEmpty { break }
+                // Exit only if the value isn't *shrinking*. Comparing whole
+                // strings would prematurely stop on attributed-string /
+                // autocorrect compositions where the visible text changes
+                // but length still drops between batches; comparing length
+                // tolerates that as progress.
+                if displayed.count >= lastLength {
+                    stalled = true
+                    break
+                }
+                lastLength = displayed.count
+                // String.count counts grapheme clusters — matches keyboard
+                // backspace granularity for ASCII and composed emoji.
+                let count = min(displayed.count, perIterationCap)
+                actionExecutor.typeTextWithoutFocus(String(repeating: "\u{8}", count: count))
+            }
+            // If we didn't fully clear, surface the failure rather than
+            // silently returning success with residual text in the field.
+            // Distinguish "stalled" (backspaces aren't shrinking the value —
+            // the field is rejecting input or the snapshot is stale) from
+            // "hit the iteration cap" (the field is genuinely larger than
+            // maxIterations × perIterationCap can clear) so the operator
+            // knows whether to investigate the field or raise the cap.
+            if finalLength > 0 {
+                let reason = stalled
+                    ? "backspace stopped shrinking the value " +
+                        "(field rejected input or snapshot is stale)"
+                    : "exhausted the \(maxIterations)-iteration cap " +
+                        "(\(maxIterations * perIterationCap) keystrokes); " +
+                        "field is larger than expected"
+                throw AgentError.actionFailed(
+                    "clearText could not empty element \(element.elementId): " +
+                        "\(finalLength) grapheme cluster(s) remain after " +
+                        "\(iterationsRun) iteration\(iterationsRun == 1 ? "" : "s") — \(reason)"
+                )
             }
             return ["success": true]
 

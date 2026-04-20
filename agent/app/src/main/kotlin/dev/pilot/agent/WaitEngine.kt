@@ -18,6 +18,9 @@ class WaitEngine(private val device: UiDevice) {
         private const val STABILITY_WINDOW_MS = 100L
         private const val DEFAULT_IDLE_TIMEOUT_MS = 5000L
         private const val DEFAULT_ELEMENT_TIMEOUT_MS = 10000L
+
+        /** Polling interval used when re-trying findElement inside the wait loop. */
+        private const val FIND_POLL_INTERVAL_MS = 200L
     }
 
     /**
@@ -115,14 +118,28 @@ class WaitEngine(private val device: UiDevice) {
             device.waitForIdle(timeoutMs.coerceAtMost(2000))
         }
 
-        // Final lookup to return a cached ElementInfo
-        try {
-            return elementFinder.findElement(selector)
-        } catch (e: ElementNotFoundException) {
-            throw TimeoutException(
-                "Timed out after ${timeoutMs}ms: element not found after waiting. " +
-                    "Selector: ${describeSelector(selector)}",
-            )
+        // Final lookup. The BySelector built above is broader than the
+        // full selector for hint/role queries (it matches *any* EditText
+        // for a hint-only wait, *any* element of the role's class set
+        // for a role-only wait), so a `hasObject` hit just means a
+        // candidate exists — not that the specific match the caller
+        // wants is present yet. Poll findElement until the specific
+        // match appears or we run out of time, otherwise this would
+        // throw "not found" within milliseconds whenever a sibling
+        // candidate happened to render before the targeted one.
+        while (true) {
+            try {
+                return elementFinder.findElement(selector)
+            } catch (_: ElementNotFoundException) {
+                val remaining = timeoutMs - (SystemClock.uptimeMillis() - startTime)
+                if (remaining <= 0) {
+                    throw TimeoutException(
+                        "Timed out after ${timeoutMs}ms: element not found after waiting. " +
+                            "Selector: ${describeSelector(selector)}",
+                    )
+                }
+                device.waitForIdle(FIND_POLL_INTERVAL_MS.coerceAtMost(remaining))
+            }
         }
     }
 
@@ -137,7 +154,28 @@ class WaitEngine(private val device: UiDevice) {
             selector.contentDesc != null -> By.desc(selector.contentDesc)
             selector.id != null -> By.res(selector.id)
             selector.className != null -> By.clazz(selector.className)
-            selector.testId != null -> By.desc("testid:${selector.testId}")
+            // React Native's testID surfaces as resource-id in the hierarchy,
+            // matching the lookup path in ElementFinder.buildBySelector().
+            selector.testId != null -> By.res(selector.testId)
+            // Hint matches happen via post-filter in ElementFinder; for the
+            // wait phase, just block until any EditText variant is present
+            // so we don't fall through to the slow waitForIdle path. We
+            // share the candidate pattern with ElementFinder so the wait
+            // and the find resolve the same set of widgets (plain EditText,
+            // AppCompat, MaterialTextInput, etc.).
+            selector.hint != null -> By.clazz(ElementFinder.EDIT_TEXT_HINT_CLASS_PATTERN)
+            // Role waits intentionally fall through to the slow
+            // waitForIdle + poll path. The find phase resolves roles via
+            // both the class map AND `extractRoleDescription` (RN /
+            // accessibility-trait channel), but a `By.clazz` short-circuit
+            // here only sees the class map. That made wait and find
+            // disagree about what `role: "heading"` means: a RN
+            // `<View accessibilityRole="header">` rendered as
+            // `ReactViewGroup` would time out in the wait phase even
+            // though `findElement` could resolve it. The resulting
+            // TimeoutException never reached the find-phase polling
+            // loop. Falling through unifies the two paths at the cost
+            // of a one-time `waitForIdle` settle.
             else -> null
         }
     }

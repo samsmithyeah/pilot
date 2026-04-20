@@ -18,7 +18,7 @@ import {
 } from '../runner.js';
 import type { PilotConfig } from '../config.js';
 
-const { pushContext, popContext, runSuiteContext } = _internal;
+const { pushContext, popContext, runSuiteContext, resolvePlatformFixture } = _internal;
 
 /** Minimal config sufficient for runSuiteContext. */
 function makeConfig(overrides: Partial<PilotConfig> = {}): PilotConfig {
@@ -490,5 +490,56 @@ describe('beforeAll failure marks all tests as failed', () => {
     expect(flat[0].status).toBe('failed');
     expect(flat[0].fullName).toBe('root > inner > nested-test');
     expect(flat[0].error?.message).toBe('boom');
+  });
+});
+
+// ─── platform fixture resolution ───
+
+describe('resolvePlatformFixture()', () => {
+  it('returns the explicit platform when set', () => {
+    expect(resolvePlatformFixture(makeConfig({ platform: 'ios' }))).toBe('ios');
+    expect(resolvePlatformFixture(makeConfig({ platform: 'android' }))).toBe('android');
+  });
+
+  it('defaults to android when no platform indicators are present', () => {
+    expect(resolvePlatformFixture(makeConfig())).toBe('android');
+  });
+
+  it('throws when iOS-only `app` is set without explicit platform', () => {
+    expect(() => resolvePlatformFixture(makeConfig({ app: '/path/to/App.app' })))
+      .toThrowError(/iOS-only field\(s\) \[app\].*platform.*not set/);
+  });
+
+  it('throws when iOS-only `simulator` is set without explicit platform', () => {
+    expect(() => resolvePlatformFixture(makeConfig({ simulator: 'iPhone 17' })))
+      .toThrowError(/simulator/);
+  });
+
+  it('throws when iOS-only `iosXctestrun` is set without explicit platform', () => {
+    expect(() => resolvePlatformFixture(makeConfig({ iosXctestrun: '/x.xctestrun' })))
+      .toThrowError(/iosXctestrun/);
+  });
+
+  it('lists all present iOS indicators in the error message', () => {
+    expect(() => resolvePlatformFixture(makeConfig({
+      app: '/path/to/App.app',
+      simulator: 'iPhone 17',
+    }))).toThrowError(/\[app, simulator\]/);
+  });
+
+  it('does not throw when iOS indicators are present AND platform is explicitly ios', () => {
+    expect(() => resolvePlatformFixture(makeConfig({
+      platform: 'ios',
+      app: '/path/to/App.app',
+      simulator: 'iPhone 17',
+    }))).not.toThrow();
+  });
+
+  it('does not throw when iOS indicators are present AND platform is explicitly android', () => {
+    // Pathological but legal — caller knows what they want.
+    expect(() => resolvePlatformFixture(makeConfig({
+      platform: 'android',
+      app: '/path/to/App.app',
+    }))).not.toThrow();
   });
 });

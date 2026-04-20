@@ -138,6 +138,10 @@ const ROLE_CLASS_MAP: Record<string, string[]> = {
     "android.widget.TabWidget",
     "com.google.android.material.tabs.TabLayout",
   ],
+  searchfield: [
+    "android.widget.SearchView",
+    "androidx.appcompat.widget.SearchView",
+  ],
 };
 
 const EDITABLE_CLASSES = new Set(ROLE_CLASS_MAP["textfield"]);
@@ -756,6 +760,7 @@ function createAssertions(
     async toHaveRole(role, options) {
       const timeout = timeoutFor(options);
       const desc = selectorDescription(handle);
+      const expected = normalizeRole(role);
       let lastRole = "";
       const result = await poll(async () => {
         try {
@@ -764,7 +769,7 @@ function createAssertions(
             // Use the role field from the agent if available, otherwise compute from className
             lastRole =
               res.element.role || classNameToRole(res.element.className);
-            return lastRole === role;
+            return normalizeRole(lastRole) === expected;
           }
           return false;
         } catch {
@@ -904,6 +909,41 @@ function createAssertions(
  */
 function classNameToRole(className: string): string {
   return CLASS_TO_ROLE_MAP[className] || "";
+}
+
+/**
+ * Cross-platform role aliases. Lets `toHaveRole("header")` succeed when the
+ * agent reports "heading" (and vice versa), and similarly for "slider" /
+ * "seekbar".
+ *
+ * **Parity contract — three places, one canonical list:**
+ * 1. This file (SDK side, used by `toHaveRole` normalization).
+ * 2. `agent/.../ElementFinder.kt` (Android `ROLE_ALIASES`, used during
+ *    role-description extraction).
+ * 3. `ios-agent/PilotAgent/RoleMapping.swift` (`roleAliases`, used by
+ *    `RoleMapping.elementTypes(for:)`).
+ *
+ * Drift here causes silent per-platform mismatch — the SDK normalizes
+ * one way, the agent matches the other, and `toHaveRole` either fails
+ * loudly or (worse) matches the wrong elements. The parity test in
+ * `expect.test.ts > ROLE_ALIASES parity` pins the SDK side; if you add
+ * or rename an alias, update all three files AND that test.
+ */
+const ROLE_ALIASES: Record<string, string> = {
+  header: "heading",
+  heading: "heading",
+  slider: "seekbar",
+  seekbar: "seekbar",
+  // RN's accessibilityRole="search" surfaces as a role description of
+  // "search" via extractRoleDescription; normalize so toHaveRole("searchfield")
+  // matches.
+  search: "searchfield",
+  searchfield: "searchfield",
+};
+
+function normalizeRole(role: string): string {
+  const lower = role.toLowerCase();
+  return ROLE_ALIASES[lower] ?? lower;
 }
 
 // ─── PILOT-42: Generic value assertions ───

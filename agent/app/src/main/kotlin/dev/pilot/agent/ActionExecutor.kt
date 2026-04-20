@@ -11,6 +11,20 @@ import androidx.test.uiautomator.Until
  * Executes UI actions: tap, long press, text input, swipe, scroll, and key presses.
  */
 class ActionExecutor(private val device: UiDevice) {
+    /** Tracks ASCII control-char code points we've already warned about,
+     *  so the log fires once per code point per agent lifetime. */
+    private val warnedDroppedControlChars = java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
+
+    private fun warnDroppedControlChar(code: Int) {
+        if (warnedDroppedControlChars.add(code)) {
+            android.util.Log.w(
+                "ActionExecutor",
+                "typeTextWithoutFocus dropping ASCII control char 0x${code.toString(16)} — " +
+                    "`input text` would garble it. Only \\n, \\t, \\b are routed as key events.",
+            )
+        }
+    }
+
     companion object {
         /** Interval between taps for double-tap gesture. */
         private const val DOUBLE_TAP_INTERVAL_MS = 40L
@@ -106,17 +120,88 @@ class ActionExecutor(private val device: UiDevice) {
 
     /**
      * Type text without targeting a specific element.
-     * Uses shell command for reliable text input.
+     *
+     * Uses `input text` for printable runs and `input keyevent` for control
+     * characters (`\n`, `\t`, `\b`, `\r`) so those reach the focused field
+     * instead of being silently dropped by the shell-tokenizer.
+     *
+     * IMPORTANT: do NOT add literal quotes around the text.
+     * `UiDevice.executeShellCommand` does NOT route through a shell. The
+     * call chain is:
+     *   UiDevice.executeShellCommand
+     *     → UiAutomation.executeShellCommand
+     *     → UiAutomationConnection.executeShellCommand
+     *     → Runtime.getRuntime().exec(command)
+     * and `Runtime.exec(String)` tokenizes on whitespace via StringTokenizer
+     * before calling `execve()` — it never invokes `/bin/sh`. Shell
+     * metacharacters (`&`, `;`, `|`, `$`, `` ` ``, `(`, `)`, `\`) therefore
+     * survive verbatim and any quote characters we add ourselves become
+     * literal input (the original PILOT-133 bug). Spaces inside a printable
+     * run are converted to `%s`, which `input text` interprets as a literal
+     * space. The selector-regressions.test.ts metachar test locks this in.
+     *
+     * KNOWN LIMITATION: a literal `%s` substring in `text` is indistinguishable
+     * from an encoded space and will type a space instead. Real-world test
+     * data rarely includes `%s`, but if you need to type that exact pair,
+     * use `pressKey()` or break the input up.
      */
     fun typeTextWithoutFocus(text: String) {
-        // Escape special characters for shell input
-        val escaped =
-            text.replace("\\", "\\\\")
-                .replace("\"", "\\\"")
-                .replace("$", "\\$")
-                .replace("`", "\\`")
-                .replace(" ", "%s")
-        device.executeShellCommand("input text \"${escaped.replace("%s", "\\ ")}\"")
+        if (text.isEmpty()) return
+        val buffer = StringBuilder()
+        // Batch consecutive control chars into a single
+        // `input keyevent KEYCODE_X KEYCODE_X ...` call. Each shell
+        // invocation spawns a process, so a long backspace string
+        // (clearText sends one per character of current value) was
+        // previously O(N) process spawns.
+        val pendingKeys = mutableListOf<String>()
+
+        fun flushPendingKeys() {
+            if (pendingKeys.isEmpty()) return
+            device.executeShellCommand("input keyevent ${pendingKeys.joinToString(" ")}")
+            pendingKeys.clear()
+        }
+        for (ch in text) {
+            val keyCode =
+                when (ch) {
+                    '\n' -> "KEYCODE_ENTER"
+                    '\t' -> "KEYCODE_TAB"
+                    '\b' -> "KEYCODE_DEL" // '\b' is U+0008 (backspace)
+                    '\r' -> {
+                        warnDroppedControlChar(0x0D)
+                        continue
+                    }
+                    else -> ""
+                }
+            if (keyCode.isNotEmpty()) {
+                if (buffer.isNotEmpty()) {
+                    flushPrintableRun(buffer)
+                }
+                pendingKeys.add(keyCode)
+            } else if (ch.code < 0x20) {
+                // Drop other ASCII control codes (NUL, BEL, vertical tab, etc.).
+                // `input text` would garble them; routing each to a key event
+                // is not generally meaningful. Specific cases (\n, \t, \b)
+                // are handled above. Log the first occurrence so silent
+                // drops surface if a real-world input starts relying on
+                // one of these bytes.
+                warnDroppedControlChar(ch.code)
+                continue
+            } else {
+                if (pendingKeys.isNotEmpty()) flushPendingKeys()
+                buffer.append(ch)
+            }
+        }
+        flushPendingKeys()
+        if (buffer.isNotEmpty()) {
+            flushPrintableRun(buffer)
+        }
+    }
+
+    private fun flushPrintableRun(buffer: StringBuilder) {
+        if (buffer.isEmpty()) return
+        val tokenized = buffer.toString().replace(" ", "%s")
+        device.executeShellCommand("input text $tokenized")
+        buffer.setLength(0)
     }
 
     /**

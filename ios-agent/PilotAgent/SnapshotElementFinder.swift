@@ -38,6 +38,13 @@ class SnapshotElementFinder {
     // MARK: - Snapshot-based finding
 
     /// Find a single element matching the selector using snapshot.
+    ///
+    /// **Cost:** one `app.snapshot()` IPC (~50ms steady state, up to
+    /// ~1s on first call before the accessibility connection is warm) +
+    /// one O(N) tree walk + one O(N) KVC pass for trait annotation,
+    /// where N is total accessibility-tree node count. See
+    /// `findElements` for the underlying budget; `findElement` adds no
+    /// extra IPC, just a `.first` on the result list.
     func findElement(_ selector: ElementSelector, parentId: String? = nil) throws -> ElementInfo {
         let elements = try findElements(selector, parentId: parentId)
         guard let first = elements.first else {
@@ -47,6 +54,17 @@ class SnapshotElementFinder {
     }
 
     /// Find all elements matching the selector using snapshot.
+    ///
+    /// **Cost:** 1 × `app.snapshot()` IPC (the only IPC on the happy
+    /// path; ~50ms steady state, up to 5×0.2s retries before the
+    /// accessibility connection is established on cold start) +
+    /// 1 × `dictionaryRepresentation` conversion (cheap, no IPC) +
+    /// O(N) `KVC traits` reads via `annotateTraits` (each is a
+    /// Swift↔ObjC bridge call but stays in-process; no IPC) +
+    /// O(N) tree walk for `findMatches`. N is total snapshot-tree
+    /// node count. The wrapper-suppression pass is folded into the
+    /// walk via the ancestor stack, so it does not add an extra
+    /// O(N²) post-pass.
     func findElements(_ selector: ElementSelector, parentId: String? = nil) throws -> [ElementInfo] {
         // Take a snapshot of the entire accessibility tree in one IPC call.
         // With _XCTSetApplicationStateTimeout(0), the first snapshot may return
@@ -76,11 +94,30 @@ class SnapshotElementFinder {
         resolvedDict = resolvedSnapshot.dictionaryRepresentation
 
         // Convert to string-keyed dict for easier processing
-        let snapshotDict = convertKeys(resolvedDict)
+        var snapshotDict = convertKeys(resolvedDict)
+        // dictionaryRepresentation omits accessibilityTraits on Xcode 26. Walk
+        // the snapshot tree in parallel and splice each node's `traits` in
+        // so role detection (e.g. "heading" for RN `accessibilityRole="header"`)
+        // works.
+        SnapshotElementFinder.annotateTraits(dict: &snapshotDict, snapshot: resolvedSnapshot)
 
-        // Flatten and search
+        // Flatten and search (pre-order — `.first()` callers depend on it).
+        // Wrapper suppression happens inline via an ancestor stack so the
+        // whole walk is O(N + wrapperMatches) rather than O(matches²).
         var matches: [([String: Any], CGRect)] = []
-        findMatches(in: snapshotDict, selector: selector, results: &matches)
+        var otherAncestors: [WrapperAncestor] = []
+        var suppressed = Set<Int>()
+        findMatches(
+            in: snapshotDict,
+            selector: selector,
+            results: &matches,
+            otherAncestors: &otherAncestors,
+            suppressed: &suppressed
+        )
+        if !suppressed.isEmpty {
+            matches = matches.enumerated()
+                .compactMap { (i, m) in suppressed.contains(i) ? nil : m }
+        }
 
         // Check once if keyboard is visible (for focus detection).
         // Keyboard = elementType 56 (XCUIElement.ElementType.keyboard).
@@ -103,14 +140,18 @@ class SnapshotElementFinder {
             let elTypeRaw = nodeDict["elementType"] as? UInt ?? 0
             let elType = XCUIElement.ElementType(rawValue: elTypeRaw) ?? .other
             let className = RoleMapping.typeName(for: elType)
-            let role = RoleMapping.resolveRole(for: elType)
+            // XCTest's snapshot dictionaryRepresentation doesn't always include
+            // accessibility traits. Try several keys and fall back to 0. Traits
+            // are needed for React Native roles like "header" that map to a
+            // trait bit rather than a dedicated element type.
+            let traits = SnapshotElementFinder.extractTraits(from: nodeDict)
+            let role = RoleMapping.resolveRole(for: elType, traits: traits)
             let isEnabled = nodeDict["enabled"] as? Bool ?? true
             let value = nodeDict["value"] as? String
             let isSelected = nodeDict["selected"] as? Bool ?? false
             let isChecked = checkedState(
                 for: elType,
                 value: value,
-                label: label,
                 selected: isSelected
             )
             let snapshotFocused = (nodeDict["hasFocus"] as? Bool)
@@ -142,14 +183,44 @@ class SnapshotElementFinder {
             // For text fields, prefer the "value" property (typed text) over "label"
             // (accessibility label). React Native TextInput has label="Email" and
             // value="test@example.com" — we want the value for toHaveText assertions.
+            // After clear() the value is empty; falling back to label/title would
+            // surface the field name (e.g. "Email") and break toBeEmpty().
             let placeholderValue = nodeDict["placeholderValue"] as? String
             let displayText: String?
-            if let value = value, !value.isEmpty {
+            if isTextFieldType(elType) {
+                let v = value ?? ""
+                // Empty textfields sometimes surface their placeholder as
+                // `value` (older iOS, certain RN TextInput configs). Strip
+                // that so toBeEmpty()/toHaveValue("") behave the same way
+                // they do on Android (where isShowingHintText covers this).
+                //
+                // KNOWN TRADE-OFF: a user who literally typed the
+                // placeholder string and then queried `toHaveValue` against
+                // that exact value will see the value mis-reported as
+                // empty. iOS doesn't expose `isShowingPlaceholder` in
+                // XCUIElementSnapshot, so we can't distinguish. Mirrors the
+                // Android API < 26 limitation called out in
+                // docs/api-reference.md.
+                if v.isEmpty || v == placeholderValue {
+                    displayText = nil
+                } else {
+                    displayText = v
+                }
+            } else if let value = value, !value.isEmpty {
                 displayText = value
             } else if !title.isEmpty {
                 displayText = title
             } else if !label.isEmpty {
                 displayText = label
+            } else if elType == .other {
+                // Wrapping containers (e.g. RN `<View accessibilityRole="alert">`)
+                // carry their visible text in descendant nodes. Aggregate so
+                // assertions like toContainText see the visible string.
+                // Restricted to `.other` so we don't change behavior for typed
+                // elements that legitimately have no label (e.g. an empty
+                // ScrollView that wraps content).
+                let descendant = SnapshotElementFinder.collectDescendantText(nodeDict)
+                displayText = descendant.isEmpty ? nil : descendant
             } else {
                 displayText = nil
             }
@@ -162,7 +233,7 @@ class SnapshotElementFinder {
                 text: displayText,
                 contentDescription: label.isEmpty ? (title.isEmpty ? nil : title) : label,
                 resourceId: identifier.isEmpty ? nil : identifier,
-                hint: nil,
+                hint: (placeholderValue?.isEmpty == false) ? placeholderValue : nil,
                 bounds: bounds,
                 isEnabled: isEnabled,
                 isChecked: isChecked,
@@ -200,6 +271,11 @@ class SnapshotElementFinder {
     }
 
     /// Get cached snapshot bounds for an element (for coordinate-based actions).
+    ///
+    /// **Cost:** O(1) dictionary lookup, no IPC. Bounds were captured
+    /// during the original `findElements` snapshot walk and frozen at
+    /// that time — do NOT use this for "is the element still on
+    /// screen?" checks, take a fresh snapshot for that.
     func getBounds(_ elementId: String) -> CGRect? {
         lock.lock()
         let bounds = boundsCache[elementId]
@@ -208,6 +284,14 @@ class SnapshotElementFinder {
     }
 
     /// Get the ElementInfo for a cached element.
+    ///
+    /// **Cost:** several live `XCUIElement` property reads (label,
+    /// identifier, value, isEnabled, hasFocus, isSelected, frame),
+    /// each one an IPC. Order of magnitude ~6–10 IPC per call.
+    /// Strictly more expensive than re-running `findElement` for a
+    /// fresh snapshot if you need >1 attribute read; only useful when
+    /// the snapshot is known stale and you have an elementId you want
+    /// to re-resolve.
     func getElementInfo(_ elementId: String) throws -> ElementInfo {
         let elem = try getElement(elementId)
         return toElementInfo(elem, elementId: elementId)
@@ -268,6 +352,223 @@ class SnapshotElementFinder {
             || elType == .textView || elType == .searchField
     }
 
+    private static let kvcMissLogger = OneShotLogger()
+    private static let childMismatchLogger = OneShotLogger()
+
+    private static func logKvcMissOnce() {
+        kvcMissLogger.log(
+            "[PilotSnapshot] KVC `traits` returned nil on a non-empty snapshot. " +
+                "Trait-derived roles (heading/searchfield/link via traits) will not resolve. " +
+                "Likely cause: Xcode renamed/restricted the XCElementSnapshot.traits property."
+        )
+    }
+
+    /// Read the UIAccessibilityTraits bitmask out of an annotated snapshot
+    /// dictionary. `annotateTraits()` splices the value in via KVC on the
+    /// underlying XCElementSnapshot, so we only need to read the canonical
+    /// key here.
+    static func extractTraits(from node: [String: Any]) -> UInt64 {
+        guard let raw = node["traits"] else { return 0 }
+        switch raw {
+        case let v as UInt64: return v
+        case let v as UInt: return UInt64(v)
+        case let v as Int:
+            // Reinterpret the bit pattern instead of doing `UInt64(v)` —
+            // the latter traps when `v` is negative. `Int` is 64-bit on
+            // every Apple platform we ship to, so when ObjC hands us a
+            // trait value with bit 63 set (a private/future Apple trait
+            // beyond the documented 0..<21 range, or a misencoded value),
+            // bridging surfaces it as a negative `Int`. Preserving the
+            // raw bits keeps the high-order flags intact instead of
+            // crashing the agent on an unexpected snapshot.
+            return UInt64(bitPattern: Int64(v))
+        case let v as NSNumber: return v.uint64Value
+        default: return 0
+        }
+    }
+
+    /// Splice accessibility trait bits back onto each node of the converted
+    /// snapshot dict. dictionaryRepresentation on Xcode 26 omits traits, but
+    /// the underlying XCElementSnapshot exposes them via KVC. Walking the
+    /// snapshot tree in parallel with the dict lets us annotate every node.
+    ///
+    /// Children are matched by stable attributes (identifier first, then
+    /// elementType + frame) rather than positional index, because
+    /// dictionaryRepresentation can filter or reorder children differently
+    /// from `snapshot.children` (e.g. empty cells, accessibility-hidden
+    /// nodes). Positional alignment would silently mis-attribute traits to
+    /// the wrong nodes whenever the two sequences diverge.
+    ///
+    /// Cost: O(N) KVC lookups per snapshot — each `value(forKey: "traits")`
+    /// crosses the Swift↔ObjC bridge. For typical screens (a few hundred
+    /// nodes) this is negligible; for pathologically deep hierarchies it
+    /// could become noticeable. KVC has no Method-cache equivalent in Swift,
+    /// so the cost is intrinsic until iOS exposes traits in
+    /// dictionaryRepresentation directly.
+    static func annotateTraits(dict: inout [String: Any], snapshot: XCUIElementSnapshot) {
+        // Bare `value(forKey:)` on an NSObject that doesn't have the key
+        // throws an Objective-C NSUnknownKeyException, which is *not*
+        // catchable from Swift and crashes the agent. Check
+        // `responds(to:)` first; if the property went away on a future
+        // Xcode, fall through cleanly and log once instead of crashing.
+        let raw: Any?
+        if let nsSnap = snapshot as? NSObject,
+           nsSnap.responds(to: NSSelectorFromString("traits")) {
+            raw = nsSnap.value(forKey: "traits")
+        } else {
+            raw = nil
+        }
+        let traits: UInt64 = {
+            if let v = raw as? UInt64 { return v }
+            if let v = raw as? NSNumber { return v.uint64Value }
+            return 0
+        }()
+        if traits != 0 {
+            dict["traits"] = traits
+        } else if raw == nil && !kvcMissLogger.hasFired {
+            // KVC returned nil (or the property was missing entirely) —
+            // Xcode may have renamed or restricted the private property.
+            // All trait-derived role detection silently degrades to 0, so
+            // log the first occurrence loudly. Skip the `.children`
+            // access (which is itself an IPC) once we've already logged
+            // — the per-snapshot probe was burning O(N) IPC calls for a
+            // log line we'd already emitted.
+            if !snapshot.children.isEmpty {
+                logKvcMissOnce()
+            }
+        }
+        guard var children = dict["children"] as? [[String: Any]] else { return }
+        let snapChildren = snapshot.children
+        if children.count != snapChildren.count {
+            // Route through the same one-shot logger as the KVC-miss
+            // warning so we don't spam the log per snapshot. The
+            // mismatch is non-fatal (we still match what we can by
+            // stable key) but worth a single visible note.
+            childMismatchLogger.log(
+                "[PilotSnapshot] annotateTraits child count differs between dict and snapshot " +
+                    "(dict=\(children.count) snapshot=\(snapChildren.count)). " +
+                    "Trait data for unmatched nodes will not be spliced in."
+            )
+        }
+        // Build a quick index of snapshot children keyed by (identifier,
+        // elementType, full frame). Multiple children can share the same
+        // key (anonymous siblings with identical bounds); track which
+        // slots are still unclaimed. Including width/height in the key
+        // (rather than origin only) reduces collisions when RN mounts
+        // sibling hidden-a11y views that start at the same origin but
+        // differ in size.
+        //
+        // Tie-break invariant: when two snapshot children share a key,
+        // we pop slots in first-found order. This is only safe because
+        // identical (identifier, type, frame) siblings produce identical
+        // accessibility traits in practice — they're either both
+        // hidden-a11y wrappers or both null-identifier `.other`
+        // containers. Splicing the wrong one's traits onto the other
+        // is therefore a no-op. If a future change makes traits depend
+        // on something *other* than these key components (e.g. a
+        // semantic element type that varies across siblings with
+        // identical frames), this assumption breaks and the matching
+        // needs a more discriminating key.
+        struct ChildKey: Hashable {
+            let identifier: String
+            let elementType: UInt
+            let originX: Int
+            let originY: Int
+            let width: Int
+            let height: Int
+        }
+        // Round (rather than truncate) frame coords when keying. Sub-pixel
+        // layouts (RN sometimes produces frames at e.g. y=12.333 vs 12.0)
+        // would otherwise hash both into the same `Int(...)` slot
+        // (Int truncates toward zero) and mis-attribute traits between
+        // siblings. Rounding yields a stable Int boundary at the nearest
+        // whole pixel, so two siblings only collide when they're truly
+        // pixel-aligned at the same position.
+        func keyOf(identifier: String, elementType: UInt, frame: CGRect) -> ChildKey {
+            ChildKey(
+                identifier: identifier,
+                elementType: elementType,
+                originX: Int(frame.origin.x.rounded()),
+                originY: Int(frame.origin.y.rounded()),
+                width: Int(frame.size.width.rounded()),
+                height: Int(frame.size.height.rounded())
+            )
+        }
+        var available: [ChildKey: (indices: [Int], nextSlot: Int)] = [:]
+        for (idx, snap) in snapChildren.enumerated() {
+            let key = keyOf(
+                identifier: snap.identifier,
+                elementType: UInt(snap.elementType.rawValue),
+                frame: snap.frame
+            )
+            if var entry = available[key] {
+                entry.indices.append(idx)
+                available[key] = entry
+            } else {
+                available[key] = (indices: [idx], nextSlot: 0)
+            }
+        }
+        for (i, child) in children.enumerated() {
+            let frame = SnapshotElementFinder.parseFrame(child)
+            let key = keyOf(
+                identifier: child["identifier"] as? String ?? "",
+                elementType: SnapshotElementFinder.parseUInt(child["elementType"]) ?? 0,
+                frame: frame
+            )
+            guard var entry = available[key], entry.nextSlot < entry.indices.count else { continue }
+            let snapIdx = entry.indices[entry.nextSlot]
+            entry.nextSlot += 1
+            available[key] = entry
+            var mutableChild = child
+            annotateTraits(dict: &mutableChild, snapshot: snapChildren[snapIdx])
+            children[i] = mutableChild
+        }
+        dict["children"] = children
+    }
+
+    /// Maximum recursion depth for `collectDescendantText`. Mirrors
+    /// Android's `MAX_DESCENDANT_TEXT_DEPTH` so both platforms bound
+    /// worst-case aggregation cost identically.
+    static let maxDescendantTextDepth = 6
+
+    /// Walk a snapshot subtree and concatenate descendant labels/values so a
+    /// wrapping container (e.g. RN `<View accessibilityRole="alert">`)
+    /// reports its visible text content. Mirrors Android's
+    /// `collectDescendantText`.
+    ///
+    /// Bounded by `maxDescendantTextDepth` so a misconfigured deeply
+    /// nested match doesn't drag the snapshot walk into pathological
+    /// behavior.
+    static func collectDescendantText(_ node: [String: Any], depth: Int = 0) -> String {
+        if depth >= maxDescendantTextDepth { return "" }
+        var parts: [String] = []
+        if let children = node["children"] as? [[String: Any]] {
+            for child in children {
+                let ownText: String?
+                if let v = child["value"] as? String, !v.isEmpty {
+                    ownText = v
+                } else if let t = child["title"] as? String, !t.isEmpty {
+                    ownText = t
+                } else if let l = child["label"] as? String, !l.isEmpty {
+                    ownText = l
+                } else {
+                    ownText = nil
+                }
+                if let own = ownText {
+                    // Child labels its own visible content; iOS accessibility
+                    // typically auto-concatenates descendant text into the
+                    // parent label already, so recursing further would
+                    // duplicate ("Hello Hello").
+                    parts.append(own)
+                } else {
+                    let nested = collectDescendantText(child, depth: depth + 1)
+                    if !nested.isEmpty { parts.append(nested) }
+                }
+            }
+        }
+        return parts.joined(separator: " ")
+    }
+
     // MARK: - Key conversion
 
     /// Convert XCUIElement.AttributeName-keyed dicts to String-keyed dicts recursively.
@@ -287,21 +588,85 @@ class SnapshotElementFinder {
 
     // MARK: - Snapshot parsing and matching
 
+    /// Ancestor descriptor used during `findMatches` to mark generic
+    /// `.other` wrappers whose identifier or label is shadowed by a real
+    /// native descendant. Maintaining an ancestor stack keeps suppression
+    /// linear in the match count, instead of the O(N²) post-pass the
+    /// earlier implementation used.
+    private struct WrapperAncestor {
+        let identifier: String
+        let label: String
+        let resultIndex: Int
+    }
+
     private func findMatches(
         in nodeDict: [String: Any],
         selector: ElementSelector,
-        results: inout [([String: Any], CGRect)]
+        results: inout [([String: Any], CGRect)],
+        otherAncestors: inout [WrapperAncestor],
+        suppressed: inout Set<Int>
     ) {
-        // Check this node
+        // Pre-order: parent first, then descendants. Callers (e.g.
+        // `.first()`) rely on document/snapshot order, so we must NOT
+        // reorder here. We use an ancestor stack to suppress RN-style
+        // `.other` wrappers whose identifier/label matches a native
+        // descendant in one linear pass.
+        var pushedAncestor = false
         if matchesSelector(nodeDict, selector: selector) {
+            let myId = nodeDict["identifier"] as? String ?? ""
+            let myLabel = nodeDict["label"] as? String ?? ""
+            let raw = parseUInt(nodeDict["elementType"]) ?? 0
+            let elType = XCUIElement.ElementType(rawValue: raw) ?? .other
+
+            // If an in-scope `.other` ancestor shares our identifier (or
+            // label when identifier is empty), mark it for suppression —
+            // we're the "real" inner control. Gate on this node being
+            // *non-`.other`* so a `.other` ancestor isn't suppressed by
+            // another matching `.other` descendant: when both ends are
+            // generic wrappers we can't tell which one the caller wants
+            // and the safer default is to keep both. Today this only
+            // matters in theory (RN/SwiftUI don't typically nest `.other`
+            // wrappers with matching labels), but a future `alert` /
+            // `dialog` role that lands on `.other` would otherwise lose
+            // its outer container.
+            if elType != .other {
+                for anc in otherAncestors {
+                    if !anc.identifier.isEmpty && anc.identifier == myId {
+                        suppressed.insert(anc.resultIndex)
+                    } else if anc.identifier.isEmpty && !anc.label.isEmpty && anc.label == myLabel {
+                        suppressed.insert(anc.resultIndex)
+                    }
+                }
+            }
+
             let frame = parseFrame(nodeDict)
             results.append((nodeDict, frame))
+            let myIndex = results.count - 1
+
+            // Push this node onto the ancestor stack if it's a generic
+            // wrapper — any matching non-`.other` descendant will suppress us.
+            if elType == .other {
+                otherAncestors.append(
+                    WrapperAncestor(identifier: myId, label: myLabel, resultIndex: myIndex)
+                )
+                pushedAncestor = true
+            }
         }
 
-        // Recurse into children
-        guard let children = nodeDict["children"] as? [[String: Any]] else { return }
-        for child in children {
-            findMatches(in: child, selector: selector, results: &results)
+        if let children = nodeDict["children"] as? [[String: Any]] {
+            for child in children {
+                findMatches(
+                    in: child,
+                    selector: selector,
+                    results: &results,
+                    otherAncestors: &otherAncestors,
+                    suppressed: &suppressed
+                )
+            }
+        }
+
+        if pushedAncestor {
+            otherAncestors.removeLast()
         }
     }
 
@@ -405,7 +770,6 @@ class SnapshotElementFinder {
             let isChecked = checkedState(
                 for: elType,
                 value: value,
-                label: label,
                 selected: isSelected
             )
             if isChecked != wantChecked { return false }
@@ -430,6 +794,10 @@ class SnapshotElementFinder {
     }
 
     private func parseFrame(_ node: [String: Any]) -> CGRect {
+        SnapshotElementFinder.parseFrame(node)
+    }
+
+    static func parseFrame(_ node: [String: Any]) -> CGRect {
         // The snapshot dictionary stores frame as a sub-dictionary
         if let frameDict = node["frame"] as? [String: Any] {
             let x = (frameDict["X"] as? Double) ?? (frameDict["x"] as? Double) ?? 0
@@ -442,6 +810,10 @@ class SnapshotElementFinder {
     }
 
     private func parseUInt(_ raw: Any?) -> UInt? {
+        SnapshotElementFinder.parseUInt(raw)
+    }
+
+    static func parseUInt(_ raw: Any?) -> UInt? {
         guard let raw else { return nil }
         switch raw {
         case let value as UInt:
@@ -582,40 +954,20 @@ class SnapshotElementFinder {
 
     private func toElementInfo(_ element: XCUIElement, elementId: String) -> ElementInfo {
         let frame = element.frame
-        let elType = element.elementType
-        let label = element.label
-        let identifier = element.identifier
-
         let bounds = ElementBounds(
             left: Int(frame.origin.x), top: Int(frame.origin.y),
             right: Int(frame.origin.x + frame.size.width),
             bottom: Int(frame.origin.y + frame.size.height)
         )
-        let className = RoleMapping.typeName(for: elType)
-        let role = RoleMapping.resolveRole(for: elType)
-        let isSelected = element.isSelected
-        let isChecked = checkedState(
-            for: elType,
-            value: element.value as? String,
-            label: label,
-            selected: isSelected
-        )
-
         let viewportRatio = computeViewportRatio(bounds, screenSize: screenSize)
-
-        return ElementInfo(
-            elementId: elementId, className: className,
-            text: label.isEmpty ? nil : label,
-            contentDescription: label.isEmpty ? nil : label,
-            resourceId: identifier.isEmpty ? nil : identifier,
-            hint: nil, bounds: bounds,
-            isEnabled: element.isEnabled, isChecked: isChecked, isFocused: element.hasFocus,
-            isClickable: frame.width > 0 && frame.height > 0,
-            isFocusable: true,
-            isScrollable: elType == .scrollView || elType == .table || elType == .collectionView,
-            isVisible: viewportRatio > 0,
-            isSelected: isSelected, childCount: 0,
-            role: role, viewportRatio: viewportRatio
+        // Delegated to the shared factory in ElementInfo.swift so the
+        // sibling ElementFinder.swift path can't drift on text /
+        // checked / role / hint derivation.
+        return ElementInfo.makeFromXCUIElement(
+            element,
+            elementId: elementId,
+            bounds: bounds,
+            viewportRatio: viewportRatio
         )
     }
 
@@ -633,37 +985,16 @@ class SnapshotElementFinder {
         return parts.joined(separator: ", ")
     }
 
+    /// Thin delegate to the shared canonical implementation.
     private func checkedState(
         for elementType: XCUIElement.ElementType,
         value: String?,
-        label: String? = nil,
         selected: Bool
     ) -> Bool {
-        let normalized = value?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased() ?? ""
-
-        switch normalized {
-        case "1", "true", "on", "yes", "selected", "checked":
-            return true
-        case "0", "false", "off", "no", "not selected", "unchecked":
-            return false
-        default:
-            // React Native checkbox/radio on iOS produces compound values like
-            // "checkbox, checked", "checkbox, unchecked", "radio button, checked".
-            // Parse the state from the trailing component after the last comma.
-            if normalized.hasSuffix(", checked") || normalized.hasSuffix(", selected") {
-                return true
-            }
-            if normalized.hasSuffix(", unchecked") || normalized.hasSuffix(", not selected") {
-                return false
-            }
-            switch elementType {
-            case .switch, .toggle, .checkBox, .radioButton:
-                return selected
-            default:
-                return false
-            }
-        }
+        ElementInfo.deriveCheckedState(
+            elementType: elementType,
+            value: value,
+            selected: selected
+        )
     }
 }

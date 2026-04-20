@@ -23,6 +23,11 @@ enum RoleMapping {
         "spinner": [.picker, .activityIndicator],
         "toolbar": [.toolbar],
         "tab": [.tab, .tabBar],
+        // resolveRole(for:traits:) can publish "searchfield" off the
+        // UIAccessibilityTraitSearchField bit — keep the reverse mapping
+        // here so getByRole("searchfield") is symmetric and doesn't throw
+        // "Unknown role".
+        "searchfield": [.searchField],
     ]
 
     /// Reverse mapping: XCUIElement.ElementType → role name.
@@ -44,15 +49,65 @@ enum RoleMapping {
         return elementTypeToRole[elementType] ?? ""
     }
 
+    /// Resolve a role name, preferring an accessibility-trait override when
+    /// the element carries one. React Native exposes `accessibilityRole` as
+    /// a trait bit (e.g. UIAccessibilityTraitHeader for `accessibilityRole="header"`),
+    /// and the trait carries semantic intent that the element type doesn't.
+    static func resolveRole(for elementType: XCUIElement.ElementType, traits: UInt64) -> String {
+        let headerTrait: UInt64 = 1 << 16
+        let buttonTrait: UInt64 = 1 << 0
+        let linkTrait: UInt64 = 1 << 1
+        let imageTrait: UInt64 = 1 << 2
+        let adjustableTrait: UInt64 = 1 << 17
+        let searchFieldTrait: UInt64 = 1 << 20
+
+        // Trait-derived semantic roles take priority — these are the ones an
+        // app explicitly declares via `accessibilityRole`.
+        if traits & headerTrait != 0 { return "heading" }
+        if traits & searchFieldTrait != 0 { return "searchfield" }
+        if traits & adjustableTrait != 0 { return "seekbar" }
+        if traits & linkTrait != 0 { return "link" }
+
+        let typeRole = elementTypeToRole[elementType] ?? ""
+        if !typeRole.isEmpty { return typeRole }
+
+        // Generic .other elements with a button/image trait still convey role.
+        if traits & buttonTrait != 0 { return "button" }
+        if traits & imageTrait != 0 { return "image" }
+
+        return ""
+    }
+
     /// Get the XCUIElement.ElementType values for a role name.
     /// - Throws: AgentError.invalidSelector if the role is unknown.
     static func elementTypes(for role: String) throws -> [XCUIElement.ElementType] {
-        guard let types = roleToElementTypes[role.lowercased()] else {
+        let normalized = roleAliases[role.lowercased()] ?? role.lowercased()
+        guard let types = roleToElementTypes[normalized] else {
             let known = roleToElementTypes.keys.sorted().joined(separator: ", ")
             throw AgentError.invalidSelector("Unknown role: '\(role)'. Known roles: \(known)")
         }
         return types
     }
+
+    /// Cross-platform role aliases — kept in sync with Android's
+    /// `ROLE_ALIASES` map and the SDK's `normalizeRole`. Lets users pass
+    /// either the React Native spelling ("header", "slider", "search") or the
+    /// Pilot/Playwright canonical ("heading", "seekbar", "searchfield").
+    ///
+    /// **Parity contract:** this map MUST stay in sync with
+    /// `packages/pilot/src/expect.ts ROLE_ALIASES` and
+    /// `agent/app/.../ElementFinder.kt ROLE_ALIASES`. The SDK side has
+    /// the locking parity test (`expect.test.ts > ROLE_ALIASES parity`);
+    /// when you add an alias here, also update both other files and
+    /// extend that test. Drift causes silent per-platform mismatches
+    /// where the SDK normalizes one way and this side reports the
+    /// other, leading `toHaveRole` to either fail loudly or (worse)
+    /// match the wrong element.
+    static let roleAliases: [String: String] = [
+        "header": "heading",
+        "slider": "seekbar",
+        "search": "searchfield",
+    ]
 
     /// Check if a UIAccessibilityTraits bitmask matches a role.
     /// This handles React Native components (Pressable, TouchableOpacity) that

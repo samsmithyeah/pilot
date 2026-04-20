@@ -39,8 +39,7 @@ describe("Login screen", () => {
   test("can type into email field", async ({ device }) => {
     const login = new LoginScreen(device)
     await login.emailField.type("test@example.com")
-    // PILOT-133: type() wraps text in quotes — check with quotes for now
-    await expect(login.emailField).toContainText("test@example.com")
+    await expect(login.emailField).toHaveValue("test@example.com")
   })
 
   test("can type into password field", async ({ device }) => {
@@ -73,20 +72,22 @@ describe("Login screen", () => {
 
   test("clear() empties the field", async ({ device }) => {
     const login = new LoginScreen(device)
+    await login.emailField.type("hello")
     await login.emailField.clear()
-    // After clear, RN shows placeholder as text — check field exists
-    await expect(login.emailField).toBeVisible()
+    await expect(login.emailField).toBeEmpty()
   })
 
   // ─── Form Submission ───
-  // PILOT-133: type() adds quotes, so form validation with exact values won't work.
-  // Test what we can — navigation and element visibility.
 
   test("can type credentials and submit", async ({ device }) => {
     const login = new LoginScreen(device)
     await login.emailField.clearAndType("test@example.com")
     await login.passwordField.clearAndType("password123")
-    // Button may or may not enable due to quote bug — try tapping anyway
+    await expect(login.signInButton).toBeEnabled()
+    // hideKeyboard mirrors auth.setup.ts — without it, the keyboard
+    // intercepts the submit tap on some iOS configurations.
+    await device.hideKeyboard()
     await login.signInButton.tap()
+    await expect(device.getByText("Login successful!", { exact: true })).toBeVisible()
   })
 })
