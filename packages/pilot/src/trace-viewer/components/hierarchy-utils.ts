@@ -140,12 +140,12 @@ export function generateSelector(node: HierarchyNode): string {
 
   // Android: resource-id, iOS: identifier
   const resourceId = node.attributes.get('resource-id')
-    ?? (node.attributes.get('identifier') || undefined)
+    ?? node.attributes.get('identifier')
   if (resourceId) return `id("${resourceId}")`
 
   // Android: text, iOS: label (when used as display text)
   const text = node.attributes.get('text')
-    ?? (node.attributes.get('label') || undefined)
+    ?? node.attributes.get('label')
   if (text) return `text("${text}")`
 
   const className = node.attributes.get('class')
