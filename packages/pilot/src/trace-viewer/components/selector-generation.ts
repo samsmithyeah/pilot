@@ -1,63 +1,14 @@
 import type { HierarchyNode } from './hierarchy-utils.js'
+import { getNodeRole } from './hierarchy-utils.js'
 
-// ─── Role Mapping ───
-
-const ANDROID_CLASS_TO_ROLE: Record<string, string> = {
-  'android.widget.Button': 'button',
-  'android.widget.ImageButton': 'button',
-  'com.google.android.material.button.MaterialButton': 'button',
-  'androidx.appcompat.widget.AppCompatButton': 'button',
-  'android.widget.EditText': 'textfield',
-  'android.widget.AutoCompleteTextView': 'textfield',
-  'com.google.android.material.textfield.TextInputEditText': 'textfield',
-  'androidx.appcompat.widget.AppCompatEditText': 'textfield',
-  'android.widget.CheckBox': 'checkbox',
-  'androidx.appcompat.widget.AppCompatCheckBox': 'checkbox',
-  'com.google.android.material.checkbox.MaterialCheckBox': 'checkbox',
-  'android.widget.Switch': 'switch',
-  'androidx.appcompat.widget.SwitchCompat': 'switch',
-  'com.google.android.material.switchmaterial.SwitchMaterial': 'switch',
-  'android.widget.ImageView': 'image',
-  'androidx.appcompat.widget.AppCompatImageView': 'image',
-  'android.widget.TextView': 'text',
-  'androidx.appcompat.widget.AppCompatTextView': 'text',
-  'com.google.android.material.textview.MaterialTextView': 'text',
-  'android.widget.SearchView': 'searchfield',
-  'androidx.appcompat.widget.SearchView': 'searchfield',
-  'android.widget.RadioButton': 'radiobutton',
-  'androidx.appcompat.widget.AppCompatRadioButton': 'radiobutton',
-  'android.widget.Spinner': 'spinner',
-  'androidx.appcompat.widget.AppCompatSpinner': 'spinner',
-  'android.widget.ProgressBar': 'progressbar',
-  'android.widget.SeekBar': 'seekbar',
-  'com.google.android.material.slider.Slider': 'seekbar',
-}
-
-const IOS_TYPE_TO_ROLE: Record<string, string> = {
-  'XCUIElementTypeButton': 'button',
-  'XCUIElementTypeTextField': 'textfield',
-  'XCUIElementTypeSecureTextField': 'textfield',
-  'XCUIElementTypeTextView': 'textfield',
-  'XCUIElementTypeSwitch': 'switch',
-  'XCUIElementTypeCheckBox': 'checkbox',
-  'XCUIElementTypeImage': 'image',
-  'XCUIElementTypeStaticText': 'text',
-  'XCUIElementTypeSearchField': 'searchfield',
-  'XCUIElementTypeSlider': 'seekbar',
-  'XCUIElementTypeProgressIndicator': 'progressbar',
-  'XCUIElementTypePicker': 'spinner',
-  'XCUIElementTypeRadioButton': 'radiobutton',
+function escapeQuotes(s: string): string {
+  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
 }
 
 // ─── Attribute Helpers ───
 
 function getRole(node: HierarchyNode): string | null {
-  const className = node.attributes.get('class')
-  if (className) {
-    return ANDROID_CLASS_TO_ROLE[className] ?? null
-  }
-  const iosType = node.attributes.get('type') ?? node.tagName
-  return IOS_TYPE_TO_ROLE[iosType] ?? null
+  return getNodeRole(node) || null
 }
 
 function getText(node: HierarchyNode): string {
@@ -109,7 +60,7 @@ export function generateSelectors(node: HierarchyNode): GeneratedSelector[] {
   // 1. Role + name (highest priority — Testing Library #1)
   if (role && accessibleName) {
     selectors.push({
-      code: `device.getByRole("${role}", { name: "${accessibleName}" })`,
+      code: `device.getByRole("${escapeQuotes(role)}", { name: "${escapeQuotes(accessibleName)}" })`,
       label: 'Role + name',
       priority: 1,
     })
@@ -118,7 +69,7 @@ export function generateSelectors(node: HierarchyNode): GeneratedSelector[] {
   // 2. Role without name
   if (role && !accessibleName) {
     selectors.push({
-      code: `device.getByRole("${role}")`,
+      code: `device.getByRole("${escapeQuotes(role)}")`,
       label: 'Role',
       priority: 2,
     })
@@ -127,7 +78,7 @@ export function generateSelectors(node: HierarchyNode): GeneratedSelector[] {
   // 3. Text (Testing Library #2 — visible text)
   if (text) {
     selectors.push({
-      code: `device.getByText("${text}")`,
+      code: `device.getByText("${escapeQuotes(text)}")`,
       label: 'Text',
       priority: 3,
     })
@@ -136,7 +87,7 @@ export function generateSelectors(node: HierarchyNode): GeneratedSelector[] {
   // 4. iOS label as text (when label serves as visible text, not content-desc)
   if (ios && label && !text) {
     selectors.push({
-      code: `device.getByText("${label}")`,
+      code: `device.getByText("${escapeQuotes(label)}")`,
       label: 'Text (label)',
       priority: 3,
     })
@@ -145,14 +96,14 @@ export function generateSelectors(node: HierarchyNode): GeneratedSelector[] {
   // 5. Description / accessibility label (Testing Library #3)
   if (contentDesc) {
     selectors.push({
-      code: `device.getByDescription("${contentDesc}")`,
+      code: `device.getByDescription("${escapeQuotes(contentDesc)}")`,
       label: 'Description',
       priority: 4,
     })
   }
   if (ios && label && contentDesc !== label) {
     selectors.push({
-      code: `device.getByDescription("${label}")`,
+      code: `device.getByDescription("${escapeQuotes(label)}")`,
       label: 'Description (label)',
       priority: 4,
     })
@@ -161,7 +112,7 @@ export function generateSelectors(node: HierarchyNode): GeneratedSelector[] {
   // 6. Placeholder / hint (Testing Library #4)
   if (hint) {
     selectors.push({
-      code: `device.getByPlaceholder("${hint}")`,
+      code: `device.getByPlaceholder("${escapeQuotes(hint)}")`,
       label: 'Placeholder',
       priority: 5,
     })
@@ -171,7 +122,7 @@ export function generateSelectors(node: HierarchyNode): GeneratedSelector[] {
   const testIdFromResource = extractTestId(resourceId)
   if (testIdFromResource) {
     selectors.push({
-      code: `device.getByTestId("${testIdFromResource}")`,
+      code: `device.getByTestId("${escapeQuotes(testIdFromResource)}")`,
       label: 'Test ID',
       priority: 6,
     })

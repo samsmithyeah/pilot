@@ -631,11 +631,11 @@ class ElementFinder(private val device: UiDevice) {
                     isClickable = elem.getAttribute("clickable") == "true",
                     isFocusable = elem.getAttribute("focusable") == "true",
                     isScrollable = elem.getAttribute("scrollable") == "true",
-                    isVisible = bounds.width() > 0 && bounds.height() > 0,
                     isSelected = elem.getAttribute("selected") == "true",
                     childCount = elem.childNodes.length,
                     role = resolveRole(className),
                     viewportRatio = computeViewportRatio(bounds),
+                    isVisible = computeViewportRatio(bounds) > 0f,
                 ),
             )
             // XPath elements can't be cached as UiObject2 — they're XML-based
@@ -848,6 +848,7 @@ class ElementFinder(private val device: UiDevice) {
         // Prefer the framework-set RoleDescription (React Native's
         // accessibilityRole) over the className-based mapping when present.
         val role = extractRoleDescription(obj) ?: resolveRole(className)
+        val viewportRatio = computeViewportRatio(bounds)
 
         return ElementInfo(
             elementId = elementId,
@@ -863,11 +864,11 @@ class ElementFinder(private val device: UiDevice) {
             isClickable = obj.isClickable,
             isFocusable = obj.isFocusable,
             isScrollable = obj.isScrollable,
-            isVisible = bounds.width() > 0 && bounds.height() > 0,
+            isVisible = viewportRatio > 0f,
             isSelected = obj.isSelected,
             childCount = obj.childCount,
             role = role,
-            viewportRatio = computeViewportRatio(bounds),
+            viewportRatio = viewportRatio,
         )
     }
 

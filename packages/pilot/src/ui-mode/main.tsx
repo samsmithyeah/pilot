@@ -252,51 +252,51 @@ function App() {
 
   // Hierarchy XML for the current action (used by selector playground)
   const currentHierarchyXml = useMemo(() => {
-    if (!selectedEvent || hierarchies.size === 0) return undefined
-    const pad = String(selectedEvent.actionIndex).padStart(3, '0')
-    const afterKey = `hierarchy/action-${pad}-after.xml`
-    const beforeKey = `hierarchy/action-${pad}-before.xml`
-    return hierarchies.get(afterKey) ?? hierarchies.get(beforeKey)
-  }, [selectedEvent, hierarchies])
+    if (!selectedEvent || hierarchies.size === 0) return undefined;
+    const pad = String(selectedEvent.actionIndex).padStart(3, '0');
+    const afterKey = `hierarchy/action-${pad}-after.xml`;
+    const beforeKey = `hierarchy/action-${pad}-before.xml`;
+    return hierarchies.get(afterKey) ?? hierarchies.get(beforeKey);
+  }, [selectedEvent, hierarchies]);
 
   const currentRoots = useMemo(
     () => currentHierarchyXml ? parseHierarchyXml(currentHierarchyXml) : [],
     [currentHierarchyXml],
-  )
+  );
 
-  const dpr = viewedTestDpr ?? 1
+  const dpr = viewedTestDpr ?? 1;
 
   const handleScreenshotClick = useCallback((point: { x: number; y: number }) => {
-    if (!pickMode || currentRoots.length === 0) return
-    const result = handlePickFromScreenshot(currentRoots, point.x / dpr, point.y / dpr)
+    if (!pickMode || currentRoots.length === 0) return;
+    const result = handlePickFromScreenshot(currentRoots, point.x / dpr, point.y / dpr);
     if (result) {
-      setSelectorText(result.selector)
-      setPickedNode(result.node)
-      setPickMode(false)
-      setHoverBounds(null)
+      setSelectorText(result.selector);
+      setPickedNode(result.node);
+      setPickMode(false);
+      setHoverBounds(null);
     }
-  }, [pickMode, currentRoots, dpr])
+  }, [pickMode, currentRoots, dpr]);
 
   const handlePickToggle = useCallback(() => {
-    setPickMode(p => !p)
-    setHoverBounds(null)
-  }, [])
+    setPickMode(p => !p);
+    setHoverBounds(null);
+  }, []);
 
   const handleScreenshotHover = useCallback((point: { x: number; y: number } | null) => {
     if (!pickMode || currentRoots.length === 0 || !point) {
-      setHoverBounds(null)
-      return
+      setHoverBounds(null);
+      return;
     }
-    setHoverBounds(handleHoverFromScreenshot(currentRoots, point.x / dpr, point.y / dpr))
-  }, [pickMode, currentRoots, dpr])
+    setHoverBounds(handleHoverFromScreenshot(currentRoots, point.x / dpr, point.y / dpr));
+  }, [pickMode, currentRoots, dpr]);
 
   // Clear selector state when selected action changes
   useEffect(() => {
-    setSelectorHighlights([])
-    setHierarchyHighlight(null)
-    setPickedNode(null)
-    setHoverBounds(null)
-  }, [selectedIndex])
+    setSelectorHighlights([]);
+    setHierarchyHighlight(null);
+    setPickedNode(null);
+    setHoverBounds(null);
+  }, [selectedIndex]);
 
   const handleMessage = useCallback((msg: ServerMessage) => {
     switch (msg.type) {

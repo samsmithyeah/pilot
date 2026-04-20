@@ -1,5 +1,5 @@
 import type { HierarchyNode, Bounds } from './hierarchy-utils.js'
-import { parseBounds } from './hierarchy-utils.js'
+import { parseBounds, getNodeRole } from './hierarchy-utils.js'
 
 // ─── Selector Parsing ───
 
@@ -72,7 +72,11 @@ function getNodeText(node: HierarchyNode): string {
 }
 
 function getNodeContentDesc(node: HierarchyNode): string {
-  return node.attributes.get('content-desc') ?? node.attributes.get('label') ?? ''
+  return node.attributes.get('content-desc') ?? ''
+}
+
+function getNodeAccessibleName(node: HierarchyNode): string {
+  return node.attributes.get('content-desc') ?? node.attributes.get('label') ?? node.attributes.get('text') ?? ''
 }
 
 function getNodeId(node: HierarchyNode): string {
@@ -85,45 +89,6 @@ function getNodeHint(node: HierarchyNode): string {
 
 function getNodeClassName(node: HierarchyNode): string {
   return node.attributes.get('class') ?? node.attributes.get('type') ?? node.tagName
-}
-
-// Role detection (simplified — matches selector-generation.ts)
-const ANDROID_CLASS_TO_ROLE: Record<string, string> = {
-  'android.widget.Button': 'button',
-  'android.widget.ImageButton': 'button',
-  'com.google.android.material.button.MaterialButton': 'button',
-  'androidx.appcompat.widget.AppCompatButton': 'button',
-  'android.widget.EditText': 'textfield',
-  'android.widget.AutoCompleteTextView': 'textfield',
-  'com.google.android.material.textfield.TextInputEditText': 'textfield',
-  'androidx.appcompat.widget.AppCompatEditText': 'textfield',
-  'android.widget.CheckBox': 'checkbox',
-  'android.widget.Switch': 'switch',
-  'android.widget.ImageView': 'image',
-  'android.widget.TextView': 'text',
-  'androidx.appcompat.widget.AppCompatTextView': 'text',
-  'android.widget.SearchView': 'searchfield',
-  'android.widget.RadioButton': 'radiobutton',
-}
-
-const IOS_TYPE_TO_ROLE: Record<string, string> = {
-  'XCUIElementTypeButton': 'button',
-  'XCUIElementTypeTextField': 'textfield',
-  'XCUIElementTypeSecureTextField': 'textfield',
-  'XCUIElementTypeTextView': 'textfield',
-  'XCUIElementTypeSwitch': 'switch',
-  'XCUIElementTypeImage': 'image',
-  'XCUIElementTypeStaticText': 'text',
-  'XCUIElementTypeSearchField': 'searchfield',
-  'XCUIElementTypeSlider': 'seekbar',
-  'XCUIElementTypeRadioButton': 'radiobutton',
-}
-
-function getNodeRole(node: HierarchyNode): string {
-  const className = node.attributes.get('class')
-  if (className) return ANDROID_CLASS_TO_ROLE[className] ?? ''
-  const iosType = node.attributes.get('type') ?? node.tagName
-  return IOS_TYPE_TO_ROLE[iosType] ?? ''
 }
 
 // ─── Node Matching ───
@@ -152,8 +117,7 @@ function nodeMatchesSelector(node: HierarchyNode, selector: ParsedSelector): boo
       const role = getNodeRole(node)
       if (role !== selector.value) return false
       if (selector.name) {
-        const accessibleName = getNodeContentDesc(node) || getNodeText(node)
-        return accessibleName === selector.name
+        return getNodeAccessibleName(node) === selector.name
       }
       return true
     }

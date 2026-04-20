@@ -157,6 +157,7 @@ function App() {
       history.replaceState(null, '', url.toString());
       setHierarchyHighlight(null);
       setSelectorHighlights([]);
+      setSelectorText('');
       setPickedNode(null);
       setHoverBounds(null);
     }

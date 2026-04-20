@@ -75,6 +75,62 @@ export function parseBounds(boundsStr: string): Bounds | null {
   }
 }
 
+// ─── Role Mapping ───
+
+export const ANDROID_CLASS_TO_ROLE: Record<string, string> = {
+  'android.widget.Button': 'button',
+  'android.widget.ImageButton': 'button',
+  'com.google.android.material.button.MaterialButton': 'button',
+  'androidx.appcompat.widget.AppCompatButton': 'button',
+  'android.widget.EditText': 'textfield',
+  'android.widget.AutoCompleteTextView': 'textfield',
+  'com.google.android.material.textfield.TextInputEditText': 'textfield',
+  'androidx.appcompat.widget.AppCompatEditText': 'textfield',
+  'android.widget.CheckBox': 'checkbox',
+  'androidx.appcompat.widget.AppCompatCheckBox': 'checkbox',
+  'com.google.android.material.checkbox.MaterialCheckBox': 'checkbox',
+  'android.widget.Switch': 'switch',
+  'androidx.appcompat.widget.SwitchCompat': 'switch',
+  'com.google.android.material.switchmaterial.SwitchMaterial': 'switch',
+  'android.widget.ImageView': 'image',
+  'androidx.appcompat.widget.AppCompatImageView': 'image',
+  'android.widget.TextView': 'text',
+  'androidx.appcompat.widget.AppCompatTextView': 'text',
+  'com.google.android.material.textview.MaterialTextView': 'text',
+  'android.widget.SearchView': 'searchfield',
+  'androidx.appcompat.widget.SearchView': 'searchfield',
+  'android.widget.RadioButton': 'radiobutton',
+  'androidx.appcompat.widget.AppCompatRadioButton': 'radiobutton',
+  'android.widget.Spinner': 'spinner',
+  'androidx.appcompat.widget.AppCompatSpinner': 'spinner',
+  'android.widget.ProgressBar': 'progressbar',
+  'android.widget.SeekBar': 'seekbar',
+  'com.google.android.material.slider.Slider': 'seekbar',
+}
+
+export const IOS_TYPE_TO_ROLE: Record<string, string> = {
+  'XCUIElementTypeButton': 'button',
+  'XCUIElementTypeTextField': 'textfield',
+  'XCUIElementTypeSecureTextField': 'textfield',
+  'XCUIElementTypeTextView': 'textfield',
+  'XCUIElementTypeSwitch': 'switch',
+  'XCUIElementTypeCheckBox': 'checkbox',
+  'XCUIElementTypeImage': 'image',
+  'XCUIElementTypeStaticText': 'text',
+  'XCUIElementTypeSearchField': 'searchfield',
+  'XCUIElementTypeSlider': 'seekbar',
+  'XCUIElementTypeProgressIndicator': 'progressbar',
+  'XCUIElementTypePicker': 'spinner',
+  'XCUIElementTypeRadioButton': 'radiobutton',
+}
+
+export function getNodeRole(node: HierarchyNode): string {
+  const className = node.attributes.get('class')
+  if (className) return ANDROID_CLASS_TO_ROLE[className] ?? ''
+  const iosType = node.attributes.get('type') ?? node.tagName
+  return IOS_TYPE_TO_ROLE[iosType] ?? ''
+}
+
 // ─── Selector Generator ───
 
 export function generateSelector(node: HierarchyNode): string {

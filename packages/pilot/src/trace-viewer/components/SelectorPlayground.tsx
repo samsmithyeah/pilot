@@ -117,7 +117,7 @@ export function SelectorTab({ hierarchyXml, pickedNode, onHighlightsChange, sele
     const matches = findMatchingNodes(roots, parsed)
     const bounds = matches.map(getNodeBounds).filter((b): b is Bounds => b !== null)
     onHighlightsChange(bounds)
-  }, [selector, roots])
+  }, [selector, roots, onHighlightsChange])
 
   const handleInput = useCallback((e: Event) => {
     onSelectorChange((e.target as HTMLInputElement).value)
