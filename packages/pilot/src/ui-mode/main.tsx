@@ -848,7 +848,7 @@ function App() {
           networkBodies={networkBodies}
           onHierarchyNodeSelect={setHierarchyHighlight}
           pickMode={pickMode}
-          selectorTab={
+          locatorTab={
             <SelectorTab
               hierarchyXml={currentHierarchyXml}
               pickedNode={pickedNode}

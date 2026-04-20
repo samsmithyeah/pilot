@@ -161,7 +161,7 @@ export function SelectorTab({ hierarchyXml, pickedNode, onHighlightsChange, sele
       <div class="st-options">
         {generatedSelectors.length > 0 && (
           <>
-            <div class="st-section-label">Suggested selectors</div>
+            <div class="st-section-label">Suggested locators</div>
             {generatedSelectors.map((s, i) => (
               <div
                 key={i}
@@ -182,7 +182,7 @@ export function SelectorTab({ hierarchyXml, pickedNode, onHighlightsChange, sele
         )}
         {generatedSelectors.length === 0 && !selector && (
           <div class="st-pick-hint">
-            Click the <code>⊙</code> button on the screenshot to pick an element, or type a selector above to highlight matches.
+            Click the <code>⊙</code> button on the screenshot to pick an element, or type a locator above to highlight matches.
           </div>
         )}
       </div>

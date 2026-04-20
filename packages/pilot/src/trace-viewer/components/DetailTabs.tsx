@@ -14,13 +14,13 @@ interface Props {
   networkEntries: NetworkEntry[]
   networkBodies: Map<string, string>
   onHierarchyNodeSelect?: (bounds: Bounds | null) => void
-  selectorTab?: ComponentChildren
+  locatorTab?: ComponentChildren
   pickMode?: boolean
 }
 
-type DetailTab = 'call' | 'log' | 'console' | 'source' | 'hierarchy' | 'selector' | 'errors' | 'network'
+type DetailTab = 'call' | 'log' | 'console' | 'source' | 'hierarchy' | 'locator' | 'errors' | 'network'
 
-export function DetailTabs({ event, events, hierarchies, sources, metadata, networkEntries, networkBodies, onHierarchyNodeSelect, selectorTab, pickMode }: Props) {
+export function DetailTabs({ event, events, hierarchies, sources, metadata, networkEntries, networkBodies, onHierarchyNodeSelect, locatorTab, pickMode }: Props) {
   const testError = metadata.error;
   const [tab, setTab] = useState<DetailTab>('call');
 
@@ -39,10 +39,10 @@ export function DetailTabs({ event, events, hierarchies, sources, metadata, netw
     prevTestError.current = testError;
   }, [testError, event]);
 
-  // Auto-switch to selector tab when pick mode is enabled
+  // Auto-switch to locator tab when pick mode is enabled
   useEffect(() => {
-    if (pickMode && selectorTab) setTab('selector');
-  }, [pickMode, selectorTab]);
+    if (pickMode && locatorTab) setTab('locator');
+  }, [pickMode, locatorTab]);
 
   // Memoize: DetailTabs re-renders on every selected-event change, and
   // `events` can be large for long tests. Filtering + the dedupe check is
@@ -76,7 +76,7 @@ export function DetailTabs({ event, events, hierarchies, sources, metadata, netw
         </div>
         <div class={`detail-tab${tab === 'source' ? ' active' : ''}`} onClick={() => setTab('source')}>Source</div>
         <div class={`detail-tab${tab === 'hierarchy' ? ' active' : ''}`} onClick={() => setTab('hierarchy')}>Hierarchy</div>
-        {selectorTab && <div class={`detail-tab${tab === 'selector' ? ' active' : ''}`} onClick={() => setTab('selector')}>Selector</div>}
+        {locatorTab && <div class={`detail-tab${tab === 'locator' ? ' active' : ''}`} onClick={() => setTab('locator')}>Locator</div>}
         <div class={`detail-tab${tab === 'network' ? ' active' : ''}`} onClick={() => setTab('network')}>
           Network{networkEntries.length > 0 && <span class="detail-tab-count">{networkEntries.length}</span>}
         </div>
@@ -90,13 +90,13 @@ export function DetailTabs({ event, events, hierarchies, sources, metadata, netw
           <span class="test-error-banner-text">{testError}</span>
         </div>
       )}
-      <div class={`detail-content${tab === 'hierarchy' || tab === 'source' || tab === 'network' || tab === 'selector' ? ' detail-content-flush' : ''}`}>
+      <div class={`detail-content${tab === 'hierarchy' || tab === 'source' || tab === 'network' || tab === 'locator' ? ' detail-content-flush' : ''}`}>
         {tab === 'call' && <CallTab event={event} />}
         {tab === 'log' && <LogTab event={event} />}
         {tab === 'console' && <ConsoleTab event={event} events={consoleEvents} />}
         {tab === 'source' && <SourceTab event={event} sources={sources} />}
         {tab === 'hierarchy' && <HierarchyTabWrapper event={event} hierarchies={hierarchies} onNodeSelect={onHierarchyNodeSelect} />}
-        {tab === 'selector' && selectorTab}
+        {tab === 'locator' && locatorTab}
         {tab === 'network' && <NetworkTab entries={networkEntries} bodies={networkBodies} />}
         {tab === 'errors' && <ErrorsTab event={event} events={events} testError={testError} />}
       </div>

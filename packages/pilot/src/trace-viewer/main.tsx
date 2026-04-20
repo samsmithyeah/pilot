@@ -359,7 +359,7 @@ function App() {
           networkBodies={trace.networkBodies}
           onHierarchyNodeSelect={setHierarchyHighlight}
           pickMode={pickMode}
-          selectorTab={
+          locatorTab={
             <SelectorTab
               hierarchyXml={currentHierarchyXml}
               pickedNode={pickedNode}
