@@ -166,16 +166,12 @@ class ActionExecutor(private val device: UiDevice) {
                     '\n' -> "KEYCODE_ENTER"
                     '\t' -> "KEYCODE_TAB"
                     '\b' -> "KEYCODE_DEL" // '\b' is U+0008 (backspace)
-                    // Drop CR — Android keyboards send '\n' for the
-                    // Enter key; '\r' alone has no useful target and
-                    // would emit an extra keyevent in CRLF input.
                     '\r' -> {
                         warnDroppedControlChar(0x0D)
-                        null
+                        continue
                     }
                     else -> ""
                 }
-            if (keyCode == null) continue
             if (keyCode.isNotEmpty()) {
                 if (buffer.isNotEmpty()) {
                     flushPrintableRun(buffer)

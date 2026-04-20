@@ -753,17 +753,10 @@ class ElementFinder(private val device: UiDevice) {
     /**
      * Whether the field is currently displaying its hint/placeholder rather
      * than user-entered text. AccessibilityNodeInfo.isShowingHintText is
-     * available on API 26+. On older devices this returns false (we fall
-     * back to a less precise equality check in toElementInfo).
+     * available on API 26+. On older devices this returns false.
      */
     private fun isShowingHintText(obj: UiObject2): Boolean {
-        if (android.os.Build.VERSION.SDK_INT < 26) {
-            // Approximation: the placeholder is being displayed when the
-            // surfaced `text` matches `getHintText()`. Wrong if the user
-            // typed exactly the placeholder, but unavoidable on older APIs.
-            val hint = extractHint(obj)
-            return hint != null && obj.text == hint
-        }
+        if (android.os.Build.VERSION.SDK_INT < 26) return false
         return try {
             nodeInfoFor(obj)?.isShowingHintText == true
         } catch (e: Exception) {

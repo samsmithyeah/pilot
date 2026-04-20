@@ -341,7 +341,6 @@ class ElementFinder {
         ElementInfo.deriveCheckedState(
             elementType: elementType,
             value: value,
-            label: "",
             selected: selected
         )
     }

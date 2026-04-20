@@ -373,16 +373,15 @@ class CommandHandler {
             // resolveElement). For a setup that pre-clears a half-dozen
             // fields that adds up to roughly a second per test.
             if (element.text ?? "").isEmpty {
-                if let xc = try? getXCUIElement(element.elementId) {
+                let xc = try? getXCUIElement(element.elementId)
+                if let xc = xc {
                     let live = (xc.value as? String) ?? ""
                     if live.isEmpty || live == (element.hint ?? "") {
                         return ["success": true]
                     }
-                } else {
-                    // Snapshot says empty and we can't reach the live
-                    // element to second-guess — trust the snapshot.
-                    return ["success": true]
                 }
+                // If getXCUIElement failed, don't trust a potentially
+                // stale snapshot — fall through and attempt the clear.
             }
             // iOS text fields don't have a reliable "select all" gesture
             // (triple-tap selects a word; Cmd+A often misses on RN-wrapped

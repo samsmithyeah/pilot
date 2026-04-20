@@ -152,7 +152,6 @@ class SnapshotElementFinder {
             let isChecked = checkedState(
                 for: elType,
                 value: value,
-                label: label,
                 selected: isSelected
             )
             let snapshotFocused = (nodeDict["hasFocus"] as? Bool)
@@ -789,7 +788,6 @@ class SnapshotElementFinder {
             let isChecked = checkedState(
                 for: elType,
                 value: value,
-                label: label,
                 selected: isSelected
             )
             if isChecked != wantChecked { return false }
@@ -1009,13 +1007,11 @@ class SnapshotElementFinder {
     private func checkedState(
         for elementType: XCUIElement.ElementType,
         value: String?,
-        label: String? = nil,
         selected: Bool
     ) -> Bool {
         ElementInfo.deriveCheckedState(
             elementType: elementType,
             value: value,
-            label: label ?? "",
             selected: selected
         )
     }

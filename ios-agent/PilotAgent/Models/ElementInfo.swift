@@ -143,7 +143,6 @@ struct ElementInfo {
         let isChecked = ElementInfo.deriveCheckedState(
             elementType: elType,
             value: value,
-            label: label,
             selected: isSelected
         )
 
@@ -274,7 +273,6 @@ struct ElementInfo {
     static func deriveCheckedState(
         elementType: XCUIElement.ElementType,
         value: String?,
-        label: String,
         selected: Bool
     ) -> Bool {
         let normalized = (value ?? "")
