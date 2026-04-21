@@ -2,7 +2,7 @@ import type { HierarchyNode } from './hierarchy-utils.js'
 import { getNodeRole } from './hierarchy-utils.js'
 
 function escapeQuotes(s: string): string {
-  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n')
 }
 
 // ─── Attribute Helpers ───

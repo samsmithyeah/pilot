@@ -124,6 +124,7 @@ export function SelectorTab({ hierarchyXml, pickedNode, onHighlightsChange, sele
   }, [onSelectorChange])
 
   const handleCopy = useCallback((code: string, idx: number) => {
+    if (!navigator.clipboard) return
     navigator.clipboard.writeText(code).then(() => {
       setCopiedIdx(idx)
       setTimeout(() => setCopiedIdx(null), 1500)
