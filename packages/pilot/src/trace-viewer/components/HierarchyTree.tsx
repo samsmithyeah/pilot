@@ -1,104 +1,13 @@
 import { useState, useMemo, useCallback, useRef, useEffect } from 'preact/hooks';
+import { parseHierarchyXml, parseBounds, generateSelector } from './hierarchy-utils.js';
+import type { HierarchyNode, Bounds } from './hierarchy-utils.js';
 
-// ─── Types ───
-
-export interface HierarchyNode {
-  tagName: string
-  attributes: Map<string, string>
-  children: HierarchyNode[]
-  depth: number
-}
-
-export interface Bounds {
-  left: number
-  top: number
-  right: number
-  bottom: number
-}
+export type { HierarchyNode, Bounds }
+export { parseHierarchyXml, parseBounds, generateSelector }
 
 interface Props {
   xml: string
   onNodeSelect?: (bounds: Bounds | null) => void
-}
-
-// ─── XML Parser ───
-
-function parseHierarchyXml(xml: string): HierarchyNode[] {
-  const roots: HierarchyNode[] = [];
-  const stack: HierarchyNode[] = [];
-
-  // Match self-closing tags, opening tags, and closing tags
-  const tagRe = /<(\/?)([a-zA-Z_][\w.]*)((?:\s+[\w:.-]+="[^"]*")*)\s*(\/?)>/g;
-  let match: RegExpExecArray | null;
-
-  while ((match = tagRe.exec(xml)) !== null) {
-    const isClosing = match[1] === '/';
-    const tagName = match[2];
-    const attrsStr = match[3];
-    const isSelfClosing = match[4] === '/';
-
-    if (isClosing) {
-      // Pop the stack
-      if (stack.length > 0) stack.pop();
-      continue;
-    }
-
-    // Parse attributes
-    const attributes = new Map<string, string>();
-    const attrRe = /([\w:.-]+)="([^"]*)"/g;
-    let attrMatch: RegExpExecArray | null;
-    while ((attrMatch = attrRe.exec(attrsStr)) !== null) {
-      attributes.set(attrMatch[1], attrMatch[2]);
-    }
-
-    const node: HierarchyNode = {
-      tagName,
-      attributes,
-      children: [],
-      depth: stack.length,
-    };
-
-    if (stack.length > 0) {
-      stack[stack.length - 1].children.push(node);
-    } else {
-      roots.push(node);
-    }
-
-    if (!isSelfClosing) {
-      stack.push(node);
-    }
-  }
-
-  return roots;
-}
-
-// ─── Bounds Parser ───
-
-function parseBounds(boundsStr: string): Bounds | null {
-  const match = boundsStr.match(/^\[(\d+),(\d+)\]\[(\d+),(\d+)\]$/);
-  if (!match) return null;
-  return {
-    left: parseInt(match[1], 10),
-    top: parseInt(match[2], 10),
-    right: parseInt(match[3], 10),
-    bottom: parseInt(match[4], 10),
-  };
-}
-
-// ─── Selector Generator ───
-
-function generateSelector(node: HierarchyNode): string {
-  const contentDesc = node.attributes.get('content-desc');
-  if (contentDesc) return `contentDesc("${contentDesc}")`;
-
-  const resourceId = node.attributes.get('resource-id');
-  if (resourceId) return `id("${resourceId}")`;
-
-  const text = node.attributes.get('text');
-  if (text) return `text("${text}")`;
-
-  const className = node.attributes.get('class') ?? node.tagName;
-  return `className("${className}")`;
 }
 
 // ─── Short Class Name ───

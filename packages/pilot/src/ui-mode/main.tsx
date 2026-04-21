@@ -29,6 +29,9 @@ import { ActionsPanel } from '../trace-viewer/components/ActionsPanel.js';
 import { ScreenshotPanel } from '../trace-viewer/components/ScreenshotPanel.js';
 import { DetailTabs } from '../trace-viewer/components/DetailTabs.js';
 import { TimelineFilmstrip } from '../trace-viewer/components/TimelineFilmstrip.js';
+import { SelectorTab, handlePickFromScreenshot, handleHoverFromScreenshot } from '../trace-viewer/components/SelectorPlayground.js';
+import { parseHierarchyXml } from '../trace-viewer/components/hierarchy-utils.js';
+import type { HierarchyNode, Bounds } from '../trace-viewer/components/hierarchy-utils.js';
 import { uiModeStyles } from './styles/ui-mode.css.js';
 
 // ─── App ───
@@ -61,6 +64,14 @@ function App() {
   const [pinnedIndex, setPinnedIndex] = useState(0);
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const selectedIndex = hoveredIndex ?? pinnedIndex;
+
+  // Selector playground state
+  const [hierarchyHighlight, setHierarchyHighlight] = useState<Bounds | null>(null);
+  const [selectorHighlights, setSelectorHighlights] = useState<Bounds[]>([]);
+  const [pickMode, setPickMode] = useState(false);
+  const [selectorText, setSelectorText] = useState('');
+  const [pickedNode, setPickedNode] = useState<HierarchyNode | null>(null);
+  const [hoverBounds, setHoverBounds] = useState<Bounds | null>(null);
 
   // Device pane state
   const [selectedWorkerId, setSelectedWorkerId] = useState(0);
@@ -238,6 +249,54 @@ function App() {
   }), [viewedTestName, viewedTestFile, viewedTestNode, isRunning, actionEvents.length, screenshots.size, testDeviceSerial, pilotVersion]);
 
   const selectedEvent = actionEvents[selectedIndex];
+
+  // Hierarchy XML for the current action (used by selector playground)
+  const currentHierarchyXml = useMemo(() => {
+    if (!selectedEvent || hierarchies.size === 0) return undefined;
+    const pad = String(selectedEvent.actionIndex).padStart(3, '0');
+    const afterKey = `hierarchy/action-${pad}-after.xml`;
+    const beforeKey = `hierarchy/action-${pad}-before.xml`;
+    return hierarchies.get(afterKey) ?? hierarchies.get(beforeKey);
+  }, [selectedEvent, hierarchies]);
+
+  const currentRoots = useMemo(
+    () => currentHierarchyXml ? parseHierarchyXml(currentHierarchyXml) : [],
+    [currentHierarchyXml],
+  );
+
+  const dpr = viewedTestDpr ?? 1;
+
+  const handleScreenshotClick = useCallback((point: { x: number; y: number }) => {
+    if (!pickMode || currentRoots.length === 0) return;
+    const result = handlePickFromScreenshot(currentRoots, point.x / dpr, point.y / dpr);
+    if (result) {
+      setSelectorText(result.selector);
+      setPickedNode(result.node);
+      setPickMode(false);
+      setHoverBounds(null);
+    }
+  }, [pickMode, currentRoots, dpr]);
+
+  const handlePickToggle = useCallback(() => {
+    setPickMode(p => !p);
+    setHoverBounds(null);
+  }, []);
+
+  const handleScreenshotHover = useCallback((point: { x: number; y: number } | null) => {
+    if (!pickMode || currentRoots.length === 0 || !point) {
+      setHoverBounds(null);
+      return;
+    }
+    setHoverBounds(handleHoverFromScreenshot(currentRoots, point.x / dpr, point.y / dpr));
+  }, [pickMode, currentRoots, dpr]);
+
+  // Clear selector state when selected action changes
+  useEffect(() => {
+    setSelectorHighlights([]);
+    setHierarchyHighlight(null);
+    setPickedNode(null);
+    setHoverBounds(null);
+  }, [selectedIndex]);
 
   const handleMessage = useCallback((msg: ServerMessage) => {
     switch (msg.type) {
@@ -754,6 +813,13 @@ function App() {
             <ScreenshotPanel
               event={selectedEvent}
               screenshots={screenshots}
+              highlightBounds={hierarchyHighlight}
+              selectorHighlights={selectorHighlights}
+              hoverBounds={hoverBounds}
+              onScreenshotClick={pickMode ? handleScreenshotClick : undefined}
+              onScreenshotHover={pickMode ? handleScreenshotHover : undefined}
+              pickMode={pickMode}
+              onPickModeToggle={handlePickToggle}
               devicePixelRatio={viewedTestDpr}
             />
           </div>
@@ -780,6 +846,17 @@ function App() {
           metadata={metadata}
           networkEntries={networkEntries}
           networkBodies={networkBodies}
+          onHierarchyNodeSelect={setHierarchyHighlight}
+          pickMode={pickMode}
+          locatorTab={
+            <SelectorTab
+              hierarchyXml={currentHierarchyXml}
+              pickedNode={pickedNode}
+              onHighlightsChange={setSelectorHighlights}
+              selector={selectorText}
+              onSelectorChange={setSelectorText}
+            />
+          }
         />
       }
     />
