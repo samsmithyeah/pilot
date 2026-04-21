@@ -1,5 +1,7 @@
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
+import * as http from 'node:http';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { registerSnapshotTool } from './tools/snapshot.js';
@@ -11,7 +13,7 @@ import { registerListDevicesTool } from './tools/list-devices.js';
 import { registerRunTestsTool } from './tools/run-tests.js';
 import { registerReadTraceTool } from './tools/read-trace.js';
 import { closeClient } from './connection.js';
-import { type McpEventEmitter, nextCallId, summarizeResult } from './events.js';
+import { McpEventEmitter, nextCallId, summarizeResult } from './events.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 
 export function createMcpServer(events?: McpEventEmitter): McpServer {
@@ -118,7 +120,17 @@ function wrapToolsWithEvents(server: McpServer, events: McpEventEmitter): void {
 }
 
 export async function runMcpServer(): Promise<void> {
-  const server = createMcpServer();
+  // Discover UI server for event reporting
+  const uiPort = discoverUiServerPort();
+  const events = uiPort ? new McpEventEmitter() : undefined;
+
+  if (events && uiPort) {
+    events.onToolCall((event) => {
+      postToUiServer(uiPort, '/mcp-events', event);
+    });
+  }
+
+  const server = createMcpServer(events);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
@@ -127,4 +139,29 @@ export async function runMcpServer(): Promise<void> {
     closeClient();
     process.exit(0);
   });
+}
+
+function discoverUiServerPort(): number | null {
+  try {
+    const portFile = path.join(os.tmpdir(), 'pilot-ui-port');
+    const content = fs.readFileSync(portFile, 'utf-8').trim();
+    const port = parseInt(content, 10);
+    if (Number.isFinite(port) && port > 0) return port;
+  } catch {
+    // No UI server running
+  }
+  return null;
+}
+
+function postToUiServer(port: number, urlPath: string, data: unknown): void {
+  const body = JSON.stringify(data);
+  const req = http.request({
+    hostname: '127.0.0.1',
+    port,
+    path: urlPath,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+  });
+  req.on('error', () => {});
+  req.end(body);
 }

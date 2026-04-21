@@ -14,6 +14,7 @@
 
 import * as http from 'node:http';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFileSync, fork, spawn, type ChildProcess } from 'node:child_process';
 import { watch as chokidarWatch, type FSWatcher } from 'chokidar';
@@ -2597,6 +2598,14 @@ export async function startUIServer(
   console.log(`\x1b[1mPilot UI mode running at ${viewerUrl}\x1b[0m`);
   console.log(`\x1b[2mMCP server available at http://127.0.0.1:${actualPort}/mcp\x1b[0m`);
 
+  // Write port file for standalone MCP server discovery
+  const portFilePath = path.join(os.tmpdir(), 'pilot-ui-port');
+  try {
+    fs.writeFileSync(portFilePath, String(actualPort));
+  } catch {
+    // Non-fatal
+  }
+
   // Send device info (single-worker)
   if (!multiWorker && ctx.deviceSerial) {
     broadcast({
@@ -2639,6 +2648,7 @@ export async function startUIServer(
 
       if (mcpTransport) mcpTransport.close();
       mcpServer.close();
+      try { fs.unlinkSync(portFilePath); } catch { /* already gone */ }
       if (watcher) watcher.close();
       for (const ws of clients) ws.close();
       wss.close();
