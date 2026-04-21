@@ -79,6 +79,14 @@ service PilotService {
   // requests and sends them to the SDK for a routing decision (abort,
   // continue with modifications, or fulfill with a mock response).
   rpc NetworkRoute(stream NetworkRouteClientMessage) returns (stream NetworkRouteServerMessage);
+
+  // ─── WebView Testing (PILOT-116) ───
+  // Discover and connect to WebViews for hybrid app testing via CDP.
+  // Android: discovers devtools_remote sockets via /proc/net/unix.
+  // iOS: uses ios-webkit-debug-proxy to expose WebKit Inspector via CDP.
+  rpc ListWebViews(ListWebViewsRequest) returns (ListWebViewsResponse);
+  rpc ForwardWebViewPort(ForwardWebViewPortRequest) returns (ForwardWebViewPortResponse);
+  rpc CloseWebViewPort(CloseWebViewPortRequest) returns (ActionResponse);
 }
 
 // ─── Common Types ───
@@ -766,4 +774,41 @@ message NetworkResponseEvent {
   repeated HeaderEntry headers = 4;
   bytes body = 5;
   string route_action = 6;
+}
+
+// ─── WebView Testing (PILOT-116) ───
+
+message WebViewInfo {
+  string socket_name = 1;
+  int32 pid = 2;
+  string package_name = 3;
+  string url = 4;
+  string title = 5;
+}
+
+message ListWebViewsRequest {
+  string request_id = 1;
+}
+
+message ListWebViewsResponse {
+  string request_id = 1;
+  repeated WebViewInfo webviews = 2;
+  string error_message = 3;
+}
+
+message ForwardWebViewPortRequest {
+  string request_id = 1;
+  string socket_name = 2;
+}
+
+message ForwardWebViewPortResponse {
+  string request_id = 1;
+  bool success = 2;
+  uint32 local_port = 3;
+  string error_message = 4;
+}
+
+message CloseWebViewPortRequest {
+  string request_id = 1;
+  uint32 local_port = 2;
 }

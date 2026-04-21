@@ -41,6 +41,7 @@ export type ActionCategory =
   | 'screenshot'
   | 'api'
   | 'network'
+  | 'webview'
   | 'other'
 
 /** Console output level. */

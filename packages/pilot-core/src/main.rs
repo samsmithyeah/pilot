@@ -194,8 +194,9 @@ async fn main() -> Result<()> {
         .await
         .context("gRPC server failed")?;
 
-    // Clean up any active network proxy before exiting
+    // Clean up any active network proxy and WebView state before exiting
     service_handle.cleanup_network_proxy().await;
+    service_handle.cleanup_webview_state().await;
 
     info!("Pilot daemon shut down cleanly");
     Ok(())

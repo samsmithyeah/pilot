@@ -19,7 +19,7 @@ export {
 } from './element-handle.js';
 
 // Assertions
-export { expect, flushSoftErrors, type PilotAssertions, type GenericAssertions, type PollOptions } from './expect.js';
+export { expect, flushSoftErrors, type PilotAssertions, type WebViewAssertions, type GenericAssertions, type PollOptions } from './expect.js';
 
 // Test runner
 export {
@@ -74,6 +74,10 @@ export { PilotGrpcClient } from './grpc-client.js';
 
 // Tracing
 export { Tracing, type TracingStartOptions, type TracingStopOptions } from './trace/tracing.js';
+
+// WebView testing
+export { WebViewHandle } from './webview-handle.js';
+export { WebViewLocator } from './webview-locator.js';
 
 // ESLint plugin
 export { default as eslintPlugin } from './eslint-plugin/index.js';

@@ -133,6 +133,27 @@ export interface GetLogcatResponse {
   errorMessage: string;
 }
 
+export interface WebViewInfo {
+  socketName: string;
+  pid: number;
+  packageName: string;
+  url: string;
+  title: string;
+}
+
+export interface ListWebViewsResponse {
+  requestId: string;
+  webviews: WebViewInfo[];
+  errorMessage: string;
+}
+
+export interface ForwardWebViewPortResponse {
+  requestId: string;
+  success: boolean;
+  localPort: number;
+  errorMessage: string;
+}
+
 export type AppState = 'not_installed' | 'stopped' | 'background' | 'foreground';
 export type Orientation = 'portrait' | 'landscape';
 export type ColorScheme = 'dark' | 'light';
@@ -698,6 +719,28 @@ export class PilotGrpcClient {
   networkRouteStream(): grpc.ClientDuplexStream<unknown, unknown> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dynamic RPC dispatch on proto-loaded client
     return (this.client as any).networkRoute() as grpc.ClientDuplexStream<unknown, unknown>;
+  }
+
+  // ── WebView Testing (PILOT-116) ──
+
+  async listWebViews(): Promise<ListWebViewsResponse> {
+    return this.call<ListWebViewsResponse>('listWebViews', {
+      requestId: requestId(),
+    });
+  }
+
+  async forwardWebViewPort(socketName: string): Promise<ForwardWebViewPortResponse> {
+    return this.call<ForwardWebViewPortResponse>('forwardWebViewPort', {
+      requestId: requestId(),
+      socketName,
+    });
+  }
+
+  async closeWebViewPort(localPort: number): Promise<ActionResponse> {
+    return this.call<ActionResponse>('closeWebViewPort', {
+      requestId: requestId(),
+      localPort,
+    });
   }
 
   // ── Lifecycle ──

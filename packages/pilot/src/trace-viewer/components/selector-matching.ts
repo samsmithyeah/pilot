@@ -13,6 +13,10 @@ export interface ParsedSelector {
 // Matches: device.getByText("value"), device.getByRole("role", { name: "n" })
 // Supports both single and double quotes, optional whitespace around args
 const DEVICE_RE = /^device\.getBy(\w+)\(\s*(["'])(.*?)\2(?:\s*,\s*\{\s*name:\s*(["'])(.*?)\4\s*\})?\s*\)/
+// Matches: webview.getByText("value"), webview.getByRole("role", { name: "n" })
+const WEBVIEW_GETBY_RE = /^webview\.getBy(\w+)\(\s*(["'])(.*?)\2(?:\s*,\s*\{\s*name:\s*(["'])(.*?)\4\s*\})?\s*\)/
+// Matches: webview.locator("css-selector")
+const WEBVIEW_LOCATOR_RE = /^webview\.locator\(\s*(["'])(.*?)\1\s*\)/
 // Matches: text("value"), contentDesc("value") — legacy/shorthand format
 const SHORT_RE = /^(\w+)\(\s*(["'])(.*?)\2\s*\)/
 
@@ -34,6 +38,24 @@ export function parseSelectorString(input: string): ParsedSelector | null {
 
   const { base, index } = parseChain(trimmed)
 
+  // WebView locator: webview.locator("#email")
+  const locatorMatch = base.match(WEBVIEW_LOCATOR_RE)
+  if (locatorMatch) {
+    return { type: 'wv-locator', value: locatorMatch[2], index }
+  }
+
+  // WebView getBy*: webview.getByRole("button", { name: "Login" })
+  const wvMatch = base.match(WEBVIEW_GETBY_RE)
+  if (wvMatch) {
+    const method = wvMatch[1]
+    const value = wvMatch[3]
+    const name = wvMatch[5]
+    const sel = mapWebViewMethod(method, value, name)
+    if (sel) sel.index = index
+    return sel
+  }
+
+  // Native device getBy*
   const deviceMatch = base.match(DEVICE_RE)
   if (deviceMatch) {
     const method = deviceMatch[1]
@@ -59,6 +81,17 @@ function mapDeviceMethod(method: string, value: string, name?: string): ParsedSe
     case 'Description': return { type: 'contentDesc', value }
     case 'Placeholder': return { type: 'hint', value }
     case 'TestId': return { type: 'testId', value }
+    default: return null
+  }
+}
+
+function mapWebViewMethod(method: string, value: string, name?: string): ParsedSelector | null {
+  switch (method) {
+    case 'Text': return { type: 'wv-text', value }
+    case 'Role': return { type: 'wv-role', value, name }
+    case 'Label': return { type: 'wv-label', value }
+    case 'Placeholder': return { type: 'wv-placeholder', value }
+    case 'TestId': return { type: 'wv-testid', value }
     default: return null
   }
 }
@@ -93,7 +126,18 @@ function getNodeClassName(node: HierarchyNode): string {
 
 // ─── Node Matching ───
 
+function isWebViewNode(node: HierarchyNode): boolean {
+  return node.attributes.get('webview') === 'true'
+}
+
 function nodeMatchesSelector(node: HierarchyNode, selector: ParsedSelector): boolean {
+  // WebView selector types only match WebView nodes
+  if (selector.type.startsWith('wv-')) {
+    if (!isWebViewNode(node)) return false
+    return webViewNodeMatchesSelector(node, selector)
+  }
+
+  // Native selector types match native nodes
   switch (selector.type) {
     case 'text':
       return getNodeText(node) === selector.value
@@ -124,6 +168,67 @@ function nodeMatchesSelector(node: HierarchyNode, selector: ParsedSelector): boo
     default:
       return false
   }
+}
+
+function webViewNodeMatchesSelector(node: HierarchyNode, selector: ParsedSelector): boolean {
+  const tag = node.attributes.get('webview-tag') ?? ''
+  const id = node.attributes.get('webview-id') ?? ''
+  const text = node.attributes.get('text') ?? ''
+  const ariaLabel = node.attributes.get('content-desc') ?? ''
+  const placeholder = node.attributes.get('hint') ?? ''
+  const testId = node.attributes.get('webview-testid') ?? ''
+  const cssClass = node.attributes.get('webview-class') ?? ''
+
+  switch (selector.type) {
+    case 'wv-text':
+      return text === selector.value
+    case 'wv-role': {
+      const role = getNodeRole(node)
+      if (role !== selector.value) return false
+      if (selector.name) {
+        return (ariaLabel || text || placeholder) === selector.name
+      }
+      return true
+    }
+    case 'wv-label':
+      return ariaLabel === selector.value
+    case 'wv-placeholder':
+      return placeholder === selector.value
+    case 'wv-testid':
+      return testId === selector.value
+    case 'wv-locator':
+      return matchCssSelector(selector.value, tag, id, cssClass)
+    default:
+      return false
+  }
+}
+
+function matchCssSelector(css: string, tag: string, id: string, cssClass: string): boolean {
+  // Simple CSS selector matching for the playground
+  // Supports: #id, .class, tag, tag.class, tag#id
+  const trimmed = css.trim()
+
+  if (trimmed.startsWith('#')) {
+    return id === trimmed.slice(1)
+  }
+  if (trimmed.startsWith('.')) {
+    return cssClass.split(/\s+/).includes(trimmed.slice(1))
+  }
+
+  // tag#id
+  const tagIdMatch = trimmed.match(/^(\w+)#(\S+)$/)
+  if (tagIdMatch) {
+    return tag === tagIdMatch[1] && id === tagIdMatch[2]
+  }
+
+  // tag.class
+  const tagClassMatch = trimmed.match(/^(\w+)\.(\S+)$/)
+  if (tagClassMatch) {
+    return tag === tagClassMatch[1] && cssClass.split(/\s+/).includes(tagClassMatch[2])
+  }
+
+  // tag only
+  return tag === trimmed
 }
 
 export function findMatchingNodes(roots: HierarchyNode[], selector: ParsedSelector): HierarchyNode[] {
@@ -167,14 +272,25 @@ function boundsArea(bounds: Bounds): number {
 export function hitTest(roots: HierarchyNode[], x: number, y: number): HierarchyNode | null {
   let best: HierarchyNode | null = null
   let bestArea = Infinity
+  let bestIsWebView = false
 
   function walk(node: HierarchyNode) {
     const bounds = getNodeBounds(node)
     if (bounds && boundsContains(bounds, x, y)) {
       const area = boundsArea(bounds)
-      if (area < bestArea) {
+      const isWv = node.attributes.get('webview') === 'true'
+      // Prefer WebView DOM nodes over native nodes at similar coordinates —
+      // UIAutomator2/XCUITest also expose web content as native elements,
+      // but the WebView DOM nodes produce better selectors (CSS-based).
+      const shouldReplace = isWv && !bestIsWebView
+        ? area <= bestArea * 1.5   // WebView node wins unless much larger
+        : !isWv && bestIsWebView
+          ? false                   // Never replace a WebView node with native
+          : area < bestArea         // Same category: smallest wins
+      if (shouldReplace) {
         best = node
         bestArea = area
+        bestIsWebView = isWv
       }
     }
     for (const child of node.children) {

@@ -124,7 +124,29 @@ export const IOS_TYPE_TO_ROLE: Record<string, string> = {
   'XCUIElementTypeRadioButton': 'radiobutton',
 }
 
+export const WEBVIEW_TAG_TO_ROLE: Record<string, string> = {
+  button: 'button',
+  a: 'link',
+  input: 'textfield',
+  textarea: 'textfield',
+  select: 'combobox',
+  h1: 'heading', h2: 'heading', h3: 'heading', h4: 'heading', h5: 'heading', h6: 'heading',
+  img: 'image',
+  ul: 'list', ol: 'list',
+  li: 'listitem',
+  progress: 'progressbar',
+  dialog: 'dialog',
+}
+
 export function getNodeRole(node: HierarchyNode): string {
+  // WebView nodes
+  if (node.attributes.get('webview') === 'true') {
+    const explicitRole = node.attributes.get('webview-role')
+    if (explicitRole) return explicitRole
+    const tag = node.attributes.get('webview-tag') ?? ''
+    return WEBVIEW_TAG_TO_ROLE[tag] ?? ''
+  }
+
   const className = node.attributes.get('class')
   if (className) return ANDROID_CLASS_TO_ROLE[className] ?? ''
   const iosType = node.attributes.get('type') ?? node.tagName
