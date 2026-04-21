@@ -224,6 +224,20 @@ let spawnedDaemonProcess: ReturnType<typeof spawn> | undefined;
 async function ensureDaemonRunning(address: string, daemonBin?: string, platform?: string): Promise<PilotGrpcClient> {
   const port = address.split(':').pop() ?? '50051';
 
+  // When PILOT_REUSE_DAEMON is set (e.g. from MCP server's pilot_run_tests),
+  // connect to the existing daemon without killing it. This avoids destroying
+  // a daemon owned by UI mode or another long-lived session.
+  if (process.env.PILOT_REUSE_DAEMON) {
+    const client = new PilotGrpcClient(address);
+    const alive = await client.waitForReady(5_000);
+    if (alive) {
+      console.log(dim(`Connected to existing Pilot daemon v${(await client.ping()).version}`));
+      return client;
+    }
+    client.close();
+    // Fall through to normal startup if no daemon is running
+  }
+
   // Kill any stale daemon on this port so we always get a fresh one
   // with the correct --platform flag. The daemon starts in <1s so
   // the cost of a restart is negligible.

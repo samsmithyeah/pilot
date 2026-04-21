@@ -166,7 +166,6 @@ export async function startUIServer(
   options: UIServerOptions = {},
 ): Promise<{ port: number; close: () => void }> {
   const clients = new Set<WebSocket>();
-  let boundPort = 0;
   let testTree: TestTreeNode[] = [];
   let isRunning = false;
   const failedFiles = new Set<string>();
@@ -337,12 +336,13 @@ export async function startUIServer(
   let mcpTransport: SSEServerTransport | null = null;
   let mcpClientName: string | undefined;
   let mcpClientVersion: string | undefined;
+  let mcpPort = 0;
 
-  function getMcpStatus(port?: number): ServerMessage {
+  function getMcpStatus(): ServerMessage {
     return {
       type: 'mcp-status' as const,
       running: true,
-      sseUrl: port != null ? `http://localhost:${port}/mcp` : undefined,
+      sseUrl: mcpPort ? `http://localhost:${mcpPort}/mcp` : undefined,
       clientName: mcpClientName,
       clientVersion: mcpClientVersion,
     };
@@ -2431,46 +2431,6 @@ export async function startUIServer(
       return;
     }
 
-    // MCP SSE endpoint — GET establishes SSE stream
-    if (url.pathname === '/mcp' && req.method === 'GET') {
-      if (mcpTransport) {
-        res.writeHead(409);
-        res.end('MCP session already active');
-        return;
-      }
-      mcpTransport = new SSEServerTransport('/mcp/message', res);
-      mcpServer.connect(mcpTransport).catch(() => {
-        mcpTransport = null;
-      });
-      return;
-    }
-
-    // MCP message endpoint — POST sends JSON-RPC messages
-    if (url.pathname === '/mcp/message' && req.method === 'POST') {
-      if (!mcpTransport) {
-        res.writeHead(400);
-        res.end('No active MCP session');
-        return;
-      }
-      mcpTransport.handlePostMessage(req, res);
-      return;
-    }
-
-    // Event ingest from standalone `pilot mcp-server`
-    if (url.pathname === '/mcp-events' && req.method === 'POST') {
-      let body = '';
-      req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
-      req.on('end', () => {
-        try {
-          const event = JSON.parse(body);
-          broadcast({ type: 'mcp-tool-call', ...event });
-        } catch { /* ignore malformed */ }
-        res.writeHead(200);
-        res.end('OK');
-      });
-      return;
-    }
-
     res.writeHead(404);
     res.end('Not found');
   });
@@ -2484,7 +2444,7 @@ export async function startUIServer(
 
     // Send current state to new client
     ws.send(JSON.stringify({ type: 'test-tree', files: testTree } satisfies ServerMessage));
-    ws.send(JSON.stringify(getMcpStatus(boundPort)));
+    ws.send(JSON.stringify(getMcpStatus()));
 
     if (multiWorker && workersInitialized) {
       // Send workers info
@@ -2568,7 +2528,73 @@ export async function startUIServer(
     });
     server.on('error', reject);
   });
-  boundPort = actualPort;
+  // ─── MCP Server (separate fixed port) ───
+
+  const MCP_DEFAULT_PORT = 9274;
+  const mcpHttpServer = http.createServer((req, res) => {
+    const url = new URL(req.url ?? '/', 'http://localhost');
+
+    // SSE endpoint — GET establishes SSE stream
+    if (url.pathname === '/mcp' && req.method === 'GET') {
+      if (mcpTransport) {
+        // Close old session so the new client can connect
+        mcpTransport.close();
+        mcpTransport = null;
+      }
+      mcpTransport = new SSEServerTransport('/mcp/message', res);
+      mcpServer.connect(mcpTransport).catch(() => {
+        mcpTransport = null;
+      });
+      return;
+    }
+
+    // Message endpoint — POST sends JSON-RPC messages
+    if (url.pathname === '/mcp/message' && req.method === 'POST') {
+      if (!mcpTransport) {
+        res.writeHead(400);
+        res.end('No active MCP session');
+        return;
+      }
+      mcpTransport.handlePostMessage(req, res);
+      return;
+    }
+
+    // Event ingest from standalone `pilot mcp-server`
+    if (url.pathname === '/mcp-events' && req.method === 'POST') {
+      let body = '';
+      req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+      req.on('end', () => {
+        try {
+          const event = JSON.parse(body);
+          broadcast({ type: 'mcp-tool-call', ...event });
+        } catch { /* ignore malformed */ }
+        res.writeHead(200);
+        res.end('OK');
+      });
+      return;
+    }
+
+    res.writeHead(404);
+    res.end('Not found');
+  });
+
+  mcpPort = MCP_DEFAULT_PORT;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      mcpHttpServer.listen(MCP_DEFAULT_PORT, '127.0.0.1', resolve);
+      mcpHttpServer.on('error', reject);
+    });
+  } catch {
+    // Port in use — fall back to a random port
+    mcpPort = await new Promise<number>((resolve, reject) => {
+      mcpHttpServer.listen(0, '127.0.0.1', () => {
+        const addr = mcpHttpServer.address();
+        if (typeof addr === 'object' && addr) resolve(addr.port);
+        else reject(new Error('Failed to bind MCP server'));
+      });
+      mcpHttpServer.on('error', reject);
+    });
+  }
 
   // Discover tests
   await discoverAllFiles();
@@ -2596,12 +2622,12 @@ export async function startUIServer(
 
   console.log(`\x1b[2m${workerLabel} | ${ctx.testFiles.length} test file(s)\x1b[0m`);
   console.log(`\x1b[1mPilot UI mode running at ${viewerUrl}\x1b[0m`);
-  console.log(`\x1b[2mMCP server available at http://127.0.0.1:${actualPort}/mcp\x1b[0m`);
+  console.log(`\x1b[2mMCP server available at http://127.0.0.1:${mcpPort}/mcp\x1b[0m`);
 
   // Write port file for standalone MCP server discovery
   const portFilePath = path.join(os.tmpdir(), 'pilot-ui-port');
   try {
-    fs.writeFileSync(portFilePath, String(actualPort));
+    fs.writeFileSync(portFilePath, String(mcpPort));
   } catch {
     // Non-fatal
   }
@@ -2648,6 +2674,7 @@ export async function startUIServer(
 
       if (mcpTransport) mcpTransport.close();
       mcpServer.close();
+      mcpHttpServer.close();
       try { fs.unlinkSync(portFilePath); } catch { /* already gone */ }
       if (watcher) watcher.close();
       for (const ws of clients) ws.close();

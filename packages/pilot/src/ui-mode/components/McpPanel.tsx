@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState } from 'preact/hooks';
+import { useRef, useEffect, useState, useCallback } from 'preact/hooks';
 import type { McpToolCallMessage } from '../ui-protocol.js';
 
 interface McpPanelProps {
@@ -9,10 +9,11 @@ interface McpPanelProps {
   onClear: () => void
 }
 
+const STDIO_COMMAND = 'claude mcp add pilot -- pilot mcp-server';
+
 export function McpPanel({ sseUrl, clientName, clientVersion, toolCalls, onClear }: McpPanelProps) {
   const feedRef = useRef<HTMLDivElement>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     if (feedRef.current) {
@@ -20,15 +21,9 @@ export function McpPanel({ sseUrl, clientName, clientVersion, toolCalls, onClear
     }
   }, [toolCalls.length]);
 
-  const handleCopyConfig = () => {
-    if (!sseUrl) return;
-    const config = JSON.stringify({ pilot: { type: 'sse', url: sseUrl } }, null, 2);
-    navigator.clipboard.writeText(config);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  };
-
-  const completed = toolCalls.filter(tc => tc.status !== 'started');
+  // Merge started+completed events: show in-progress items immediately,
+  // replace with completed version when it arrives.
+  const mergedCalls = mergeToolCalls(toolCalls);
 
   return (
     <div class="mcp-panel">
@@ -50,12 +45,7 @@ export function McpPanel({ sseUrl, clientName, clientVersion, toolCalls, onClear
             )}
         </div>
         <div class="mcp-header-right">
-          {sseUrl && (
-            <button class="mcp-btn" onClick={handleCopyConfig} title="Copy .mcp.json config to clipboard">
-              {copied ? 'Copied!' : 'Copy config'}
-            </button>
-          )}
-          {completed.length > 0 && (
+          {mergedCalls.length > 0 && (
             <button class="mcp-btn" onClick={onClear} title="Clear activity feed">
               Clear
             </button>
@@ -64,7 +54,7 @@ export function McpPanel({ sseUrl, clientName, clientVersion, toolCalls, onClear
       </div>
 
       <div class="mcp-feed" ref={feedRef}>
-        {completed.length === 0
+        {mergedCalls.length === 0
           ? (
             <div class="mcp-empty">
               {clientName
@@ -74,7 +64,7 @@ export function McpPanel({ sseUrl, clientName, clientVersion, toolCalls, onClear
                   : 'MCP server starting...'}
             </div>
           )
-          : completed.map(tc => (
+          : mergedCalls.map(tc => (
             <div
               key={tc.id}
               class={`mcp-entry ${tc.status}${expandedId === tc.id ? ' expanded' : ''}`}
@@ -83,10 +73,17 @@ export function McpPanel({ sseUrl, clientName, clientVersion, toolCalls, onClear
               <div class="mcp-entry-header">
                 <span class="mcp-time">{formatTime(tc.timestamp)}</span>
                 <span class="mcp-tool">{tc.tool.replace('pilot_', '')}</span>
-                {tc.durationMs != null && (
-                  <span class="mcp-duration">{formatDuration(tc.durationMs)}</span>
-                )}
+                {tc.status === 'started'
+                  ? <span class="mcp-duration running">running…</span>
+                  : tc.durationMs != null && (
+                    <span class="mcp-duration">{formatDuration(tc.durationMs)}</span>
+                  )}
               </div>
+              {tc.status === 'started' && (
+                <div class="mcp-entry-summary mcp-in-progress">
+                  {formatToolArgs(tc.tool, tc.args)}
+                </div>
+              )}
               {tc.resultSummary && (
                 <div class="mcp-entry-summary">
                   {tc.status === 'error' ? tc.error ?? tc.resultSummary : tc.resultSummary}
@@ -109,13 +106,37 @@ export function McpPanel({ sseUrl, clientName, clientVersion, toolCalls, onClear
   );
 }
 
-function McpSetupHint({ sseUrl }: { sseUrl: string }) {
+function CopyableCommand({ label, command }: { label: string; command: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = useCallback((e: Event) => {
+    e.stopPropagation();
+    navigator.clipboard.writeText(command);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  }, [command]);
+
   return (
-    <div>
-      <div style="margin-bottom: 8px">No agent connected. To use with Claude Code:</div>
-      <code class="mcp-code-block">
-        {`// .mcp.json\n{\n  "pilot": {\n    "type": "sse",\n    "url": "${sseUrl}"\n  }\n}`}
-      </code>
+    <div class="mcp-command">
+      <div class="mcp-command-label">{label}</div>
+      <div class="mcp-command-row">
+        <code class="mcp-command-text">{command}</code>
+        <button class="mcp-copy-btn" onClick={handleCopy} title="Copy to clipboard">
+          {copied ? 'Copied!' : 'Copy'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function McpSetupHint({ sseUrl }: { sseUrl: string }) {
+  const sseCommand = `claude mcp add pilot --transport sse ${sseUrl}`;
+
+  return (
+    <div class="mcp-setup">
+      <div class="mcp-setup-title">Connect Claude Code</div>
+      <CopyableCommand label="With UI mode (live activity feed)" command={sseCommand} />
+      <CopyableCommand label="Standalone (works without UI mode)" command={STDIO_COMMAND} />
     </div>
   );
 }
@@ -134,4 +155,30 @@ function formatArgValue(v: unknown): string {
   if (typeof v === 'string') return v.length > 80 ? v.slice(0, 77) + '...' : v;
   if (Array.isArray(v)) return `[${v.length} items]`;
   return String(v);
+}
+
+function mergeToolCalls(calls: McpToolCallMessage[]): McpToolCallMessage[] {
+  const byId = new Map<string, McpToolCallMessage>();
+  for (const tc of calls) {
+    const existing = byId.get(tc.id);
+    if (!existing || tc.status !== 'started') {
+      byId.set(tc.id, tc);
+    }
+  }
+  return Array.from(byId.values());
+}
+
+function formatToolArgs(tool: string, args: Record<string, unknown>): string {
+  if (tool === 'pilot_run_tests' && Array.isArray(args.files)) {
+    const files = args.files as string[];
+    const names = files.map(f => {
+      const parts = String(f).split('/');
+      return parts[parts.length - 1];
+    });
+    return `Running ${names.join(', ')}`;
+  }
+  if (tool === 'pilot_tap' || tool === 'pilot_type') {
+    return String(args.selector ?? '');
+  }
+  return '';
 }

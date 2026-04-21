@@ -137,14 +137,14 @@ export function Layout({ topBar, testExplorer, filmstrip, actionsPanel, screensh
           <>
             <div class="ui-resize-handle ui-resize-col" onMouseDown={handleDeviceResize} />
             <div class="ui-right-column" style={{ width: `${deviceWidth}px`, minWidth: `${deviceWidth}px` }}>
-              <div class="ui-device-pane">
-                {devicePane}
-              </div>
               {mcpPanel && (
                 <div class="ui-mcp-pane">
                   {mcpPanel}
                 </div>
               )}
+              <div class="ui-device-pane">
+                {devicePane}
+              </div>
             </div>
           </>
         )}

@@ -58,65 +58,61 @@ export function createMcpServer(events?: McpEventEmitter): McpServer {
 }
 
 function wrapToolsWithEvents(server: McpServer, events: McpEventEmitter): void {
-  // The MCP SDK exposes registered tools via the internal _registeredTools map.
-  // We intercept the tool request handler to emit events.
-  const originalSetToolHandler = server.server.setRequestHandler.bind(server.server);
+  // The SDK sets the tools/call handler during tool registration (before we
+  // get here). Access the internal handler map and wrap the existing handler.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- accessing private _requestHandlers
+  const handlers = (server.server as any)._requestHandlers as Map<string, (...args: unknown[]) => unknown>;
+  const original = handlers.get('tools/call');
+  if (!original) return;
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- intercepting internal SDK handler
-  server.server.setRequestHandler = function (schema: any, handler: any) {
-    if (schema?.method === 'tools/call') {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- wrapping the original handler
-      const wrappedHandler = async (request: any, extra: any) => {
-        const toolName = request.params?.name as string;
-        const args = (request.params?.arguments ?? {}) as Record<string, unknown>;
-        const callId = nextCallId();
-        const start = Date.now();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- wrapping internal handler
+  handlers.set('tools/call', async (request: any, extra: any) => {
+    const toolName = request.params?.name as string;
+    const args = (request.params?.arguments ?? {}) as Record<string, unknown>;
+    const callId = nextCallId();
+    const start = Date.now();
 
-        events.emitToolCall({
-          id: callId,
-          tool: toolName,
-          args,
-          status: 'started',
-          timestamp: start,
-        });
+    events.emitToolCall({
+      id: callId,
+      tool: toolName,
+      args,
+      status: 'started',
+      timestamp: start,
+    });
 
-        try {
-          const result = await handler(request, extra) as { result: CallToolResult };
-          const elapsed = Date.now() - start;
-          const resultText = (result.result?.content ?? [])
-            .filter((c: { type: string }) => c.type === 'text')
-            .map((c) => 'text' in c ? (c as { text: string }).text : '')
-            .join('\n');
+    try {
+      const result = await original(request, extra) as { result: CallToolResult };
+      const elapsed = Date.now() - start;
+      const resultText = (result.result?.content ?? [])
+        .filter((c: { type: string }) => c.type === 'text')
+        .map((c) => 'text' in c ? (c as { text: string }).text : '')
+        .join('\n');
 
-          events.emitToolCall({
-            id: callId,
-            tool: toolName,
-            args,
-            status: result.result?.isError ? 'error' : 'completed',
-            resultSummary: summarizeResult(toolName, resultText),
-            error: result.result?.isError ? resultText : undefined,
-            durationMs: elapsed,
-            timestamp: start,
-          });
+      events.emitToolCall({
+        id: callId,
+        tool: toolName,
+        args,
+        status: result.result?.isError ? 'error' : 'completed',
+        resultSummary: summarizeResult(toolName, resultText),
+        error: result.result?.isError ? resultText : undefined,
+        durationMs: elapsed,
+        timestamp: start,
+      });
 
-          return result;
-        } catch (err) {
-          events.emitToolCall({
-            id: callId,
-            tool: toolName,
-            args,
-            status: 'error',
-            error: err instanceof Error ? err.message : String(err),
-            durationMs: Date.now() - start,
-            timestamp: start,
-          });
-          throw err;
-        }
-      };
-      return originalSetToolHandler(schema, wrappedHandler);
+      return result;
+    } catch (err) {
+      events.emitToolCall({
+        id: callId,
+        tool: toolName,
+        args,
+        status: 'error',
+        error: err instanceof Error ? err.message : String(err),
+        durationMs: Date.now() - start,
+        timestamp: start,
+      });
+      throw err;
     }
-    return originalSetToolHandler(schema, handler);
-  };
+  });
 }
 
 export async function runMcpServer(): Promise<void> {

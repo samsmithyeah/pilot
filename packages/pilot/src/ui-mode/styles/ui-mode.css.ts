@@ -971,7 +971,7 @@ html, body, #app {
 
 .ui-mcp-pane {
   flex: 0 0 200px;
-  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -1099,6 +1099,16 @@ html, body, #app {
   padding-left: 56px;
 }
 .mcp-entry.error .mcp-entry-summary { color: var(--color-error); }
+.mcp-entry.started { opacity: 0.8; }
+.mcp-duration.running {
+  margin-left: auto;
+  color: var(--color-accent);
+  font-size: 10px;
+  flex-shrink: 0;
+  animation: mcp-pulse 1.5s ease-in-out infinite;
+}
+.mcp-in-progress { font-style: italic; }
+@keyframes mcp-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 
 .mcp-entry { cursor: pointer; }
 .mcp-entry:hover { background: var(--bg-hover); }
@@ -1124,17 +1134,57 @@ html, body, #app {
   word-break: break-all;
 }
 
-.mcp-code-block {
-  display: block;
-  padding: 8px;
-  background: var(--bg-tertiary);
+.mcp-setup {
+  text-align: left;
+}
+.mcp-setup-title {
+  font-weight: 600;
+  color: var(--color-text);
+  margin-bottom: 10px;
+  font-size: 12px;
+}
+.mcp-command {
+  margin-bottom: 10px;
+}
+.mcp-command:last-child { margin-bottom: 0; }
+.mcp-command-label {
+  font-size: 10px;
+  color: var(--color-text-muted);
+  margin-bottom: 4px;
+}
+.mcp-command-row {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--border);
   border-radius: 4px;
+  overflow: hidden;
+  background: var(--bg-tertiary);
+}
+.mcp-command-text {
+  flex: 1;
+  padding: 6px 8px;
   font-family: var(--font-mono);
   font-size: 10px;
-  white-space: pre;
-  line-height: 1.5;
   color: var(--color-text);
+  white-space: nowrap;
   overflow-x: auto;
+  line-height: 1.4;
+}
+.mcp-copy-btn {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  border: none;
+  border-left: 1px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--color-text-muted);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.mcp-copy-btn:hover {
+  background: var(--bg-hover);
+  color: var(--color-text);
 }
 
 /* ─── Scrollbar ─── */
