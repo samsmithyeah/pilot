@@ -233,8 +233,14 @@ html, body, #app {
 
 /* ─── Device Pane ─── */
 
-.ui-device-pane {
+.ui-right-column {
   flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.ui-device-pane {
+  flex: 1 1 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -964,12 +970,12 @@ html, body, #app {
 /* ─── MCP Panel ─── */
 
 .ui-mcp-pane {
+  flex: 0 0 200px;
   border-top: 1px solid var(--border);
-  min-height: 150px;
-  max-height: 50%;
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  background: var(--bg-primary);
 }
 
 .mcp-panel {

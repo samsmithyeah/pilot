@@ -177,7 +177,7 @@ export function RunControls({ connected, isRunning, deviceSerial, counts, theme,
           onClick={onToggleMcpPanel}
           title={mcpClientName ? `MCP: ${mcpClientName} (click to toggle panel)` : 'MCP: listening (click to toggle panel)'}
         >
-          <span class={`rc-dot ${mcpClientName ? 'done' : 'idle'}`} />
+          <span class={`mcp-dot ${mcpClientName ? 'connected' : 'listening'}`} />
           MCP
           {mcpClientName && <span class="rc-mcp-client">{mcpClientName}</span>}
         </button>
