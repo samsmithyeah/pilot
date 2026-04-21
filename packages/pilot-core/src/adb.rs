@@ -369,6 +369,110 @@ pub async fn shell_lenient(serial: &str, command: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// Parsed WebView debug socket entry from /proc/net/unix.
+#[derive(Debug, Clone)]
+pub struct WebViewSocket {
+    pub socket_name: String,
+    pub pid: i32,
+    pub package_name: String,
+}
+
+/// List WebView debug sockets by parsing /proc/net/unix on the device.
+///
+/// Android exposes devtools_remote sockets for debuggable WebViews at
+/// `@webview_devtools_remote_<pid>` or `@chrome_devtools_remote`.
+#[instrument]
+pub async fn list_webview_sockets(serial: &str) -> Result<Vec<WebViewSocket>> {
+    let unix_output = shell_lenient(
+        serial,
+        "cat /proc/net/unix 2>/dev/null | grep devtools_remote",
+    )
+    .await?;
+
+    let mut sockets = Vec::new();
+    let mut pids = Vec::new();
+
+    for line in unix_output.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        // /proc/net/unix format: Num RefCount Protocol Flags Type St Inode Path
+        // The socket name is in the last field, prefixed with @
+        let Some(path) = line.split_whitespace().last() else {
+            continue;
+        };
+        let socket_name = path.trim_start_matches('@');
+        if !socket_name.contains("devtools_remote") {
+            continue;
+        }
+
+        // Extract PID from socket name: webview_devtools_remote_<pid>
+        let pid: i32 = socket_name
+            .rsplit('_')
+            .next()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+
+        pids.push(pid);
+        sockets.push(WebViewSocket {
+            socket_name: socket_name.to_string(),
+            pid,
+            package_name: String::new(),
+        });
+    }
+
+    if sockets.is_empty() {
+        return Ok(sockets);
+    }
+
+    // Resolve PIDs to package names
+    let ps_output = shell_lenient(serial, "ps -A -o PID,NAME 2>/dev/null || ps").await?;
+    let mut pid_to_pkg: std::collections::HashMap<i32, String> = std::collections::HashMap::new();
+    for line in ps_output.lines().skip(1) {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 2 {
+            if let Ok(pid) = parts[0].parse::<i32>() {
+                pid_to_pkg.insert(pid, parts.last().unwrap_or(&"").to_string());
+            }
+        }
+    }
+
+    for socket in &mut sockets {
+        if let Some(pkg) = pid_to_pkg.get(&socket.pid) {
+            socket.package_name = pkg.clone();
+        }
+    }
+
+    debug!(count = sockets.len(), "Found WebView debug sockets");
+    Ok(sockets)
+}
+
+/// Forward a local TCP port to a device-side abstract Unix socket.
+///
+/// Used for Chrome DevTools Protocol connections to WebView debug sockets.
+#[instrument]
+pub async fn forward_abstract_socket(
+    serial: &str,
+    host_port: u16,
+    socket_name: &str,
+) -> Result<()> {
+    let host_arg = format!("tcp:{host_port}");
+    let device_arg = format!("localabstract:{socket_name}");
+    run_adb(
+        Some(serial),
+        &["forward", &host_arg, &device_arg],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    debug!(
+        host_port,
+        socket_name, "Abstract socket forwarding established"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

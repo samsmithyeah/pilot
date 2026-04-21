@@ -1,0 +1,737 @@
+import { WebSocket } from 'ws';
+import type { PilotGrpcClient } from './grpc-client.js';
+import { WebViewLocator } from './webview-locator.js';
+import type { TraceCollector } from './trace/trace-collector.js';
+import { extractSourceLocation } from './trace/trace-collector.js';
+import type { WebKitInspectorClient } from './webkit-inspector.js';
+
+const POLL_INTERVAL_MS = 250;
+
+const ROLE_CSS_MAP: Record<string, string[]> = {
+  button: ['button', '[role="button"]', 'input[type="button"]', 'input[type="submit"]', 'input[type="reset"]'],
+  textfield: ['input:not([type])', 'input[type="text"]', 'input[type="email"]', 'input[type="password"]', 'input[type="search"]', 'input[type="tel"]', 'input[type="url"]', 'input[type="number"]', 'textarea', '[role="textbox"]'],
+  checkbox: ['input[type="checkbox"]', '[role="checkbox"]'],
+  radio: ['input[type="radio"]', '[role="radio"]'],
+  link: ['a[href]', '[role="link"]'],
+  heading: ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', '[role="heading"]'],
+  img: ['img', '[role="img"]'],
+  list: ['ul', 'ol', '[role="list"]'],
+  listitem: ['li', '[role="listitem"]'],
+  switch: ['[role="switch"]'],
+  slider: ['input[type="range"]', '[role="slider"]'],
+  combobox: ['select', '[role="combobox"]'],
+  tab: ['[role="tab"]'],
+  progressbar: ['progress', '[role="progressbar"]'],
+  dialog: ['dialog', '[role="dialog"]'],
+};
+
+export interface WebViewTraceContext {
+  collector: TraceCollector
+  takeScreenshot: () => Promise<Buffer | undefined>
+  captureHierarchy: () => Promise<string | undefined>
+}
+
+interface CDPResponse {
+  id: number
+  result?: Record<string, unknown>
+  error?: { code: number; message: string }
+}
+
+interface CDPTarget {
+  id: string
+  title: string
+  url: string
+  webSocketDebuggerUrl: string
+  type: string
+}
+
+export class WebViewHandle {
+  private _ws: WebSocket | null = null;
+  private _msgId = 0;
+  private _pending = new Map<number, {
+    resolve: (value: unknown) => void
+    reject: (reason: Error) => void
+  }>();
+  private _client: PilotGrpcClient;
+  private _localPort: number;
+  private _timeoutMs: number;
+  private _closed = false;
+  private _webviewNativeBounds: { left: number; top: number; right: number; bottom: number } | undefined;
+  /** @internal */
+  _traceCtx: WebViewTraceContext | null = null;
+
+  // iOS WebKit Inspector fields (alternative to CDP WebSocket)
+  private _inspector: WebKitInspectorClient | null = null;
+  private _inspectorAppId: string | null = null;
+  private _inspectorPageId: number | null = null;
+
+  /** @internal — Platform for bounds lookup (WebView class name differs). */
+  _platform: 'android' | 'ios' = 'android';
+
+  /** @internal */
+  constructor(client: PilotGrpcClient, localPort: number, timeoutMs: number) {
+    this._client = client;
+    this._localPort = localPort;
+    this._timeoutMs = timeoutMs;
+  }
+
+  /** @internal — Create a WebViewHandle backed by WebKit Inspector (iOS). */
+  static _createFromInspector(
+    client: PilotGrpcClient,
+    inspector: WebKitInspectorClient,
+    appId: string,
+    pageId: number,
+    timeoutMs: number,
+  ): WebViewHandle {
+    const handle = new WebViewHandle(client, 0, timeoutMs);
+    handle._inspector = inspector;
+    handle._inspectorAppId = appId;
+    handle._inspectorPageId = pageId;
+    handle._platform = 'ios';
+    return handle;
+  }
+
+  private get _useInspector(): boolean {
+    return this._inspector !== null;
+  }
+
+  /** @internal — Get the screen-space bounds of an element inside the WebView. */
+  async _getElementBounds(selectorOrFinderJs: string, finderJs?: string): Promise<{ left: number; top: number; right: number; bottom: number } | undefined> {
+    try {
+      const finder = finderJs ?? `document.querySelector(${JSON.stringify(selectorOrFinderJs)})`;
+      // On Android, XCUITest returns bounds in px so we scale by devicePixelRatio.
+      // On iOS, XCUITest returns bounds in points (= CSS px), so no scaling needed.
+      const useDpr = this._platform === 'android';
+      const rect = await this._evaluate(`(() => {
+        const el = (${finder});
+        if (!el) return null;
+        const r = el.getBoundingClientRect();
+        const dpr = ${useDpr ? 'window.devicePixelRatio || 1' : '1'};
+        return { left: r.left * dpr, top: r.top * dpr, right: r.right * dpr, bottom: r.bottom * dpr };
+      })()`) as { left: number; top: number; right: number; bottom: number } | null;
+      if (!rect) return undefined;
+
+      // Look up the native WebView element's bounds to translate to screen coords
+      if (!this._webviewNativeBounds) {
+        const webviewClassName = this._platform === 'ios'
+          ? 'XCUIElementTypeWebView'
+          : 'android.webkit.WebView';
+        try {
+          const res = await this._client.findElement(
+            { kind: { type: 'className', value: webviewClassName } },
+            200,
+          );
+          if (res.found && res.element?.bounds) {
+            this._webviewNativeBounds = res.element.bounds;
+          }
+        } catch { /* best-effort */ }
+      }
+
+      if (this._webviewNativeBounds) {
+        const wb = this._webviewNativeBounds;
+        return {
+          left: Math.round(wb.left + rect.left),
+          top: Math.round(wb.top + rect.top),
+          right: Math.round(wb.left + rect.right),
+          bottom: Math.round(wb.top + rect.bottom),
+        };
+      }
+
+      return undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async _traced<T>(action: string, selector: string | undefined, fn: () => Promise<T>, finderJs?: string): Promise<T> {
+    const ctx = this._traceCtx;
+    if (!ctx) return fn();
+
+    const sourceLocation = extractSourceLocation(new Error().stack ?? '');
+    const selectorStr = selector ? `css=${selector}` : undefined;
+
+    const { captures: beforeCaptures } = await ctx.collector.captureBeforeAction(
+      ctx.takeScreenshot,
+      ctx.captureHierarchy,
+    );
+
+    const start = Date.now();
+    let success = true;
+    let error: string | undefined;
+    let result: T;
+
+    try {
+      result = await fn();
+    } catch (err) {
+      success = false;
+      error = err instanceof Error ? err.message : String(err);
+      ctx.collector.addActionEvent({
+        category: 'webview', action, selector: selectorStr,
+        duration: Date.now() - start, success, error,
+        log: [`webview.${action}(${selectorStr ?? ''}) failed: ${error}`],
+        hasScreenshotBefore: !!beforeCaptures.screenshotBefore,
+        hasScreenshotAfter: false,
+        hasHierarchyBefore: !!beforeCaptures.hierarchyBefore,
+        hasHierarchyAfter: false,
+        sourceLocation,
+      });
+      throw err;
+    }
+
+    // Look up element bounds after action succeeds (best-effort)
+    let bounds: { left: number; top: number; right: number; bottom: number } | undefined;
+    let point: { x: number; y: number } | undefined;
+    if (selector) {
+      bounds = await this._getElementBounds(selector, finderJs);
+      if (bounds && action === 'click') {
+        point = {
+          x: (bounds.left + bounds.right) / 2,
+          y: (bounds.top + bounds.bottom) / 2,
+        };
+      }
+    }
+
+    ctx.collector.addActionEvent({
+      category: 'webview', action, selector: selectorStr,
+      duration: Date.now() - start, success, error,
+      bounds, point,
+      log: [`webview.${action}(${selectorStr ?? ''})`],
+      hasScreenshotBefore: !!beforeCaptures.screenshotBefore,
+      hasScreenshotAfter: false,
+      hasHierarchyBefore: !!beforeCaptures.hierarchyBefore,
+      hasHierarchyAfter: false,
+      sourceLocation,
+    });
+
+    return result;
+  }
+
+  /** @internal — Connect to the WebView's CDP endpoint. */
+  async _connect(): Promise<void> {
+    const targets = await this._fetchTargets();
+    const page = targets.find(t => t.type === 'page') ?? targets[0];
+    if (!page) {
+      throw new Error(
+        'No WebView targets found. Ensure the WebView is visible and has debugging enabled.',
+      );
+    }
+
+    let wsUrl = page.webSocketDebuggerUrl;
+    // ios-webkit-debug-proxy may return relative WS URLs — make absolute
+    if (wsUrl && !wsUrl.startsWith('ws')) {
+      wsUrl = `ws://127.0.0.1:${this._localPort}${wsUrl}`;
+    }
+
+    await this._connectWebSocket(wsUrl);
+    await this._send('Runtime.enable', {});
+    await this._send('Page.enable', {});
+  }
+
+  private async _fetchTargets(): Promise<CDPTarget[]> {
+    const resp = await fetch(`http://127.0.0.1:${this._localPort}/json`);
+    if (!resp.ok) {
+      throw new Error(`CDP /json returned ${resp.status}`);
+    }
+    return (await resp.json()) as CDPTarget[];
+  }
+
+  private _connectWebSocket(url: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(url);
+      ws.on('open', () => {
+        this._ws = ws;
+        resolve();
+      });
+      ws.on('error', (err) => {
+        if (!this._ws) reject(err);
+      });
+      ws.on('message', (data) => {
+        const msg = JSON.parse(data.toString()) as CDPResponse;
+        if (msg.id !== undefined) {
+          const pending = this._pending.get(msg.id);
+          if (pending) {
+            this._pending.delete(msg.id);
+            if (msg.error) {
+              pending.reject(new Error(`CDP error: ${msg.error.message}`));
+            } else {
+              pending.resolve(msg.result ?? {});
+            }
+          }
+        }
+      });
+      ws.on('close', () => {
+        this._ws = null;
+        for (const [, p] of this._pending) {
+          p.reject(new Error('WebView CDP connection closed'));
+        }
+        this._pending.clear();
+      });
+    });
+  }
+
+  /** @internal */
+  async _send(method: string, params: Record<string, unknown>): Promise<unknown> {
+    if (this._useInspector) {
+      const id = ++this._msgId;
+      return this._inspector!.sendInspectorMessage(this._inspectorAppId!, {
+        id,
+        method,
+        params,
+      });
+    }
+
+    if (!this._ws || this._ws.readyState !== WebSocket.OPEN) {
+      throw new Error('WebView CDP connection is not open');
+    }
+    const id = ++this._msgId;
+    return new Promise((resolve, reject) => {
+      this._pending.set(id, { resolve, reject });
+      this._ws!.send(JSON.stringify({ id, method, params }));
+    });
+  }
+
+  /** @internal — Evaluate JS and return the result value. */
+  async _evaluate(expression: string): Promise<unknown> {
+    const rawResult = await this._send('Runtime.evaluate', {
+      expression,
+      returnByValue: true,
+      awaitPromise: true,
+    });
+    // WebKit Inspector wraps the response in a 'result' key at the top level
+    const result = (this._useInspector
+      ? (rawResult as Record<string, unknown>).result as Record<string, unknown> | undefined ?? rawResult
+      : rawResult
+    ) as { result?: { value?: unknown; type?: string; subtype?: string; description?: string }; exceptionDetails?: { text?: string } };
+    if (result.exceptionDetails) {
+      throw new Error(`WebView JS error: ${result.exceptionDetails.text}`);
+    }
+    return result.result?.value;
+  }
+
+  /** @internal — Wait for a CSS selector to match an element in the DOM. */
+  async _waitForSelector(selector: string, timeoutMs?: number): Promise<void> {
+    const timeout = timeoutMs ?? this._timeoutMs;
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      const found = await this._evaluate(
+        `document.querySelector(${JSON.stringify(selector)}) !== null`,
+      );
+      if (found) return;
+      await sleep(POLL_INTERVAL_MS);
+    }
+    throw new Error(
+      `Timed out waiting for selector "${selector}" in WebView (${timeout}ms)`,
+    );
+  }
+
+  /** @internal — Wait for a finder JS expression to return a non-null element. */
+  async _waitForFinder(finderJs: string, displaySelector: string, timeoutMs?: number): Promise<void> {
+    const timeout = timeoutMs ?? this._timeoutMs;
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      const found = await this._evaluate(`(${finderJs}) !== null`);
+      if (found) return;
+      await sleep(POLL_INTERVAL_MS);
+    }
+    throw new Error(
+      `Timed out waiting for "${displaySelector}" in WebView (${timeout}ms)`,
+    );
+  }
+
+  // ─── Locator-based actions (used by WebViewLocator) ───
+
+  /** @internal */
+  async _clickLocator(loc: WebViewLocator): Promise<void> {
+    return this._traced('click', loc._selector, async () => {
+      await this._waitForFinder(loc._finderJs, loc._selector);
+      await this._evaluate(`(${loc._finderJs}).click()`);
+    }, loc._finderJs);
+  }
+
+  /** @internal */
+  async _fillLocator(loc: WebViewLocator, value: string): Promise<void> {
+    return this._traced('fill', loc._selector, async () => {
+      await this._waitForFinder(loc._finderJs, loc._selector);
+      const escaped = JSON.stringify(value);
+      await this._evaluate(`(() => {
+        const el = (${loc._finderJs});
+        el.value = ${escaped};
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      })()`);
+    }, loc._finderJs);
+  }
+
+  /** @internal */
+  async _textContentLocator(loc: WebViewLocator): Promise<string> {
+    return this._traced('textContent', loc._selector, async () => {
+      await this._waitForFinder(loc._finderJs, loc._selector);
+      const result = await this._evaluate(`(${loc._finderJs}).textContent`);
+      return (result as string) ?? '';
+    }, loc._finderJs);
+  }
+
+  /** @internal */
+  async _innerHTMLLocator(loc: WebViewLocator): Promise<string> {
+    return this._traced('innerHTML', loc._selector, async () => {
+      await this._waitForFinder(loc._finderJs, loc._selector);
+      const result = await this._evaluate(`(${loc._finderJs}).innerHTML`);
+      return (result as string) ?? '';
+    }, loc._finderJs);
+  }
+
+  /** @internal */
+  async _inputValueLocator(loc: WebViewLocator): Promise<string> {
+    return this._traced('inputValue', loc._selector, async () => {
+      await this._waitForFinder(loc._finderJs, loc._selector);
+      const result = await this._evaluate(`(${loc._finderJs}).value`);
+      return (result as string) ?? '';
+    }, loc._finderJs);
+  }
+
+  /** @internal */
+  async _getAttributeLocator(loc: WebViewLocator, name: string): Promise<string | null> {
+    return this._traced('getAttribute', loc._selector, async () => {
+      await this._waitForFinder(loc._finderJs, loc._selector);
+      const result = await this._evaluate(
+        `(${loc._finderJs}).getAttribute(${JSON.stringify(name)})`,
+      );
+      return result as string | null;
+    }, loc._finderJs);
+  }
+
+  /** @internal */
+  async _isVisibleLocator(loc: WebViewLocator): Promise<boolean> {
+    const result = await this._evaluate(`(() => {
+      const el = (${loc._finderJs});
+      if (!el) return false;
+      const style = window.getComputedStyle(el);
+      return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+    })()`);
+    return result as boolean;
+  }
+
+  /**
+   * @internal — Dump the WebView DOM as hierarchy XML nodes for the Selector Playground.
+   * Each visible DOM element becomes a node with bounds in screen coordinates.
+   */
+  async _dumpDomHierarchy(): Promise<string | undefined> {
+    try {
+      // Ensure we have the native WebView bounds for coordinate translation
+      if (!this._webviewNativeBounds) {
+        const webviewClassName = this._platform === 'ios'
+          ? 'XCUIElementTypeWebView'
+          : 'android.webkit.WebView';
+        try {
+          const res = await this._client.findElement(
+            { kind: { type: 'className', value: webviewClassName } },
+            200,
+          );
+          if (res.found && res.element?.bounds) {
+            this._webviewNativeBounds = res.element.bounds;
+          }
+        } catch { /* best-effort */ }
+      }
+
+      const wb = this._webviewNativeBounds;
+      if (!wb) return undefined;
+
+      const useDpr = this._platform === 'android';
+
+      // Evaluate JS to walk the DOM and produce a hierarchy
+      const domData = await this._evaluate(`(() => {
+        const dpr = ${useDpr ? 'window.devicePixelRatio || 1' : '1'};
+        function walk(el, depth) {
+          if (depth > 10) return null;
+          const tag = el.tagName?.toLowerCase() || '';
+          if (!tag || tag === 'script' || tag === 'style' || tag === 'head') return null;
+          const r = el.getBoundingClientRect();
+          if (r.width === 0 && r.height === 0) return null;
+          const node = {
+            tag: tag,
+            id: el.id || '',
+            cls: el.className || '',
+            text: el.children.length === 0 ? (el.textContent || '').trim().slice(0, 200) : '',
+            placeholder: el.placeholder || '',
+            role: el.getAttribute('role') || '',
+            ariaLabel: (() => {
+              var lblBy = el.getAttribute('aria-labelledby');
+              if (lblBy) { var ref = document.getElementById(lblBy); if (ref) return ref.textContent?.trim() || ''; }
+              if (el.getAttribute('aria-label')) return el.getAttribute('aria-label');
+              if (el.id) { var lbl = document.querySelector('label[for=' + JSON.stringify(el.id) + ']'); if (lbl) return lbl.textContent?.trim() || ''; }
+              if (el.closest && el.closest('label')) { var wrapper = el.closest('label'); var clone = wrapper.cloneNode(true); clone.querySelectorAll('input,select,textarea').forEach(function(c){c.remove();}); var t = clone.textContent?.trim(); if (t) return t; }
+              return '';
+            })(),
+            testId: el.getAttribute('data-testid') || '',
+            type: el.getAttribute('type') || '',
+            href: tag === 'a' ? (el.getAttribute('href') || '') : '',
+            bounds: {
+              left: Math.round(r.left * dpr),
+              top: Math.round(r.top * dpr),
+              right: Math.round(r.right * dpr),
+              bottom: Math.round(r.bottom * dpr),
+            },
+            children: [],
+          };
+          for (const child of el.children) {
+            const c = walk(child, depth + 1);
+            if (c) node.children.push(c);
+          }
+          return node;
+        }
+        return walk(document.body, 0);
+      })()`) as DomNode | null;
+
+      if (!domData) return undefined;
+
+      // Convert to hierarchy XML format
+      const lines: string[] = [];
+      function renderNode(node: DomNode) {
+        const bounds = `[${wb!.left + node.bounds.left},${wb!.top + node.bounds.top}][${wb!.left + node.bounds.right},${wb!.top + node.bounds.bottom}]`;
+        const attrs: string[] = [
+          `bounds="${bounds}"`,
+          `class="webview.${node.tag}"`,
+          `webview-tag="${node.tag}"`,
+        ];
+        if (node.text) attrs.push(`text="${escapeXmlAttr(node.text)}"`);
+        if (node.id) attrs.push(`webview-id="${escapeXmlAttr(node.id)}"`);
+        if (node.cls) attrs.push(`webview-class="${escapeXmlAttr(typeof node.cls === 'string' ? node.cls : '')}"`);
+        if (node.placeholder) attrs.push(`hint="${escapeXmlAttr(node.placeholder)}"`);
+        if (node.role) attrs.push(`webview-role="${escapeXmlAttr(node.role)}"`);
+        if (node.ariaLabel) attrs.push(`content-desc="${escapeXmlAttr(node.ariaLabel)}"`);
+        if (node.testId) attrs.push(`webview-testid="${escapeXmlAttr(node.testId)}"`);
+        if (node.type) attrs.push(`webview-type="${escapeXmlAttr(node.type)}"`);
+        if (node.href) attrs.push(`webview-href="${escapeXmlAttr(node.href)}"`);
+        attrs.push('webview="true"');
+
+        if (node.children.length === 0) {
+          lines.push(`<webview.${node.tag} ${attrs.join(' ')} />`);
+        } else {
+          lines.push(`<webview.${node.tag} ${attrs.join(' ')}>`);
+          for (const child of node.children) {
+            renderNode(child);
+          }
+          lines.push(`</webview.${node.tag}>`);
+        }
+      }
+
+      renderNode(domData);
+      return lines.join('\n');
+    } catch {
+      return undefined;
+    }
+  }
+
+  // ─── Public API ───
+
+  async click(selector: string): Promise<void> {
+    return this._traced('click', selector, async () => {
+      await this._waitForSelector(selector);
+      await this._evaluate(
+        `document.querySelector(${JSON.stringify(selector)}).click()`,
+      );
+    });
+  }
+
+  async fill(selector: string, value: string): Promise<void> {
+    return this._traced('fill', selector, async () => {
+      await this._waitForSelector(selector);
+      const escaped = JSON.stringify(value);
+      await this._evaluate(`(() => {
+        const el = document.querySelector(${JSON.stringify(selector)});
+        el.value = ${escaped};
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      })()`);
+    });
+  }
+
+  async textContent(selector: string): Promise<string> {
+    return this._traced('textContent', selector, async () => {
+      await this._waitForSelector(selector);
+      const result = await this._evaluate(
+        `document.querySelector(${JSON.stringify(selector)}).textContent`,
+      );
+      return (result as string) ?? '';
+    });
+  }
+
+  async innerHTML(selector: string): Promise<string> {
+    return this._traced('innerHTML', selector, async () => {
+      await this._waitForSelector(selector);
+      const result = await this._evaluate(
+        `document.querySelector(${JSON.stringify(selector)}).innerHTML`,
+      );
+      return (result as string) ?? '';
+    });
+  }
+
+  async getAttribute(selector: string, name: string): Promise<string | null> {
+    return this._traced('getAttribute', selector, async () => {
+      await this._waitForSelector(selector);
+      const result = await this._evaluate(
+        `document.querySelector(${JSON.stringify(selector)}).getAttribute(${JSON.stringify(name)})`,
+      );
+      return result as string | null;
+    });
+  }
+
+  async inputValue(selector: string): Promise<string> {
+    return this._traced('inputValue', selector, async () => {
+      await this._waitForSelector(selector);
+      const result = await this._evaluate(
+        `document.querySelector(${JSON.stringify(selector)}).value`,
+      );
+      return (result as string) ?? '';
+    });
+  }
+
+  async isVisible(selector: string): Promise<boolean> {
+    const result = await this._evaluate(`(() => {
+      const el = document.querySelector(${JSON.stringify(selector)});
+      if (!el) return false;
+      const style = window.getComputedStyle(el);
+      return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+    })()`);
+    return result as boolean;
+  }
+
+  async evaluate<T = unknown>(expression: string): Promise<T> {
+    return this._traced('evaluate', undefined, async () => {
+      return (await this._evaluate(expression)) as T;
+    });
+  }
+
+  async goto(url: string): Promise<void> {
+    return this._traced('goto', url, async () => {
+      await this._send('Page.navigate', { url });
+    });
+  }
+
+  async title(): Promise<string> {
+    return (await this._evaluate('document.title')) as string;
+  }
+
+  async url(): Promise<string> {
+    return (await this._evaluate('window.location.href')) as string;
+  }
+
+  // ─── Playwright-style locators ───
+
+  /** Locate an element by its visible text content. Substring match by default. */
+  getByText(text: string, options?: { exact?: boolean }): WebViewLocator {
+    const escaped = JSON.stringify(text);
+    const finderJs = options?.exact
+      ? `(() => { for (const el of document.querySelectorAll('*')) { if (el.children.length === 0 && el.textContent?.trim() === ${escaped}) return el; } return null; })()`
+      : `(() => { for (const el of document.querySelectorAll('*')) { if (el.children.length === 0 && el.textContent?.includes(${escaped})) return el; } return null; })()`;
+    return new WebViewLocator(this, `text=${text}`, this._timeoutMs, finderJs);
+  }
+
+  /** Locate an element by its ARIA/HTML role, optionally filtered by accessible name. */
+  getByRole(role: string, options?: { name?: string }): WebViewLocator {
+    const cssSelectors = ROLE_CSS_MAP[role];
+    if (!cssSelectors) {
+      const selector = `[role="${role}"]`;
+      const finderJs = options?.name
+        ? `document.querySelector('${selector}[aria-label="${options.name}"]') || (() => { for (const el of document.querySelectorAll('${selector}')) { if (el.textContent?.trim() === ${JSON.stringify(options.name)}) return el; } return null; })()`
+        : `document.querySelector(${JSON.stringify(selector)})`;
+      return new WebViewLocator(this, `role=${role}${options?.name ? `[name=${options.name}]` : ''}`, this._timeoutMs, finderJs);
+    }
+
+    const selectorList = cssSelectors.join(', ');
+    const displayName = `role=${role}${options?.name ? `[name=${options.name}]` : ''}`;
+
+    if (!options?.name) {
+      return new WebViewLocator(this, displayName, this._timeoutMs,
+        `document.querySelector(${JSON.stringify(selectorList)})`);
+    }
+
+    const nameEscaped = JSON.stringify(options.name);
+    // W3C Accessible Name computation (matches Playwright's getByRole):
+    // 1. aria-labelledby  2. aria-label  3. <label> (for or wrapping)
+    // 4. title  5. placeholder  6. textContent (buttons/links only)
+    const finderJs = `(() => {
+      function accessibleName(el) {
+        var lblBy = el.getAttribute('aria-labelledby');
+        if (lblBy) { var ref = document.getElementById(lblBy); if (ref) return ref.textContent?.trim() || ''; }
+        if (el.getAttribute('aria-label')) return el.getAttribute('aria-label');
+        if (el.id) { var lbl = document.querySelector('label[for=' + JSON.stringify(el.id) + ']'); if (lbl) return lbl.textContent?.trim() || ''; }
+        if (el.closest('label')) { var wrapper = el.closest('label'); var clone = wrapper.cloneNode(true); clone.querySelectorAll('input,select,textarea').forEach(function(c){c.remove();}); var t = clone.textContent?.trim(); if (t) return t; }
+        if (el.getAttribute('title')) return el.getAttribute('title');
+        if (el.getAttribute('placeholder')) return el.getAttribute('placeholder');
+        return el.textContent?.trim() || '';
+      }
+      for (const el of document.querySelectorAll(${JSON.stringify(selectorList)})) {
+        if (accessibleName(el) === ${nameEscaped}) return el;
+      }
+      return null;
+    })()`;
+    return new WebViewLocator(this, displayName, this._timeoutMs, finderJs);
+  }
+
+  /** Locate an element by its placeholder text. */
+  getByPlaceholder(text: string): WebViewLocator {
+    return new WebViewLocator(this, `placeholder=${text}`, this._timeoutMs,
+      `document.querySelector('[placeholder=' + JSON.stringify(${JSON.stringify(text)}) + ']')`);
+  }
+
+  /** Locate an element by its `data-testid` attribute. */
+  getByTestId(testId: string): WebViewLocator {
+    return new WebViewLocator(this, `testId=${testId}`, this._timeoutMs,
+      `document.querySelector('[data-testid=' + JSON.stringify(${JSON.stringify(testId)}) + ']')`);
+  }
+
+  /** Locate an element by its `aria-label`. */
+  getByLabel(text: string): WebViewLocator {
+    return new WebViewLocator(this, `label=${text}`, this._timeoutMs,
+      `document.querySelector('[aria-label=' + JSON.stringify(${JSON.stringify(text)}) + ']')`);
+  }
+
+  /** Locate an element by CSS selector. */
+  locator(cssSelector: string): WebViewLocator {
+    return new WebViewLocator(this, cssSelector, this._timeoutMs);
+  }
+
+  async close(): Promise<void> {
+    if (this._closed) return;
+    this._closed = true;
+    if (this._inspector) {
+      this._inspector.close();
+      this._inspector = null;
+    }
+    if (this._ws) {
+      this._ws.close();
+      this._ws = null;
+    }
+    if (this._localPort > 0) {
+      try {
+        await this._client.closeWebViewPort(this._localPort);
+      } catch {
+        // Best-effort cleanup
+      }
+    }
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+interface DomNode {
+  tag: string
+  id: string
+  cls: string | { toString(): string }
+  text: string
+  placeholder: string
+  role: string
+  ariaLabel: string
+  testId: string
+  type: string
+  href: string
+  bounds: { left: number; top: number; right: number; bottom: number }
+  children: DomNode[]
+}
+
+function escapeXmlAttr(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}

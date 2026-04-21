@@ -1,0 +1,117 @@
+/**
+ * E2E tests for WebView interaction.
+ *
+ * Tests hybrid app scenarios: switch to WebView context, interact with
+ * web content via CSS selectors, assert on DOM state, then switch back
+ * to native.
+ */
+import { beforeEach, describe, expect, test } from "pilot"
+
+describe("WebView testing", () => {
+  test.use({ timeout: 30_000 })
+
+  beforeEach(async ({ device }) => {
+    await device.restartApp()
+    await device.getByDescription("WebView").scrollIntoView()
+    await device.getByDescription("WebView").tap()
+    await expect(device.getByText("Embedded WebView")).toBeVisible()
+  })
+
+  test("can read text content from WebView", async ({ device }) => {
+    const webview = await device.webview()
+    const header = await webview.textContent(".header")
+    expect(header).toBe("WebView Test Page")
+    await device.native()
+  })
+
+  test("can fill inputs in WebView", async ({ device }) => {
+    const webview = await device.webview()
+    await webview.fill("#email", "user@test.com")
+    const value = await webview.inputValue("#email")
+    expect(value).toBe("user@test.com")
+    await device.native()
+  })
+
+  test("can click buttons and see state changes", async ({ device }) => {
+    const webview = await device.webview()
+    await webview.fill("#email", "user@test.com")
+    await webview.fill("#password", "password123")
+    await webview.click("#login-button")
+    await expect(webview.locator(".success-message")).toBeVisible()
+    await device.native()
+  })
+
+  test("locator assertions work with WebView elements", async ({ device }) => {
+    const webview = await device.webview()
+
+    // Verify header text
+    await expect(webview.locator(".header")).toHaveText("WebView Test Page")
+
+    // Verify description contains expected text
+    await expect(webview.locator(".description")).toContainText("CDP")
+
+    // Verify success message is initially hidden
+    await expect(webview.locator(".success-message")).toBeHidden()
+
+    await device.native()
+  })
+
+  test("can evaluate arbitrary JavaScript", async ({ device }) => {
+    const webview = await device.webview()
+    const result = await webview.evaluate<number>("2 + 2")
+    expect(result).toBe(4)
+    await device.native()
+  })
+
+  test("can interact with counter", async ({ device }) => {
+    const webview = await device.webview()
+
+    await expect(webview.locator("#count-display")).toHaveText("Count: 0")
+    await webview.click("#increment-button")
+    await expect(webview.locator("#count-display")).toHaveText("Count: 1")
+    await webview.click("#increment-button")
+    await expect(webview.locator("#count-display")).toHaveText("Count: 2")
+
+    await device.native()
+  })
+
+  test("can switch between native and WebView contexts", async ({ device }) => {
+    // Start in native
+    await expect(device.getByText("Embedded WebView")).toBeVisible()
+
+    // Switch to WebView
+    const webview = await device.webview()
+    await expect(webview.locator(".header")).toBeVisible()
+
+    // Switch back to native
+    await device.native()
+
+    // Native elements should still be accessible
+    await expect(device.getByText("Embedded WebView")).toBeVisible()
+  })
+
+  test("getByRole and getByText locators work", async ({ device }) => {
+    const webview = await device.webview()
+
+    // getByRole('heading') finds the h1
+    await expect(webview.getByRole("heading")).toHaveText("WebView Test Page")
+
+    // getByRole('button', { name }) finds a specific button
+    await expect(webview.getByRole("button", { name: "Login" })).toBeVisible()
+
+    // getByText finds elements by visible text
+    await expect(webview.getByText("Forgot password?")).toBeVisible()
+
+    // getByPlaceholder finds inputs by placeholder
+    const emailField = webview.getByPlaceholder("Enter your email")
+    await emailField.fill("test@example.com")
+    await expect(emailField).toHaveValue("test@example.com")
+
+    // getByRole('button') + click + assert
+    await webview.getByPlaceholder("Enter your password").fill("secret")
+    await webview.getByRole("button", { name: "Login" }).click()
+    await expect(webview.getByText("Login successful!")).toBeVisible()
+
+    await device.native()
+  })
+})

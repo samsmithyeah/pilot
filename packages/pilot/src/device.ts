@@ -37,6 +37,8 @@ import {
   type NetworkResponseEventData,
   matchUrlPattern,
 } from './network.js';
+import { WebViewHandle } from './webview-handle.js';
+import type { Platform } from './config.js';
 
 // ─── Types for device-level actions ───
 
@@ -55,6 +57,10 @@ export class Device {
   readonly _client: PilotGrpcClient;
   private _defaultTimeoutMs: number;
   private readonly defaultPackageName?: string;
+  /** @internal */
+  readonly _platform: Platform;
+  /** @internal — Simulator UDID for iOS WebView connections. */
+  readonly _simulatorUdid?: string;
 
   /** Programmatic tracing API. */
   readonly tracing: Tracing;
@@ -62,10 +68,15 @@ export class Device {
   /** @internal — Network route manager (lazily created). */
   _routeManager: NetworkRouteManager | null = null;
 
-  constructor(client: PilotGrpcClient, config?: Partial<Pick<PilotConfig, 'timeout' | 'package'>>) {
+  /** @internal — Active WebView handle, if in WebView context. */
+  _activeWebView: WebViewHandle | null = null;
+
+  constructor(client: PilotGrpcClient, config?: Partial<Pick<PilotConfig, 'timeout' | 'package' | 'platform' | 'simulator'>>) {
     this._client = client;
     this._defaultTimeoutMs = config?.timeout ?? 30_000;
     this.defaultPackageName = config?.package;
+    this._platform = config?.platform ?? 'android';
+    this._simulatorUdid = config?.simulator;
     this.tracing = new Tracing(
       () => this._takeScreenshotBuffer(),
       () => this._captureHierarchy(),
@@ -107,11 +118,27 @@ export class Device {
     }
   }
 
-  /** @internal — Capture the view hierarchy XML. */
+  /** @internal — Capture the view hierarchy XML, including WebView DOM when active. */
   private async _captureHierarchy(): Promise<string | undefined> {
     try {
       const res = await this._client.getUiHierarchy();
-      return res.hierarchyXml || undefined;
+      let xml = res.hierarchyXml || undefined;
+
+      // Append WebView DOM hierarchy if a WebView is active
+      if (xml && this._activeWebView) {
+        try {
+          const webviewDom = await this._activeWebView._dumpDomHierarchy();
+          if (webviewDom) {
+            // Insert WebView DOM nodes before the closing root tag
+            const lastClose = xml.lastIndexOf('</');
+            if (lastClose !== -1) {
+              xml = xml.slice(0, lastClose) + webviewDom + '\n' + xml.slice(lastClose);
+            }
+          }
+        } catch { /* best-effort */ }
+      }
+
+      return xml;
     } catch {
       return undefined;
     }
@@ -605,6 +632,153 @@ export class Device {
     if (this._routeManager) {
       await this._routeManager.dispose();
       this._routeManager = null;
+    }
+  }
+
+  // ─── WebView Testing (PILOT-116) ───
+
+  /**
+   * Switch to a WebView context for hybrid app testing.
+   *
+   * Returns a `WebViewHandle` that supports CSS selectors, `click()`, `fill()`,
+   * `textContent()`, `evaluate()`, and `locator()` for web content interaction.
+   *
+   * @param packageName - Optional package name to target a specific WebView
+   *   when multiple are present.
+   */
+  async webview(packageName?: string): Promise<WebViewHandle> {
+    if (this._platform === 'ios') {
+      return this._webviewIos(packageName);
+    }
+    return this._webviewAndroid(packageName);
+  }
+
+  private async _webviewAndroid(packageName?: string): Promise<WebViewHandle> {
+    const deadline = Date.now() + this._defaultTimeoutMs;
+
+    let lastError = '';
+    while (Date.now() < deadline) {
+      const list = await this._client.listWebViews();
+      if (list.errorMessage) {
+        lastError = list.errorMessage;
+        await new Promise(r => setTimeout(r, 500));
+        continue;
+      }
+
+      let webviews = list.webviews;
+      if (packageName) {
+        webviews = webviews.filter(w => w.packageName === packageName);
+      }
+
+      if (webviews.length === 0) {
+        lastError = packageName
+          ? `No WebViews found for package "${packageName}"`
+          : 'No WebViews found';
+        await new Promise(r => setTimeout(r, 500));
+        continue;
+      }
+
+      const target = webviews[0];
+      const fwd = await this._client.forwardWebViewPort(target.socketName);
+      if (!fwd.success) {
+        throw new Error(`Failed to forward WebView port: ${fwd.errorMessage}`);
+      }
+
+      const handle = new WebViewHandle(this._client, fwd.localPort, this._defaultTimeoutMs);
+      this._applyTraceCtx(handle);
+      await handle._connect();
+
+      this._activeWebView = handle;
+      return handle;
+    }
+
+    throw new Error(
+      `Timed out waiting for WebView (${this._defaultTimeoutMs}ms). ${lastError}. ` +
+      'Ensure the app has a visible WebView with debugging enabled ' +
+      '(WebView.setWebContentsDebuggingEnabled(true)).',
+    );
+  }
+
+  private async _webviewIos(_packageName?: string): Promise<WebViewHandle> {
+    const { WebKitInspectorClient, findSimulatorInspectorSocket } = await import('./webkit-inspector.js');
+
+    // Find the simulator's webinspectord socket
+    // The UDID may be the resolved simulator UDID stored by the dispatcher
+    const udid = this._simulatorUdid ?? '';
+    const socketPath = findSimulatorInspectorSocket(udid);
+    if (!socketPath) {
+      throw new Error(
+        `Could not find WebKit Inspector socket for simulator "${udid}". ` +
+        'Ensure the iOS simulator is booted.',
+      );
+    }
+
+    const inspector = new WebKitInspectorClient();
+    await inspector.connect(socketPath);
+
+    const deadline = Date.now() + this._defaultTimeoutMs;
+    let lastError = '';
+
+    while (Date.now() < deadline) {
+      const targets = await inspector.listTargets();
+
+      // Find the target app's WebView pages
+      const appTarget = targets.find(t =>
+        t.pages.length > 0 && (
+          t.bundleId === (this.defaultPackageName ?? 'dev.pilot.testapp') ||
+          t.bundleId === _packageName ||
+          t.name === _packageName
+        ),
+      ) ?? targets.find(t => t.pages.length > 0);
+
+      if (!appTarget || appTarget.pages.length === 0) {
+        lastError = 'No inspectable WebView pages found';
+        await new Promise(r => setTimeout(r, 500));
+        continue;
+      }
+
+      const page = appTarget.pages[0];
+      await inspector.connectToPage(appTarget.appId, page.id);
+
+      const handle = WebViewHandle._createFromInspector(
+        this._client, inspector, appTarget.appId, page.id, this._defaultTimeoutMs,
+      );
+      this._applyTraceCtx(handle);
+
+      this._activeWebView = handle;
+      return handle;
+    }
+
+    inspector.close();
+    throw new Error(
+      `Timed out waiting for WebView (${this._defaultTimeoutMs}ms). ${lastError}. ` +
+      'Ensure the WebView has webviewDebuggingEnabled={true} (sets isInspectable on iOS 16.4+).',
+    );
+  }
+
+  private _applyTraceCtx(handle: WebViewHandle): void {
+    if (this._traceCollector) {
+      handle._traceCtx = {
+        collector: this._traceCollector,
+        takeScreenshot: () => this._takeScreenshotBuffer(),
+        captureHierarchy: () => this._captureHierarchy(),
+      };
+    }
+  }
+
+  /** Switch back to native context, closing any active WebView handle. */
+  async native(): Promise<void> {
+    if (this._activeWebView) {
+      await this._activeWebView.close();
+      this._activeWebView = null;
+    }
+  }
+
+  /** @internal — Dispose the WebView manager (called by the runner during cleanup). */
+  async _disposeWebViewManager(): Promise<void> {
+    if (this._activeWebView) {
+      await this._activeWebView.close();
+      this._activeWebView = null;
     }
   }
 

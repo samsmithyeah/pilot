@@ -56,6 +56,11 @@ pub struct PilotServiceImpl {
     /// Stored here so that `start_network_capture` can install it on newly
     /// created proxies (the stream may open before or after capture starts).
     active_route_handler: Arc<RwLock<Option<Arc<RouteInterceptHandler>>>>,
+    /// Tracked WebView port forwards (host_port → socket_name) for cleanup.
+    webview_forwards: Arc<RwLock<std::collections::HashMap<u16, String>>>,
+    /// iOS WebKit debug proxy handle (managed child process).
+    #[cfg(target_os = "macos")]
+    webkit_debug_proxy: Arc<RwLock<Option<crate::ios::webkit_debug_proxy::WebkitDebugProxyHandle>>>,
 }
 
 /// Stored iOS agent launch config for restart.
@@ -88,6 +93,9 @@ impl PilotServiceImpl {
             ios_iproxy: Arc::new(RwLock::new(None)),
             network_tracing_enabled: Arc::new(RwLock::new(false)),
             active_route_handler: Arc::new(RwLock::new(None)),
+            webview_forwards: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            #[cfg(target_os = "macos")]
+            webkit_debug_proxy: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -618,6 +626,32 @@ impl PilotServiceImpl {
 
         if let Some(proxy) = proxy {
             let _ = proxy.stop().await;
+        }
+    }
+
+    /// Clean up WebView port forwards and proxy processes on shutdown.
+    pub async fn cleanup_webview_state(&self) {
+        // Clean up Android ADB port forwards
+        let forwards: Vec<u16> = self.webview_forwards.read().await.keys().copied().collect();
+        if !forwards.is_empty() {
+            if let Some(serial) = self.device_manager.read().await.active_serial() {
+                let serial = serial.to_string();
+                for port in forwards {
+                    if let Err(e) = adb::remove_forward(&serial, port).await {
+                        warn!(
+                            port,
+                            "Failed to remove WebView port forward on shutdown: {e}"
+                        );
+                    }
+                }
+            }
+            self.webview_forwards.write().await.clear();
+        }
+
+        // Drop the iOS webkit debug proxy (kills the child process)
+        #[cfg(target_os = "macos")]
+        {
+            let _ = self.webkit_debug_proxy.write().await.take();
         }
     }
 
@@ -4476,6 +4510,269 @@ impl proto::pilot_service_server::PilotService for PilotServiceImpl {
         let output_stream = tokio_stream::wrappers::ReceiverStream::new(out_rx);
         Ok(Response::new(Box::pin(output_stream)))
     }
+
+    // ─── WebView Testing (PILOT-116) ───
+
+    #[instrument(skip_all, fields(request_id))]
+    async fn list_web_views(
+        &self,
+        request: Request<proto::ListWebViewsRequest>,
+    ) -> Result<Response<proto::ListWebViewsResponse>, Status> {
+        let req = request.into_inner();
+        let request_id = Self::request_id(&req.request_id);
+
+        let dm = self.device_manager.read().await;
+        let device = dm.active_device().ok_or_else(|| {
+            Status::failed_precondition("No active device — call SetDevice first")
+        })?;
+        let serial = device.serial.clone();
+        let platform = device.platform;
+        drop(dm);
+
+        match platform {
+            Platform::Android => match adb::list_webview_sockets(&serial).await {
+                Ok(sockets) => {
+                    let webviews = sockets
+                        .into_iter()
+                        .map(|s| proto::WebViewInfo {
+                            socket_name: s.socket_name,
+                            pid: s.pid,
+                            package_name: s.package_name,
+                            url: String::new(),
+                            title: String::new(),
+                        })
+                        .collect();
+                    Ok(Response::new(proto::ListWebViewsResponse {
+                        request_id,
+                        webviews,
+                        error_message: String::new(),
+                    }))
+                }
+                Err(e) => Ok(Response::new(proto::ListWebViewsResponse {
+                    request_id,
+                    webviews: Vec::new(),
+                    error_message: format!(
+                        "Failed to discover WebViews: {e}. Ensure the app has \
+                             WebView.setWebContentsDebuggingEnabled(true) set."
+                    ),
+                })),
+            },
+            Platform::Ios => {
+                #[cfg(target_os = "macos")]
+                {
+                    use crate::ios::webkit_debug_proxy::WebkitDebugProxyHandle;
+
+                    let mut proxy_guard = self.webkit_debug_proxy.write().await;
+                    if proxy_guard.is_none() {
+                        match WebkitDebugProxyHandle::start(serial.clone(), 9221).await {
+                            Ok(handle) => {
+                                *proxy_guard = Some(handle);
+                            }
+                            Err(e) => {
+                                return Ok(Response::new(proto::ListWebViewsResponse {
+                                    request_id,
+                                    webviews: Vec::new(),
+                                    error_message: format!(
+                                        "Failed to start ios_webkit_debug_proxy: {e}"
+                                    ),
+                                }));
+                            }
+                        }
+                    }
+                    let port = proxy_guard.as_ref().unwrap().port();
+                    drop(proxy_guard);
+
+                    // Query the proxy's HTTP endpoint for available targets
+                    match query_cdp_json(port).await {
+                        Ok(targets) => {
+                            let webviews = targets
+                                .into_iter()
+                                .filter_map(|t| {
+                                    let ws_url = t.get("webSocketDebuggerUrl")?.as_str()?;
+                                    Some(proto::WebViewInfo {
+                                        socket_name: ws_url.to_string(),
+                                        pid: 0,
+                                        package_name: String::new(),
+                                        url: t
+                                            .get("url")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("")
+                                            .to_string(),
+                                        title: t
+                                            .get("title")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("")
+                                            .to_string(),
+                                    })
+                                })
+                                .collect();
+                            Ok(Response::new(proto::ListWebViewsResponse {
+                                request_id,
+                                webviews,
+                                error_message: String::new(),
+                            }))
+                        }
+                        Err(e) => Ok(Response::new(proto::ListWebViewsResponse {
+                            request_id,
+                            webviews: Vec::new(),
+                            error_message: format!(
+                                "Failed to query ios_webkit_debug_proxy: {e}. \
+                                 Ensure Safari Web Inspector is enabled on the device \
+                                 and the WebView has isInspectable = true (iOS 16.4+)."
+                            ),
+                        })),
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    Ok(Response::new(proto::ListWebViewsResponse {
+                        request_id,
+                        webviews: Vec::new(),
+                        error_message: "iOS WebView testing requires macOS".to_string(),
+                    }))
+                }
+            }
+        }
+    }
+
+    #[instrument(skip_all, fields(request_id))]
+    async fn forward_web_view_port(
+        &self,
+        request: Request<proto::ForwardWebViewPortRequest>,
+    ) -> Result<Response<proto::ForwardWebViewPortResponse>, Status> {
+        let req = request.into_inner();
+        let request_id = Self::request_id(&req.request_id);
+
+        let dm = self.device_manager.read().await;
+        let device = dm.active_device().ok_or_else(|| {
+            Status::failed_precondition("No active device — call SetDevice first")
+        })?;
+        let serial = device.serial.clone();
+        let platform = device.platform;
+        drop(dm);
+
+        match platform {
+            Platform::Android => {
+                // Find a free port by binding to :0
+                let listener = std::net::TcpListener::bind("127.0.0.1:0")
+                    .map_err(|e| Status::internal(format!("Failed to find free port: {e}")))?;
+                let host_port = listener
+                    .local_addr()
+                    .map_err(|e| Status::internal(format!("Failed to get port: {e}")))?
+                    .port();
+                drop(listener);
+
+                match adb::forward_abstract_socket(&serial, host_port, &req.socket_name).await {
+                    Ok(()) => {
+                        self.webview_forwards
+                            .write()
+                            .await
+                            .insert(host_port, req.socket_name);
+                        Ok(Response::new(proto::ForwardWebViewPortResponse {
+                            request_id,
+                            success: true,
+                            local_port: host_port as u32,
+                            error_message: String::new(),
+                        }))
+                    }
+                    Err(e) => Ok(Response::new(proto::ForwardWebViewPortResponse {
+                        request_id,
+                        success: false,
+                        local_port: 0,
+                        error_message: format!("Failed to forward WebView port: {e}"),
+                    })),
+                }
+            }
+            Platform::Ios => {
+                // For iOS, the socket_name IS the webSocketDebuggerUrl —
+                // extract the port from it and return it directly since
+                // ios_webkit_debug_proxy already exposes targets on localhost.
+                let port = extract_port_from_ws_url(&req.socket_name).unwrap_or(0);
+                if port == 0 {
+                    return Ok(Response::new(proto::ForwardWebViewPortResponse {
+                        request_id,
+                        success: false,
+                        local_port: 0,
+                        error_message: format!(
+                            "Failed to extract port from WebSocket URL: {}",
+                            req.socket_name
+                        ),
+                    }));
+                }
+                Ok(Response::new(proto::ForwardWebViewPortResponse {
+                    request_id,
+                    success: true,
+                    local_port: port as u32,
+                    error_message: String::new(),
+                }))
+            }
+        }
+    }
+
+    #[instrument(skip_all, fields(request_id))]
+    async fn close_web_view_port(
+        &self,
+        request: Request<proto::CloseWebViewPortRequest>,
+    ) -> Result<Response<proto::ActionResponse>, Status> {
+        let req = request.into_inner();
+        let request_id = Self::request_id(&req.request_id);
+        let port = req.local_port as u16;
+
+        // Only clean up ADB forwards (Android); iOS proxied ports are managed
+        // by ios_webkit_debug_proxy and don't need individual cleanup.
+        let removed = self.webview_forwards.write().await.remove(&port);
+        if removed.is_some() {
+            if let Some(serial) = self.device_manager.read().await.active_serial() {
+                let serial = serial.to_string();
+                if let Err(e) = adb::remove_forward(&serial, port).await {
+                    warn!(port, "Failed to remove WebView port forward: {e}");
+                }
+            }
+        }
+
+        Ok(Response::new(proto::ActionResponse {
+            request_id,
+            success: true,
+            error_type: String::new(),
+            error_message: String::new(),
+            screenshot: Vec::new(),
+        }))
+    }
+}
+
+/// Extract port number from a WebSocket URL like `ws://localhost:9222/devtools/page/1`
+fn extract_port_from_ws_url(url: &str) -> Option<u16> {
+    let url = url
+        .strip_prefix("ws://")
+        .or_else(|| url.strip_prefix("wss://"))?;
+    let host_port = url.split('/').next()?;
+    let port_str = host_port.rsplit(':').next()?;
+    port_str.parse().ok()
+}
+
+/// Query a CDP-compatible endpoint's /json page to list available targets.
+/// Uses a raw TCP connection + HTTP/1.1 GET to avoid adding an HTTP client dependency.
+async fn query_cdp_json(port: u16) -> anyhow::Result<Vec<serde_json::Value>> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).await?;
+    stream
+        .write_all(
+            format!("GET /json HTTP/1.1\r\nHost: localhost:{port}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .await?;
+
+    let mut buf = Vec::with_capacity(8192);
+    stream.read_to_end(&mut buf).await?;
+    let response = String::from_utf8_lossy(&buf);
+
+    // Skip HTTP headers — find the blank line separating headers from body
+    let body = response.split("\r\n\r\n").nth(1).unwrap_or(&response);
+
+    let targets: Vec<serde_json::Value> = serde_json::from_str(body)?;
+    Ok(targets)
 }
 
 // ─── Helper: Parse ElementInfo from agent JSON ───

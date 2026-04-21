@@ -998,6 +998,9 @@ async function runSuiteContext(
       if (opts.device?._disposeRouteManager) {
         await opts.device._disposeRouteManager();
       }
+      if (opts.device?._disposeWebViewManager) {
+        await opts.device._disposeWebViewManager();
+      }
 
       // Capture a final screenshot so the last action has an "after" view.
       // The trace viewer uses the next action's before-screenshot as "after",
@@ -1120,8 +1123,11 @@ async function runSuiteContext(
         collector.cleanup();
       }
     } else if (opts.device?._disposeRouteManager) {
-      // No tracing — still need to clean up routes.
+      // No tracing — still need to clean up routes and WebView state.
       await opts.device._disposeRouteManager();
+      if (opts.device._disposeWebViewManager) {
+        await opts.device._disposeWebViewManager();
+      }
     }
 
     const testResult: TestResult = {

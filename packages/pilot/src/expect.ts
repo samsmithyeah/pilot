@@ -21,6 +21,7 @@ import { ElementHandle } from "./element-handle.js";
 import type { ElementInfo } from "./grpc-client.js";
 import { selectorToProto } from "./selectors.js";
 import { extractSourceLocation, getActiveTraceCollector } from "./trace/trace-collector.js";
+import { WebViewLocator } from "./webview-locator.js";
 
 const DEFAULT_ASSERTION_TIMEOUT_MS = 5_000;
 const POLL_INTERVAL_MS = 250;
@@ -1534,23 +1535,268 @@ function createPollAssertions(
   return buildProxy(false);
 }
 
+// ─── WebView Assertions (PILOT-116) ───
+
+export interface WebViewAssertions {
+  not: WebViewAssertions;
+  toBeVisible(options?: { timeout?: number }): Promise<void>;
+  toBeHidden(options?: { timeout?: number }): Promise<void>;
+  toExist(options?: { timeout?: number }): Promise<void>;
+  toHaveText(expected: string, options?: { timeout?: number }): Promise<void>;
+  toContainText(expected: string | RegExp, options?: { timeout?: number }): Promise<void>;
+  toHaveAttribute(name: string, value: string, options?: { timeout?: number }): Promise<void>;
+  toHaveValue(expected: string, options?: { timeout?: number }): Promise<void>;
+}
+
+function createWebViewAssertions(
+  locator: WebViewLocator,
+  negated: boolean,
+): WebViewAssertions {
+  const timeoutFor = (opts?: { timeout?: number }) =>
+    opts?.timeout ?? locator._timeoutMs ?? DEFAULT_ASSERTION_TIMEOUT_MS;
+
+  const fail = (message: string): never => {
+    throw new Error(message);
+  };
+
+  const traceAssertion = async (name: string, fn: () => Promise<void>): Promise<void> => {
+    const traceCtx = locator._handle._traceCtx;
+    if (!traceCtx) return fn();
+
+    const sourceLocation = extractSourceLocation(new Error().stack ?? "");
+    const selectorStr = `css=${locator._selector}`;
+    const start = Date.now();
+
+    const { captures: beforeCaptures } = await traceCtx.collector.captureBeforeAction(
+      traceCtx.takeScreenshot,
+      traceCtx.captureHierarchy,
+    );
+
+    let passed = true;
+    let error: string | undefined;
+    let caughtErr: unknown;
+
+    try {
+      await fn();
+    } catch (err) {
+      passed = false;
+      error = err instanceof Error ? err.message : String(err);
+      caughtErr = err;
+    }
+
+    const duration = Date.now() - start;
+    const attempts = Math.max(1, Math.round(duration / POLL_INTERVAL_MS));
+
+    let bounds: { left: number; top: number; right: number; bottom: number } | undefined;
+    if (passed) {
+      bounds = await locator._handle._getElementBounds(locator._selector, locator._finderJs);
+    }
+
+    traceCtx.collector.addAssertionEvent({
+      assertion: (negated ? "not." : "") + name,
+      selector: selectorStr,
+      passed,
+      soft: false,
+      negated,
+      duration,
+      attempts,
+      error,
+      bounds,
+      sourceLocation,
+      hasScreenshotBefore: !!beforeCaptures.screenshotBefore,
+      hasScreenshotAfter: false,
+      hasHierarchyBefore: !!beforeCaptures.hierarchyBefore,
+      hasHierarchyAfter: false,
+    } as Parameters<typeof traceCtx.collector.addAssertionEvent>[0]);
+
+    if (caughtErr !== undefined) throw caughtErr;
+  };
+
+  return {
+    get not(): WebViewAssertions {
+      return createWebViewAssertions(locator, !negated);
+    },
+
+    async toBeVisible(options) {
+      return traceAssertion('toBeVisible', async () => {
+        const timeout = timeoutFor(options);
+        const result = await poll(
+          () => locator.isVisible(),
+          timeout,
+          negated,
+        );
+        if (result === negated) {
+          fail(
+            `Expected "${locator._selector}" ${negated ? 'not ' : ''}to be visible in WebView`,
+          );
+        }
+      });
+    },
+
+    async toBeHidden(options) {
+      return traceAssertion('toBeHidden', async () => {
+        const timeout = timeoutFor(options);
+        const result = await poll(
+          async () => !(await locator.isVisible()),
+          timeout,
+          negated,
+        );
+        if (result === negated) {
+          fail(
+            `Expected "${locator._selector}" ${negated ? 'not ' : ''}to be hidden in WebView`,
+          );
+        }
+      });
+    },
+
+    async toExist(options) {
+      return traceAssertion('toExist', async () => {
+        const timeout = timeoutFor(options);
+        const result = await poll(
+          async () => {
+            const found = await locator._handle._evaluate(
+              `(${locator._finderJs}) !== null`,
+            );
+            return found as boolean;
+          },
+          timeout,
+          negated,
+        );
+        if (result === negated) {
+          fail(
+            `Expected "${locator._selector}" ${negated ? 'not ' : ''}to exist in WebView`,
+          );
+        }
+      });
+    },
+
+    async toHaveText(expected, options) {
+      return traceAssertion('toHaveText', async () => {
+        const timeout = timeoutFor(options);
+        let lastText = '';
+        const result = await poll(
+          async () => {
+            try {
+              lastText = await locator.textContent();
+              return lastText === expected;
+            } catch {
+              return false;
+            }
+          },
+          timeout,
+          negated,
+        );
+        if (result === negated) {
+          fail(
+            `Expected "${locator._selector}" ${negated ? 'not ' : ''}to have text "${expected}", ` +
+            `but got "${lastText}"`,
+          );
+        }
+      });
+    },
+
+    async toContainText(expected, options) {
+      return traceAssertion('toContainText', async () => {
+        const timeout = timeoutFor(options);
+        let lastText = '';
+        const result = await poll(
+          async () => {
+            try {
+              lastText = await locator.textContent();
+              if (typeof expected === 'string') {
+                return lastText.includes(expected);
+              }
+              return expected.test(lastText);
+            } catch {
+              return false;
+            }
+          },
+          timeout,
+          negated,
+        );
+        if (result === negated) {
+          fail(
+            `Expected "${locator._selector}" ${negated ? 'not ' : ''}to contain text "${expected}", ` +
+            `but got "${lastText}"`,
+          );
+        }
+      });
+    },
+
+    async toHaveAttribute(name, value, options) {
+      return traceAssertion('toHaveAttribute', async () => {
+        const timeout = timeoutFor(options);
+        let lastValue: string | null = null;
+        const result = await poll(
+          async () => {
+            try {
+              lastValue = await locator.getAttribute(name);
+              return lastValue === value;
+            } catch {
+              return false;
+            }
+          },
+          timeout,
+          negated,
+        );
+        if (result === negated) {
+          fail(
+            `Expected "${locator._selector}" ${negated ? 'not ' : ''}to have attribute "${name}" = "${value}", ` +
+            `but got "${lastValue}"`,
+          );
+        }
+      });
+    },
+
+    async toHaveValue(expected, options) {
+      return traceAssertion('toHaveValue', async () => {
+        const timeout = timeoutFor(options);
+        let lastValue = '';
+        const result = await poll(
+          async () => {
+            try {
+              lastValue = await locator.inputValue();
+              return lastValue === expected;
+            } catch {
+              return false;
+            }
+          },
+          timeout,
+          negated,
+        );
+        if (result === negated) {
+          fail(
+            `Expected "${locator._selector}" ${negated ? 'not ' : ''}to have value "${expected}", ` +
+            `but got "${lastValue}"`,
+          );
+        }
+      });
+    },
+  };
+}
+
 // ─── Main expect function ───
 
 function isElementHandle(value: unknown): value is ElementHandle {
   return value instanceof ElementHandle;
 }
 
+function isWebViewLocator(value: unknown): value is WebViewLocator {
+  return value instanceof WebViewLocator;
+}
+
 /**
- * Create assertions for an ElementHandle or a plain value.
- *
- * - When passed an ElementHandle, returns locator assertions (auto-waiting).
- * - When passed any other value, returns generic value assertions (PILOT-42).
+ * Create assertions for an ElementHandle, WebViewLocator, or a plain value.
  */
 export function expect(handle: ElementHandle): PilotAssertions;
+export function expect(locator: WebViewLocator): WebViewAssertions;
 export function expect(value: unknown): GenericAssertions;
-export function expect(value: unknown): PilotAssertions | GenericAssertions {
+export function expect(value: unknown): PilotAssertions | WebViewAssertions | GenericAssertions {
   if (isElementHandle(value)) {
     return createAssertions(value, false);
+  }
+  if (isWebViewLocator(value)) {
+    return createWebViewAssertions(value, false);
   }
   return createGenericAssertions(value, false, (msg) => {
     throw new Error(msg);
@@ -1560,13 +1806,17 @@ export function expect(value: unknown): PilotAssertions | GenericAssertions {
 /**
  * Soft assertions that record failures but don't stop test execution (PILOT-43).
  */
-expect.soft = function soft(value: unknown): PilotAssertions | GenericAssertions {
+expect.soft = function soft(value: unknown): PilotAssertions | WebViewAssertions | GenericAssertions {
   if (isElementHandle(value)) {
     return createSoftLocatorAssertions(value, false);
+  }
+  if (isWebViewLocator(value)) {
+    return createWebViewAssertions(value, false);
   }
   return createSoftGenericAssertions(value, false);
 } as {
   (value: ElementHandle): PilotAssertions;
+  (value: WebViewLocator): WebViewAssertions;
   (value: unknown): GenericAssertions;
 };
 
