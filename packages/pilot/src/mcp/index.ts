@@ -15,12 +15,17 @@ import { registerReadTraceTool } from './tools/read-trace.js';
 import { registerListResultsTool } from './tools/list-results.js';
 import { registerListTestsTool } from './tools/list-tests.js';
 import { registerStopTestsTool } from './tools/stop-tests.js';
+import { registerSessionInfoTool } from './tools/session-info.js';
+import { registerWatchTool } from './tools/watch.js';
 import { closeClient } from './connection.js';
 import { McpEventEmitter, nextCallId, summarizeResult } from './events.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { TestDispatcher } from './test-dispatcher.js';
 
-export type { TestDispatcher, TestRunResult, TestResultEntry } from './test-dispatcher.js';
+export type {
+  TestDispatcher, TestRunResult, TestResultEntry, TestFailureDetail,
+  TestTreeEntry, ProjectInfo, SessionInfo,
+} from './test-dispatcher.js';
 
 export interface McpServerOptions {
   events?: McpEventEmitter
@@ -48,6 +53,8 @@ export function createMcpServer(options?: McpServerOptions): McpServer {
     registerListTestsTool(server, dispatcher);
     registerListResultsTool(server, dispatcher);
     registerStopTestsTool(server, dispatcher);
+    registerSessionInfoTool(server, dispatcher);
+    registerWatchTool(server, dispatcher);
   }
 
   // Wrap tool handlers with event emission

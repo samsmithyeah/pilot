@@ -21,7 +21,7 @@ import { watch as chokidarWatch, type FSWatcher } from 'chokidar';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { createMcpServer } from '../mcp/index.js';
 import { McpEventEmitter } from '../mcp/events.js';
-import type { TestDispatcher, TestRunResult, TestResultEntry } from '../mcp/index.js';
+import type { TestDispatcher, TestRunResult, TestResultEntry, TestTreeEntry, SessionInfo } from '../mcp/index.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import type { PilotConfig } from '../config.js';
 import { PilotGrpcClient } from '../grpc-client.js';
@@ -333,14 +333,46 @@ export async function startUIServer(
 
   // ─── MCP Server (SSE) ───
 
+  function collectFailures(): import('../mcp/test-dispatcher.js').TestFailureDetail[] {
+    return [...testResults.values()]
+      .filter((r) => r.status === 'failed' && r.error)
+      .map((r) => ({
+        fullName: r.fullName,
+        filePath: r.filePath,
+        error: r.error!,
+        tracePath: r.tracePath,
+        projectName: r.projectName,
+      }));
+  }
+
+  function withFailures(result: TestRunResult): TestRunResult {
+    if (result.failed > 0) result.failures = collectFailures();
+    return result;
+  }
+
+  function toTreeEntry(node: TestTreeNode): TestTreeEntry {
+    const entry: TestTreeEntry = {
+      type: node.type,
+      name: node.name,
+      fullName: node.fullName,
+      filePath: node.filePath,
+      status: node.status,
+    };
+    if (node.children && node.children.length > 0) {
+      entry.children = node.children.map(toTreeEntry);
+    }
+    return entry;
+  }
+
   const testDispatcher: TestDispatcher = {
     async runFiles(files, options) {
+      if (multiWorker) await ensureWorkersReady();
       const { testFilter, project } = options ?? {};
       const validFiles = files.filter((f) => ctx.testFiles.includes(f));
       if (validFiles.length === 0) {
         return { status: 'failed', passed: 0, failed: 0, skipped: 0, duration: 0 };
       }
-      if (validFiles.length === 1) return runFile(validFiles[0], testFilter, project);
+      if (validFiles.length === 1) return withFailures(await runFile(validFiles[0], testFilter, project));
       let totalPassed = 0, totalFailed = 0, totalSkipped = 0, totalDuration = 0;
       for (const f of validFiles) {
         const r = await runFile(f, undefined, project);
@@ -349,15 +381,18 @@ export async function startUIServer(
         totalSkipped += r.skipped;
         totalDuration += r.duration;
       }
-      return {
+      return withFailures({
         status: totalFailed > 0 ? 'failed' : 'passed',
         passed: totalPassed,
         failed: totalFailed,
         skipped: totalSkipped,
         duration: totalDuration,
-      };
+      });
     },
-    runAll: () => runAllFiles(),
+    async runAll() {
+      if (multiWorker) await ensureWorkersReady();
+      return withFailures(await runAllFiles());
+    },
     stop() {
       if (useParallel()) stopParallelRun();
       else if (activeChild) { try { activeChild.kill(); } catch { /* already dead */ } }
@@ -368,6 +403,36 @@ export async function startUIServer(
     getProjects: () => {
       if (!ctx.projects) return [];
       return ctx.projects.filter((p) => p.name !== 'default').map((p) => p.name);
+    },
+    getTestTree: () => testTree.map(toTreeEntry),
+    getSessionInfo: (): SessionInfo => {
+      const projects = (ctx.projects ?? [])
+        .filter((p) => p.name !== 'default')
+        .map((p) => ({
+          name: p.name,
+          platform: p.effectiveConfig.platform,
+          package: p.effectiveConfig.package,
+          testFiles: p.testFiles,
+          dependencies: p.dependencies,
+        }));
+      return {
+        platform: ctx.config.platform,
+        package: ctx.config.package,
+        device: singleWorkerDisplayName ?? ctx.deviceSerial,
+        timeout: ctx.config.timeout,
+        retries: ctx.config.retries,
+        projects,
+      };
+    },
+    toggleWatch(filePath, options) {
+      const { testFilter, project } = options ?? {};
+      const isWatched = findEntry(filePath, project, testFilter) >= 0;
+      if (isWatched) {
+        stopWatching(filePath, project, testFilter);
+        return { enabled: false };
+      }
+      startWatching(filePath, project, testFilter);
+      return { enabled: true };
     },
   };
 

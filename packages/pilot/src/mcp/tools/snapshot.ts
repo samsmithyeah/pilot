@@ -7,7 +7,7 @@ import { formatHierarchy } from '../hierarchy-formatter.js';
 export function registerSnapshotTool(server: McpServer): void {
   server.tool(
     'pilot_snapshot',
-    'Get the current screen\'s accessibility tree as a compact text representation with copy-paste-ready Pilot selectors for each interactive element. Use this first when writing or debugging test selectors.',
+    'Get the current screen\'s accessibility tree with copy-paste-ready Pilot selectors for each interactive element. Use this first when writing tests to see what\'s on screen. Then validate selectors with pilot_test_selector before putting them in test code.',
     {
       device: z.string().optional().describe('Device serial (optional, uses default device)'),
     },

@@ -1,7 +1,9 @@
 import { z } from 'zod';
 import { spawn } from 'node:child_process';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { TestDispatcher } from '../test-dispatcher.js';
+import { readTraceSummary } from './trace-utils.js';
 
 let _running = false;
 
@@ -25,10 +27,43 @@ export function registerRunTestsTool(server: McpServer, dispatcher?: TestDispatc
           };
         }
         const result = await dispatcher.runFiles(files, { testFilter, project });
-        const text = result.failed > 0
-          ? `Tests failed: ${result.passed} passed, ${result.failed} failed, ${result.skipped} skipped (${result.duration}ms)`
-          : `All tests passed: ${result.passed} passed, ${result.skipped} skipped (${result.duration}ms)`;
-        return { content: [{ type: 'text' as const, text }] };
+        const content: CallToolResult['content'] = [];
+
+        if (result.failed > 0) {
+          const lines: string[] = [];
+          const screenshots: Buffer[] = [];
+          lines.push(`Tests failed: ${result.passed} passed, ${result.failed} failed, ${result.skipped} skipped (${result.duration}ms)`);
+
+          if (result.failures && result.failures.length > 0) {
+            for (const f of result.failures) {
+              const proj = f.projectName ? ` [${f.projectName}]` : '';
+              lines.push('');
+              lines.push(`FAIL: ${f.fullName}${proj}`);
+              lines.push(`  Error: ${f.error}`);
+
+              if (f.tracePath) {
+                const summary = readTraceSummary(f.tracePath);
+                if (summary) {
+                  if (summary.steps.length > 0) {
+                    lines.push('');
+                    lines.push('  Steps leading to failure:');
+                    for (const step of summary.steps) lines.push(`    ${step}`);
+                  }
+                  if (summary.failureScreenshot) screenshots.push(summary.failureScreenshot);
+                }
+                lines.push(`  Trace: ${f.tracePath}`);
+              }
+            }
+          }
+
+          content.push({ type: 'text' as const, text: lines.join('\n') });
+          for (const img of screenshots) {
+            content.push({ type: 'image' as const, data: img.toString('base64'), mimeType: 'image/png' });
+          }
+        } else {
+          content.push({ type: 'text' as const, text: `All tests passed: ${result.passed} passed, ${result.skipped} skipped (${result.duration}ms)` });
+        }
+        return { content };
       }
 
       // Stdio mode: spawn pilot test subprocess

@@ -1,16 +1,18 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { TestDispatcher } from '../test-dispatcher.js';
+import { readTraceSummary } from './trace-utils.js';
 
 export function registerListResultsTool(server: McpServer, dispatcher: TestDispatcher): void {
   server.tool(
     'pilot_list_results',
-    'List test results from the current UI session. Shows pass/fail/skip status, duration, and error messages for each test. Use after a test run to inspect results or check which tests failed.',
+    'List test results from the current UI session. Shows pass/fail/skip status, duration, and error messages for each test. Use after a test run to inspect results or check which tests failed. Pass details=true to include trace steps for failed tests.',
     {
       status: z.enum(['passed', 'failed', 'skipped']).optional().describe('Filter by status'),
       file: z.string().optional().describe('Filter by file path substring'),
+      details: z.boolean().optional().describe('Include trace steps for failed tests (default false)'),
     },
-    async ({ status, file }) => {
+    async ({ status, file, details }) => {
       let results = dispatcher.getResults();
 
       if (status) results = results.filter((r) => r.status === status);
@@ -36,6 +38,15 @@ export function registerListResultsTool(server: McpServer, dispatcher: TestDispa
         lines.push(`[${icon}] ${r.fullName}${dur}${proj}`);
         lines.push(`       ${r.filePath}`);
         if (r.error) lines.push(`       Error: ${r.error}`);
+        if (details && r.status === 'failed' && r.tracePath) {
+          const summary = readTraceSummary(r.tracePath);
+          if (summary && summary.steps.length > 0) {
+            lines.push('');
+            lines.push('       Steps leading to failure:');
+            for (const step of summary.steps) lines.push(`         ${step}`);
+            lines.push('');
+          }
+        }
         if (r.tracePath) lines.push(`       Trace: ${r.tracePath}`);
       }
 
