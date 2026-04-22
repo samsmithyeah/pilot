@@ -3,7 +3,7 @@ import { ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 
 import * as ExpoClipboard from "expo-clipboard"
 
 export default function ClipboardScreen() {
-  const [inputText, setInputText] = useState("Hello from Pilot!")
+  const [inputText, setInputText] = useState("Hello from Tapsmith!")
   const [pastedText, setPastedText] = useState("")
   const [copyCount, setCopyCount] = useState(0)
 

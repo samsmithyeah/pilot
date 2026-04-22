@@ -6,7 +6,7 @@
  *
  * Bugs that have been fixed already live in `selector-regressions.test.ts`.
  */
-import { describe, test } from "pilot"
+import { describe, test } from "tapsmith"
 
 describe("Known bugs (open)", () => {
   // ─── PILOT-134: cross-file isolation ───

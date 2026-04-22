@@ -12,11 +12,11 @@ val coroutinesVersion = "1.8.1"
 val jsonVersion = "20240303"
 
 android {
-    namespace = "dev.pilot.agent"
+    namespace = "dev.tapsmith.agent"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "dev.pilot.agent"
+        applicationId = "dev.tapsmith.agent"
         minSdk = 21
         targetSdk = 34
         versionCode = 1

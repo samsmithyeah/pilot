@@ -1,7 +1,7 @@
 import AsyncStorage from "@react-native-async-storage/async-storage"
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react"
 
-export const AUTH_KEY = "pilot_auth_email"
+export const AUTH_KEY = "tapsmith_auth_email"
 
 interface AuthState {
   email: string | null

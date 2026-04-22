@@ -1,8 +1,8 @@
 import path from "node:path"
-import { test, expect } from "pilot"
+import { test, expect } from "tapsmith"
 import { LoginScreen } from "../screens/login.screen.js"
 
-const PKG = "dev.pilot.testapp"
+const PKG = "dev.tapsmith.testapp"
 
 // ─── Auth setup: log in once and save state ───
 // Mirrors Playwright's auth.setup.ts pattern.
@@ -11,7 +11,7 @@ const PKG = "dev.pilot.testapp"
 
 test("authenticate and save app state", async ({ device, projectName }) => {
   const suffix = projectName ? `-${projectName.replace(/[^a-zA-Z0-9]/g, "-")}` : ""
-  const statePath = path.join(process.cwd(), "pilot-results", `auth-state${suffix}.tar.gz`)
+  const statePath = path.join(process.cwd(), "tapsmith-results", `auth-state${suffix}.tar.gz`)
 
   // Session preflight already cleared data and launched the app fresh.
   await device.getByDescription("Login Form").tap()

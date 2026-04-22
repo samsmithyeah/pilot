@@ -5,7 +5,7 @@
  * web content via CSS selectors, assert on DOM state, then switch back
  * to native.
  */
-import { beforeEach, describe, expect, test } from "pilot"
+import { beforeEach, describe, expect, test } from "tapsmith"
 
 describe("WebView testing", () => {
   test.use({ timeout: 30_000 })

@@ -5,9 +5,9 @@
  * API Calls screen, which fetches from jsonplaceholder.typicode.com.
  *
  * Run with --trace on to see route badges in the trace viewer:
- *   npx pilot test tests/network-mocking.test.ts --trace on
+ *   npx tapsmith test tests/network-mocking.test.ts --trace on
  */
-import { beforeEach, describe, expect, test } from "pilot"
+import { beforeEach, describe, expect, test } from "tapsmith"
 import { ApiCallsScreen } from "../screens/api-calls.screen.js"
 
 describe("Network mocking", () => {
@@ -94,13 +94,13 @@ describe("Network mocking", () => {
     await device.route("**/users/1", async (route) => {
       const response = await route.fetch()
       const data = response.json() as Record<string, unknown>
-      data.name = "Pilot Modified User"
+      data.name = "Tapsmith Modified User"
       await route.fulfill({ json: data })
     })
 
     await screen.fetchUserButton.tap()
     await expect(screen.userHeading).toBeVisible({ timeout: 10_000 })
-    await expect(device.getByText("Pilot Modified User")).toBeVisible()
+    await expect(device.getByText("Tapsmith Modified User")).toBeVisible()
 
     await device.unrouteAll()
   })
@@ -108,7 +108,7 @@ describe("Network mocking", () => {
   test("device.unroute() — remove specific route", async ({ device }) => {
     const screen = new ApiCallsScreen(device)
 
-    const handler = async (route: import("pilot").Route) => {
+    const handler = async (route: import("tapsmith").Route) => {
       await route.fulfill({
         json: [{ id: 1, title: "Still Mocked", body: "body" }],
       })

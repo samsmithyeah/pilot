@@ -2,9 +2,9 @@
 #
 # check-proto-compat.sh
 #
-# Verifies that the Selector oneof fields in pilot.proto are handled in both:
-#   - selectorToProto()  in packages/pilot/src/selectors.ts
-#   - selector_to_json() in packages/pilot-core/src/grpc_server.rs
+# Verifies that the Selector oneof fields in tapsmith.proto are handled in both:
+#   - selectorToProto()  in packages/tapsmith/src/selectors.ts
+#   - selector_to_json() in packages/tapsmith-core/src/grpc_server.rs
 #
 # Exits non-zero if any field is missing from either mapping.
 
@@ -12,9 +12,9 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
-PROTO_FILE="$REPO_ROOT/proto/pilot.proto"
-TS_FILE="$REPO_ROOT/packages/pilot/src/selectors.ts"
-RS_FILE="$REPO_ROOT/packages/pilot-core/src/grpc_server.rs"
+PROTO_FILE="$REPO_ROOT/proto/tapsmith.proto"
+TS_FILE="$REPO_ROOT/packages/tapsmith/src/selectors.ts"
+RS_FILE="$REPO_ROOT/packages/tapsmith-core/src/grpc_server.rs"
 
 errors=0
 

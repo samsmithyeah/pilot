@@ -1,4 +1,4 @@
-import { Device } from "pilot"
+import { Device } from "tapsmith"
 
 export class SlowLoadScreen {
   constructor(private device: Device) {}

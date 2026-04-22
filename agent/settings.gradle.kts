@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "pilot-agent"
+rootProject.name = "tapsmith-agent"
 include(":app")

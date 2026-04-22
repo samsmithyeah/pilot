@@ -32,7 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: packages/pilot
+        working-directory: packages/tapsmith
     steps:
       - uses: actions/checkout@v4
 
@@ -40,7 +40,7 @@ jobs:
         with:
           node-version: 24
           cache: npm
-          cache-dependency-path: packages/pilot/package-lock.json
+          cache-dependency-path: packages/tapsmith/package-lock.json
 
       - name: Install dependencies
         run: npm ci
@@ -65,7 +65,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: packages/pilot-core
+        working-directory: packages/tapsmith-core
     steps:
       - uses: actions/checkout@v4
 
@@ -82,8 +82,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            packages/pilot-core/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('packages/pilot-core/Cargo.lock') }}
+            packages/tapsmith-core/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('packages/tapsmith-core/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
@@ -100,7 +100,7 @@ jobs:
         run: cargo build --release
 
   rust-macos:
-    # Compiles pilot-core on macOS so the macOS-gated iOS network capture
+    # Compiles tapsmith-core on macOS so the macOS-gated iOS network capture
     # path (src/ios_redirect.rs, transparent-TCP MITM, vendored mitmproxy
     # IPC proto) is exercised by CI. The Linux rust job above can't catch
     # cfg(target_os = "macos") regressions on its own.
@@ -108,7 +108,7 @@ jobs:
     runs-on: macos-latest
     defaults:
       run:
-        working-directory: packages/pilot-core
+        working-directory: packages/tapsmith-core
     steps:
       - uses: actions/checkout@v4
 
@@ -125,8 +125,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            packages/pilot-core/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('packages/pilot-core/Cargo.lock') }}
+            packages/tapsmith-core/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('packages/tapsmith-core/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 

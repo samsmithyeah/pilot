@@ -6,9 +6,9 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <instrumentation
-        android:name="dev.pilot.agent.PilotAgent"
-        android:targetPackage="dev.pilot.agent"
-        android:label="Pilot Agent" />
+        android:name="dev.tapsmith.agent.TapsmithAgent"
+        android:targetPackage="dev.tapsmith.agent"
+        android:label="Tapsmith Agent" />
 
     <application
         android:allowBackup="false"

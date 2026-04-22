@@ -1,19 +1,19 @@
 # CI Setup
 
-This guide covers running Pilot tests in continuous integration environments.
+This guide covers running Tapsmith tests in continuous integration environments.
 
 ## Overview
 
-To run Pilot tests in CI, you need:
+To run Tapsmith tests in CI, you need:
 
 1. Node.js 18+ installed.
-2. The Pilot daemon binary (installed automatically with `npm install pilot`).
+2. The Tapsmith daemon binary (installed automatically with `npm install tapsmith`).
 3. **Android**: An Android emulator running in headless mode and ADB on the PATH.
-4. **iOS**: A macOS runner with Xcode installed (simulators are managed by Pilot).
+4. **iOS**: A macOS runner with Xcode installed (simulators are managed by Tapsmith).
 
 ## GitHub Actions (Android)
 
-Here is a complete GitHub Actions workflow that builds your app, starts an emulator, and runs Pilot tests.
+Here is a complete GitHub Actions workflow that builds your app, starts an emulator, and runs Tapsmith tests.
 
 ```yaml
 name: Mobile Tests
@@ -62,14 +62,14 @@ jobs:
           api-level: 33
           arch: x86_64
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
-          script: npx pilot test
+          script: npx tapsmith test
 
       - name: Upload test artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pilot-results
-          path: pilot-results/
+          name: tapsmith-results
+          path: tapsmith-results/
           retention-days: 14
 ```
 
@@ -81,7 +81,7 @@ jobs:
 
 ## GitHub Actions (iOS)
 
-iOS tests require a macOS runner with Xcode installed. Pilot manages simulator lifecycle automatically.
+iOS tests require a macOS runner with Xcode installed. Tapsmith manages simulator lifecycle automatically.
 
 ```yaml
 name: iOS Tests
@@ -125,32 +125,32 @@ jobs:
             -scheme MyApp \
             -destination 'platform=iOS Simulator,name=iPhone 17'
 
-      - name: Run Pilot tests
-        run: npx pilot test
+      - name: Run Tapsmith tests
+        run: npx tapsmith test
 
       - name: Upload test artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pilot-results
-          path: pilot-results/
+          name: tapsmith-results
+          path: tapsmith-results/
           retention-days: 14
 ```
 
 ### Key Points
 
 - **macOS runner** is required for iOS simulators. GitHub provides `macos-latest` with Xcode pre-installed.
-- Pilot boots and manages simulators automatically -- no manual `xcrun simctl` setup needed.
+- Tapsmith boots and manages simulators automatically -- no manual `xcrun simctl` setup needed.
 - Build your app for the iOS Simulator target (not a physical device) using `build-for-testing` or your existing build pipeline.
 
 ### iOS network capture on CI
 
-iOS network capture (trace + `network.json` in the trace viewer) routes simulator traffic through Pilot's MITM proxy via a macOS **Network Extension** redirector that is bundled with [mitmproxy](https://mitmproxy.org). You need two one-time prerequisites on the CI runner for this to work:
+iOS network capture (trace + `network.json` in the trace viewer) routes simulator traffic through Tapsmith's MITM proxy via a macOS **Network Extension** redirector that is bundled with [mitmproxy](https://mitmproxy.org). You need two one-time prerequisites on the CI runner for this to work:
 
-1. **`brew install mitmproxy`** — Pilot discovers the redirector at `/Applications/Mitmproxy Redirector.app` (mitmproxy's installer unpacks it there) or via `$PILOT_REDIRECTOR_APP`. Alternatively, it will extract the redirector from mitmproxy's brew cask tarball into `~/.pilot/redirector/` on first use.
+1. **`brew install mitmproxy`** — Tapsmith discovers the redirector at `/Applications/Mitmproxy Redirector.app` (mitmproxy's installer unpacks it there) or via `$TAPSMITH_REDIRECTOR_APP`. Alternatively, it will extract the redirector from mitmproxy's brew cask tarball into `~/.tapsmith/redirector/` on first use.
 2. **System Extension approval** — the redirector's Network Extension must be approved on first launch. On **GitHub-hosted macOS runners**, SEs are accepted automatically on first launch, so no action is needed. On **self-hosted runners**, run `sudo systemextensionsctl developer on` once to bypass interactive approval, or pre-approve the extension manually.
 
-If your tests do not need network capture, disable it in your pilot config (`trace: { network: false }`) and skip the mitmproxy install step above.
+If your tests do not need network capture, disable it in your tapsmith config (`trace: { network: false }`) and skip the mitmproxy install step above.
 
 See [iOS network capture](./ios-network-capture.md) for the full first-run walkthrough and troubleshooting.
 
@@ -174,7 +174,7 @@ adb wait-for-device
 adb shell 'while [[ -z $(getprop sys.boot_completed) ]]; do sleep 1; done'
 
 # Run tests
-npx pilot test
+npx tapsmith test
 ```
 
 ### ADB Setup
@@ -199,8 +199,8 @@ adb devices
 CI emulators are slower than local machines. Increase the default timeout in your CI config:
 
 ```typescript
-// pilot.config.ts
-import { defineConfig } from "pilot";
+// tapsmith.config.ts
+import { defineConfig } from "tapsmith";
 
 export default defineConfig({
   apk: "./app-debug.apk",
@@ -212,7 +212,7 @@ export default defineConfig({
 Or use a separate config for CI by checking an environment variable:
 
 ```typescript
-import { defineConfig } from "pilot";
+import { defineConfig } from "tapsmith";
 
 const isCI = process.env.CI === "true";
 
@@ -228,12 +228,12 @@ export default defineConfig({
 
 Set the `screenshot` option to `"always"` in CI to capture screenshots for every test. This makes debugging failures much easier when you cannot see the emulator screen.
 
-Screenshots are saved to `<outputDir>/screenshots/` (by default `pilot-results/screenshots/`). Upload this directory as a CI artifact so you can download and inspect screenshots after a run.
+Screenshots are saved to `<outputDir>/screenshots/` (by default `tapsmith-results/screenshots/`). Upload this directory as a CI artifact so you can download and inspect screenshots after a run.
 
 Each screenshot file is named with the test name and a timestamp:
 
 ```
-pilot-results/screenshots/
+tapsmith-results/screenshots/
   user_can_log_in-1710345600000.png
   shows_error_on_invalid_credentials-1710345601234.png
 ```
@@ -243,28 +243,28 @@ pilot-results/screenshots/
 Enable trace recording in CI to get full step-by-step debugging for failures. The recommended mode is `retain-on-failure`, which records every test but only keeps the trace archive when a test fails:
 
 ```bash
-npx pilot test --trace retain-on-failure
+npx tapsmith test --trace retain-on-failure
 ```
 
 Upload traces as CI artifacts alongside screenshots:
 
 ```yaml
 - name: Run tests
-  run: npx pilot test --trace retain-on-failure
+  run: npx tapsmith test --trace retain-on-failure
 
 - name: Upload traces
   if: failure()
   uses: actions/upload-artifact@v4
   with:
-    name: pilot-traces
-    path: pilot-results/traces/
+    name: tapsmith-traces
+    path: tapsmith-results/traces/
     retention-days: 30
 ```
 
 After downloading the artifact, open the trace locally:
 
 ```bash
-npx pilot show-trace pilot-results/traces/trace-login_test.zip
+npx tapsmith show-trace tapsmith-results/traces/trace-login_test.zip
 ```
 
 Network capture works in CI as well -- HTTP/HTTPS requests made by the app are recorded in the trace and visible in the Network tab of the trace viewer. **Android** runs need no extra setup; **iOS** runs need `brew install mitmproxy` and (on self-hosted runners) a pre-approved System Extension — see [iOS network capture on CI](#ios-network-capture-on-ci) above.
@@ -285,11 +285,11 @@ Cache the Android SDK and emulator system images to speed up CI runs:
 
 ### Parallel Workers
 
-Pilot can run multiple workers in parallel as long as each worker has its own
+Tapsmith can run multiple workers in parallel as long as each worker has its own
 device or emulator instance. The recommended emulator-managed setup is:
 
 ```typescript
-import { defineConfig } from "pilot";
+import { defineConfig } from "tapsmith";
 
 export default defineConfig({
   apk: "./app-debug.apk",
@@ -301,7 +301,7 @@ export default defineConfig({
 });
 ```
 
-With that config, `npx pilot test` will try to launch repeated instances of the
+With that config, `npx tapsmith test` will try to launch repeated instances of the
 same AVD for all workers.
 
 ### CI Sharding
@@ -318,7 +318,7 @@ strategy:
 steps:
   # ... setup steps ...
   - name: Run tests (shard ${{ matrix.shard }}/3)
-    run: npx pilot test --shard=${{ matrix.shard }}/3
+    run: npx tapsmith test --shard=${{ matrix.shard }}/3
 
   - name: Upload blob report
     if: always()
@@ -328,7 +328,7 @@ steps:
       path: blob-report/
 ```
 
-When `--shard` is used, Pilot automatically adds the `blob` reporter so results
+When `--shard` is used, Tapsmith automatically adds the `blob` reporter so results
 can be merged after all shards complete.
 
 ### Merging Sharded Reports
@@ -352,11 +352,11 @@ merge-reports:
         merge-multiple: true
 
     - name: Merge reports
-      run: npx pilot merge-reports all-blob-reports
+      run: npx tapsmith merge-reports all-blob-reports
 
     - name: Upload HTML report
       uses: actions/upload-artifact@v4
       with:
-        name: pilot-report
-        path: pilot-report/
+        name: tapsmith-report
+        path: tapsmith-report/
 ```

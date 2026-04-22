@@ -1,22 +1,22 @@
 #!/bin/bash
 #
-# Creates the PilotAgent Xcode project for building the XCUITest bundle.
+# Creates the TapsmithAgent Xcode project for building the XCUITest bundle.
 #
 # The project structure:
-#   PilotAgent.xcodeproj/
-#     - PilotAgentUITests target (XCUITest bundle)
+#   TapsmithAgent.xcodeproj/
+#     - TapsmithAgentUITests target (XCUITest bundle)
 #     - Links to XCTest framework
-#     - All Swift source files in PilotAgent/
+#     - All Swift source files in TapsmithAgent/
 #
 # Usage:
 #   cd ios-agent && ./create-xcode-project.sh
-#   xcodebuild build-for-testing -project PilotAgent.xcodeproj -scheme PilotAgentUITests \
+#   xcodebuild build-for-testing -project TapsmithAgent.xcodeproj -scheme TapsmithAgentUITests \
 #     -destination 'platform=iOS Simulator,name=iPhone 16'
 
 set -euo pipefail
 cd "$(dirname "$0")"
 
-PROJECT_DIR="PilotAgent.xcodeproj"
+PROJECT_DIR="TapsmithAgent.xcodeproj"
 
 # If the project already exists, skip
 if [ -d "$PROJECT_DIR" ]; then
@@ -24,27 +24,27 @@ if [ -d "$PROJECT_DIR" ]; then
     exit 0
 fi
 
-echo "Generating PilotAgent.xcodeproj..."
+echo "Generating TapsmithAgent.xcodeproj..."
 
 # Use xcodegen if available, otherwise provide instructions
 if command -v xcodegen &>/dev/null; then
     cat > project.yml << 'XCODEGEN'
-name: PilotAgent
+name: TapsmithAgent
 options:
-  bundleIdPrefix: dev.pilot
+  bundleIdPrefix: dev.tapsmith
   deploymentTarget:
     iOS: "15.0"
   xcodeVersion: "15.0"
 targets:
-  PilotAgentUITests:
+  TapsmithAgentUITests:
     type: bundle.ui-testing
     platform: iOS
     sources:
-      - path: PilotAgent
+      - path: TapsmithAgent
         type: group
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: dev.pilot.agent
+        PRODUCT_BUNDLE_IDENTIFIER: dev.tapsmith.agent
         INFOPLIST_FILE: ""
         GENERATE_INFOPLIST_FILE: YES
         TEST_TARGET_NAME: ""
@@ -65,8 +65,8 @@ else
     echo ""
     echo "Or manually create the Xcode project:"
     echo "  1. Open Xcode → File → New → Project → iOS → UI Testing Bundle"
-    echo "  2. Name it 'PilotAgent', bundle ID 'dev.pilot.agent'"
-    echo "  3. Add all files from PilotAgent/ directory"
+    echo "  2. Name it 'TapsmithAgent', bundle ID 'dev.tapsmith.agent'"
+    echo "  3. Add all files from TapsmithAgent/ directory"
     echo "  4. Set deployment target to iOS 15.0"
     echo ""
     exit 1

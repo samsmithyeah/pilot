@@ -2,7 +2,7 @@
  * Verify that every selector the Selector Playground would suggest
  * for WebView elements actually works at runtime.
  */
-import { beforeEach, describe, expect, test } from "pilot"
+import { beforeEach, describe, expect, test } from "tapsmith"
 
 describe("WebView selector playground parity", () => {
   test.use({ timeout: 30_000 })

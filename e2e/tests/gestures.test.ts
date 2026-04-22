@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test } from "pilot"
+import { beforeEach, describe, expect, test } from "tapsmith"
 import { GesturesScreen } from "../screens/gestures.screen.js"
 
 describe("Gestures screen", () => {

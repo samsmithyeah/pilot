@@ -4,9 +4,9 @@
  * These tests make real HTTP requests to jsonplaceholder.typicode.com.
  * Run with --trace on to see network traffic in the trace viewer:
  *
- *   npx pilot test tests/api-calls.test.ts --trace on
+ *   npx tapsmith test tests/api-calls.test.ts --trace on
  */
-import { beforeEach, describe, expect, test } from "pilot"
+import { beforeEach, describe, expect, test } from "tapsmith"
 import { ApiCallsScreen } from "../screens/api-calls.screen.js"
 
 describe("API Calls screen", () => {

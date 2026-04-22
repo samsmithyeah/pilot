@@ -1,6 +1,6 @@
-import { test, expect, describe } from "pilot";
+import { test, expect, describe } from "tapsmith";
 
-const PKG = "dev.pilot.testapp";
+const PKG = "dev.tapsmith.testapp";
 
 // ─── Device Setup ───
 
@@ -46,7 +46,7 @@ describe("App lifecycle", () => {
 
 describe("Deep links", () => {
   test("openDeepLink() navigates to a screen", async ({ device }) => {
-    await device.openDeepLink("pilottest:///login");
+    await device.openDeepLink("tapsmithtest:///login");
   });
 });
 
@@ -91,9 +91,9 @@ describe("Clipboard", () => {
   test("setClipboard() + getClipboard() round-trips text", async ({
     device,
   }) => {
-    await device.setClipboard("Pilot E2E clipboard test!");
+    await device.setClipboard("Tapsmith E2E clipboard test!");
     const clipText = await device.getClipboard();
-    expect(clipText).toBe("Pilot E2E clipboard test!");
+    expect(clipText).toBe("Tapsmith E2E clipboard test!");
   });
 });
 

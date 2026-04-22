@@ -1,4 +1,4 @@
-import { describe, expect, test } from "pilot"
+import { describe, expect, test } from "tapsmith"
 import { HomeScreen } from "../screens/home.screen.js"
 
 describe("Home screen", () => {

@@ -3,7 +3,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "PilotAgent",
+    name: "TapsmithAgent",
     platforms: [
         .iOS(.v15),
     ],
@@ -15,8 +15,8 @@ let package = Package(
         //
         // To build:
         //   xcodebuild build-for-testing \
-        //     -project PilotAgent.xcodeproj \
-        //     -scheme PilotAgent \
+        //     -project TapsmithAgent.xcodeproj \
+        //     -scheme TapsmithAgent \
         //     -destination 'platform=iOS Simulator,name=iPhone 16'
     ]
 )

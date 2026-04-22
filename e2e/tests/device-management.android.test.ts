@@ -1,10 +1,10 @@
-import { test, expect, describe } from "pilot"
+import { test, expect, describe } from "tapsmith"
 
-const PKG = "dev.pilot.testapp"
+const PKG = "dev.tapsmith.testapp"
 
 // ─── Android-only device management tests ───
 // These tests use APIs that are only available on Android.
-// They are excluded from the iOS test suite via pilot.config.ios.mjs.
+// They are excluded from the iOS test suite via tapsmith.config.ios.mjs.
 
 // ─── App Lifecycle (Android-specific) ───
 
@@ -36,7 +36,7 @@ describe("App lifecycle (Android)", () => {
 
 describe("Deep links (Android)", () => {
   test("navigate back after deep link", async ({ device }) => {
-    await device.openDeepLink("pilottest:///login")
+    await device.openDeepLink("tapsmithtest:///login")
     await device.pressBack()
   })
 })
