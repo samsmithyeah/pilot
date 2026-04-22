@@ -14,7 +14,6 @@
 
 import * as http from 'node:http';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFileSync, fork, spawn, type ChildProcess } from 'node:child_process';
 import { watch as chokidarWatch, type FSWatcher } from 'chokidar';
@@ -653,6 +652,7 @@ export async function startUIServer(
     if (isRunning) return { status: 'failed', passed: 0, failed: 0, skipped: 0, duration: 0 };
 
     isRunning = true;
+    testResults.clear();
     const project = projectForFile(filePath, explicitProjectName);
     const useOptions = project?.use as RunFileUseOptions | undefined;
     const projectName = project && project.name !== 'default' ? project.name : undefined;
@@ -689,6 +689,7 @@ export async function startUIServer(
   async function runAllFilesSingle(): Promise<TestRunResult> {
     if (isRunning) return { status: 'failed', passed: 0, failed: 0, skipped: 0, duration: 0 };
     isRunning = true;
+    testResults.clear();
     screenPollActive = true;
 
     broadcast({ type: 'run-start', fileCount: ctx.testFiles.length });
@@ -1672,6 +1673,7 @@ export async function startUIServer(
   async function runAllFilesParallel(): Promise<TestRunResult> {
     if (isRunning) return { status: 'failed', passed: 0, failed: 0, skipped: 0, duration: 0 };
     isRunning = true;
+    testResults.clear();
     screenPollActive = true;
     parallelRunAborted = false;
 
@@ -1780,6 +1782,7 @@ export async function startUIServer(
   async function runFileParallel(filePath: string, testFilter?: string, explicitProjectName?: string): Promise<TestRunResult> {
     if (isRunning) return { status: 'failed', passed: 0, failed: 0, skipped: 0, duration: 0 };
     isRunning = true;
+    testResults.clear();
     screenPollActive = true;
     parallelRunAborted = false;
 
@@ -2732,7 +2735,8 @@ export async function startUIServer(
   console.log(`\x1b[2mMCP server available at http://127.0.0.1:${mcpPort}/mcp\x1b[0m`);
 
   // Write port file for standalone MCP server discovery
-  const portFilePath = path.join(os.tmpdir(), 'pilot-ui-port');
+  const { uiPortFilePath } = await import('../mcp/port-file.js');
+  const portFilePath = uiPortFilePath();
   try {
     fs.writeFileSync(portFilePath, String(mcpPort));
   } catch {

@@ -9,7 +9,12 @@ const DEFAULT_ADDRESS = 'localhost:50051';
 
 let _client: PilotGrpcClient | null = null;
 let _daemonProcess: ChildProcess | null = null;
+let _daemonAddress: string | null = null;
 let _ready = false;
+
+export function getDaemonAddress(): string | null {
+  return _daemonAddress;
+}
 
 export async function ensureConnected(): Promise<PilotGrpcClient> {
   if (_client && _ready) {
@@ -33,11 +38,13 @@ export async function ensureConnected(): Promise<PilotGrpcClient> {
     const { agentConnected } = await _client.ping();
     if (agentConnected) {
       log('Connected to existing daemon (agent already running)');
+      _daemonAddress = address;
       _ready = true;
       return _client;
     }
     log('Connected to existing daemon, starting agent...');
     await startAgentFromConfig(_client, config);
+    _daemonAddress = address;
     _ready = true;
     return _client;
   }
@@ -51,9 +58,10 @@ export async function ensureConnected(): Promise<PilotGrpcClient> {
   const daemonArgs = ['--port', port];
   if (platform) daemonArgs.push('--platform', platform);
 
-  _daemonProcess = spawn(bin, daemonArgs, { stdio: 'ignore' });
+  _daemonProcess = spawn(bin, daemonArgs, { stdio: ['ignore', 'ignore', 'pipe'] });
   _daemonProcess.unref();
-  _daemonProcess.on('error', () => {});
+  _daemonProcess.on('error', (err) => { log(`Daemon process error: ${err.message}`); });
+  _daemonProcess.stderr?.on('data', (data: Buffer) => { log(`Daemon: ${data.toString().trim()}`); });
 
   const client = new PilotGrpcClient(`127.0.0.1:${port}`);
   const started = await client.waitForReady(10_000);
@@ -67,6 +75,7 @@ export async function ensureConnected(): Promise<PilotGrpcClient> {
   }
 
   _client = client;
+  _daemonAddress = `127.0.0.1:${port}`;
   const { version } = await client.ping();
   log(`Started daemon v${version} on port ${port}`);
 
@@ -156,5 +165,6 @@ export function closeClient(): void {
     _daemonProcess.kill();
     _daemonProcess = null;
   }
+  _daemonAddress = null;
   _ready = false;
 }

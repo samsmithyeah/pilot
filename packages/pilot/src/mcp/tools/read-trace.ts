@@ -18,8 +18,8 @@ export function registerReadTraceTool(server: McpServer): void {
       }
 
       try {
-        const result = readTraceArchive(tracePath, include_screenshots ?? false);
-        return { content: [{ type: 'text' as const, text: result }] };
+        const content = readTraceArchive(tracePath, include_screenshots ?? false);
+        return { content };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return { content: [{ type: 'text' as const, text: `Failed to read trace: ${msg}` }], isError: true };
@@ -28,7 +28,11 @@ export function registerReadTraceTool(server: McpServer): void {
   );
 }
 
-function readTraceArchive(tracePath: string, includeScreenshots: boolean): string {
+type ContentItem =
+  | { type: 'text'; text: string }
+  | { type: 'image'; data: string; mimeType: string };
+
+function readTraceArchive(tracePath: string, includeScreenshots: boolean): ContentItem[] {
   const zipData = new Uint8Array(fs.readFileSync(tracePath));
   const files = unzipSync(zipData);
   const lines: string[] = [];
@@ -75,20 +79,22 @@ function readTraceArchive(tracePath: string, includeScreenshots: boolean): strin
     }
   }
 
+  const content: ContentItem[] = [{ type: 'text', text: lines.join('\n') }];
+
   if (includeScreenshots) {
-    const screenshotNames = Object.keys(files).filter(
-      name => name.startsWith('screenshots/') && name.endsWith('.png'),
-    );
-    if (screenshotNames.length > 0) {
-      lines.push('');
-      lines.push(`## Screenshots (${screenshotNames.length} captured)`);
-      for (const name of screenshotNames) {
-        const baseName = path.basename(name, '.png');
-        lines.push(`\n### ${baseName}`);
-        lines.push(`[base64:${Buffer.from(files[name]).toString('base64').slice(0, 100)}...]`);
-      }
+    const screenshotNames = Object.keys(files)
+      .filter(name => name.startsWith('screenshots/') && name.endsWith('.png'))
+      .sort();
+    for (const name of screenshotNames) {
+      const label = path.basename(name, '.png');
+      content.push({ type: 'text', text: `\n### Screenshot: ${label}` });
+      content.push({
+        type: 'image',
+        data: Buffer.from(files[name]).toString('base64'),
+        mimeType: 'image/png',
+      });
     }
   }
 
-  return lines.join('\n');
+  return content;
 }

@@ -4,6 +4,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { TestDispatcher } from '../test-dispatcher.js';
 import { readTraceSummary } from './trace-utils.js';
+import { getDaemonAddress } from '../connection.js';
 
 let _running = false;
 
@@ -77,6 +78,8 @@ export function registerRunTestsTool(server: McpServer, dispatcher?: TestDispatc
       _running = true;
       try {
         const args = ['test', ...files, '--trace', 'on'];
+        if (testFilter) args.push('--test', testFilter);
+        if (project) args.push('--project', project);
         if (device) args.push('--device', device);
 
         const result = await runPilotProcess(args);
@@ -90,9 +93,17 @@ export function registerRunTestsTool(server: McpServer, dispatcher?: TestDispatc
 
 function runPilotProcess(args: string[]): Promise<string> {
   return new Promise((resolve) => {
-    const child = spawn('pilot', args, {
+    const env: Record<string, string | undefined> = {
+      ...process.env,
+      FORCE_COLOR: '0',
+      PILOT_REUSE_DAEMON: '1',
+    };
+    const daemonAddr = getDaemonAddress();
+    if (daemonAddr) env.PILOT_DAEMON_ADDRESS = daemonAddr;
+
+    const child = spawn(process.execPath, [process.argv[1], ...args], {
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, FORCE_COLOR: '0', PILOT_REUSE_DAEMON: '1' },
+      env,
     });
 
     let stdout = '';

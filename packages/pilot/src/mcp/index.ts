@@ -1,5 +1,4 @@
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import * as http from 'node:http';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -18,6 +17,7 @@ import { registerStopTestsTool } from './tools/stop-tests.js';
 import { registerSessionInfoTool } from './tools/session-info.js';
 import { registerWatchTool } from './tools/watch.js';
 import { closeClient } from './connection.js';
+import { uiPortFilePath } from './port-file.js';
 import { McpEventEmitter, nextCallId, summarizeResult } from './events.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { TestDispatcher } from './test-dispatcher.js';
@@ -165,7 +165,7 @@ export async function runMcpServer(): Promise<void> {
 
 function discoverUiServerPort(): number | null {
   try {
-    const portFile = path.join(os.tmpdir(), 'pilot-ui-port');
+    const portFile = uiPortFilePath();
     const content = fs.readFileSync(portFile, 'utf-8').trim();
     const port = parseInt(content, 10);
     if (Number.isFinite(port) && port > 0) return port;
