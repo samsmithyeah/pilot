@@ -13,12 +13,16 @@ export function registerReadTraceTool(server: McpServer): void {
       include_screenshots: z.boolean().optional().describe('Include base64 screenshots for each step (default false)'),
     },
     async ({ path: tracePath, include_screenshots }) => {
-      if (!fs.existsSync(tracePath)) {
-        return { content: [{ type: 'text' as const, text: `Trace file not found: ${tracePath}` }], isError: true };
+      const resolved = path.resolve(tracePath);
+      if (!resolved.endsWith('.zip')) {
+        return { content: [{ type: 'text' as const, text: 'Invalid trace path: must be a .zip file' }], isError: true };
+      }
+      if (!fs.existsSync(resolved)) {
+        return { content: [{ type: 'text' as const, text: `Trace file not found: ${resolved}` }], isError: true };
       }
 
       try {
-        const content = readTraceArchive(tracePath, include_screenshots ?? false);
+        const content = readTraceArchive(resolved, include_screenshots ?? false);
         return { content };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
