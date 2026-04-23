@@ -7,9 +7,9 @@
  *
  * Run with --trace on to see API actions in the trace viewer:
  *
- *   npx pilot test tests/api-request-fixture.test.ts --trace on
+ *   npx tapsmith test tests/api-request-fixture.test.ts --trace on
  */
-import { beforeEach, describe, expect, test } from "pilot"
+import { beforeEach, describe, expect, test } from "tapsmith"
 import { ApiCallsScreen } from "../screens/api-calls.screen.js"
 
 describe("request fixture", () => {
@@ -26,11 +26,11 @@ describe("request fixture", () => {
 
   test("POST request sends JSON data", async ({ request }) => {
     const res = await request.post("https://jsonplaceholder.typicode.com/posts", {
-      data: { title: "pilot test", body: "hello from E2E", userId: 1 },
+      data: { title: "tapsmith test", body: "hello from E2E", userId: 1 },
     })
     expect(res.status).toBe(201)
     const body = (await res.json()) as { id: number; title: string }
-    expect(body.title).toBe("pilot test")
+    expect(body.title).toBe("tapsmith test")
   })
 
   test("non-2xx does not throw", async ({ request }) => {
@@ -50,7 +50,7 @@ describe("request fixture", () => {
     // jsonplaceholder doesn't echo headers, but we verify the request
     // doesn't fail with custom headers attached
     const res = await request.get("https://jsonplaceholder.typicode.com/posts/1", {
-      headers: { "X-Test-Header": "pilot-e2e" },
+      headers: { "X-Test-Header": "tapsmith-e2e" },
     })
     expect(res.ok).toBe(true)
   })

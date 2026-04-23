@@ -5,7 +5,7 @@
     "test": "node --test 'utils/__tests__/*.test.mjs'"
   },
   "dependencies": {
-    "pilot": "file:../packages/pilot"
+    "tapsmith": "file:../packages/tapsmith"
   },
   "devDependencies": {
     "dotenv": "^17.4.1",

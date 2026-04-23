@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, flushSoftErrors, test } from "pilot"
+import { beforeAll, describe, expect, flushSoftErrors, test } from "tapsmith"
 
 describe("Soft assertions", () => {
   beforeAll(async ({ device }) => {

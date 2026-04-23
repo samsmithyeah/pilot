@@ -5,15 +5,15 @@ on:
     branches: [main]
     paths:
       - 'ios-agent/**'
-      - 'packages/pilot-core/src/ios/**'
-      - 'packages/pilot-core/src/agent_comms.rs'
+      - 'packages/tapsmith-core/src/ios/**'
+      - 'packages/tapsmith-core/src/agent_comms.rs'
       - '.github/workflows/ios.yml'
   pull_request:
     branches: [main]
     paths:
       - 'ios-agent/**'
-      - 'packages/pilot-core/src/ios/**'
-      - 'packages/pilot-core/src/agent_comms.rs'
+      - 'packages/tapsmith-core/src/ios/**'
+      - 'packages/tapsmith-core/src/agent_comms.rs'
       - '.github/workflows/ios.yml'
 
 concurrency:
@@ -41,20 +41,20 @@ jobs:
       - name: Build for testing
         run: |
           xcodebuild build-for-testing \
-            -project PilotAgent.xcodeproj \
-            -scheme PilotAgentUITests \
+            -project TapsmithAgent.xcodeproj \
+            -scheme TapsmithAgentUITests \
             -destination 'generic/platform=iOS Simulator' \
             -quiet
 
       - name: SwiftLint
         run: |
           if command -v swiftlint &>/dev/null; then
-            swiftlint lint --strict PilotAgent/
+            swiftlint lint --strict TapsmithAgent/
           else
             echo "SwiftLint not installed, skipping"
           fi
 
-      # Run pilot-core's Rust tests on macOS so the macOS-gated iOS modules
+      # Run tapsmith-core's Rust tests on macOS so the macOS-gated iOS modules
       # (patch_xctestrun, simctl/devicectl wrappers) actually get exercised in
       # CI. The main ci.yml rust job runs on Linux and skips these tests.
       - name: Install protoc
@@ -62,7 +62,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: packages/pilot-core
-      - name: Cargo test (pilot-core, macOS)
-        working-directory: packages/pilot-core
+          workspaces: packages/tapsmith-core
+      - name: Cargo test (tapsmith-core, macOS)
+        working-directory: packages/tapsmith-core
         run: cargo test

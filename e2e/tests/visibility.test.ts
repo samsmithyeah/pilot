@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, test } from "pilot"
+import { beforeAll, describe, expect, test } from "tapsmith"
 import { VisibilityScreen } from "../screens/visibility.screen.js"
 
 describe("Visibility screen", () => {

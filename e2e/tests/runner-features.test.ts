@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, test } from "pilot"
+import { beforeAll, describe, expect, test } from "tapsmith"
 import { SlowLoadScreen } from "../screens/slow-load.screen.js"
 
 // ─── test.use() ───

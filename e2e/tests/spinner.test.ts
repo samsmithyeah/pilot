@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, test } from "pilot"
+import { beforeAll, describe, expect, test } from "tapsmith"
 import { SpinnerScreen } from "../screens/spinner.screen.js"
 
 describe("Spinner screen", () => {

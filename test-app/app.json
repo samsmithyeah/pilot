@@ -1,12 +1,12 @@
 {
   "expo": {
-    "name": "Pilot Test App",
-    "slug": "pilot-test-app",
+    "name": "Tapsmith Test App",
+    "slug": "tapsmith-test-app",
     "version": "1.0.0",
     "orientation": "default",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
-    "scheme": "pilottest",
+    "scheme": "tapsmithtest",
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
@@ -14,10 +14,10 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "dev.pilot.testapp"
+      "bundleIdentifier": "dev.tapsmith.testapp"
     },
     "android": {
-      "package": "dev.pilot.testapp",
+      "package": "dev.tapsmith.testapp",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -30,7 +30,7 @@
           "autoVerify": true,
           "data": [
             {
-              "scheme": "pilottest"
+              "scheme": "tapsmithtest"
             }
           ],
           "category": ["DEFAULT", "BROWSABLE"]

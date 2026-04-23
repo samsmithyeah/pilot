@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, test } from "pilot";
+import { beforeAll, describe, expect, test } from "tapsmith";
 import { ListScreen } from "../screens/list.screen.js";
 
 describe("List screen", () => {

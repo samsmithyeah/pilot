@@ -24,11 +24,11 @@ function makeXctestrun(home, hash, mtimeSeconds) {
   const dir = join(
     home,
     "Library/Developer/Xcode/DerivedData",
-    `PilotAgent-${hash}`,
+    `TapsmithAgent-${hash}`,
     "Build/Products",
   )
   mkdirSync(dir, { recursive: true })
-  const path = join(dir, "PilotAgentUITests.xctestrun")
+  const path = join(dir, "TapsmithAgentUITests.xctestrun")
   writeFileSync(path, "fake")
   utimesSync(path, mtimeSeconds, mtimeSeconds)
   return path
@@ -60,13 +60,13 @@ test("throws with build instructions when no xctestrun is found", async () => {
     assert.throws(() => findLatestXctestrun(), (err) => {
       assert.match(err.message, /No xctestrun found/)
       assert.match(err.message, /xcodebuild build-for-testing/)
-      assert.match(err.message, /PILOT_IOS_XCTESTRUN/)
+      assert.match(err.message, /TAPSMITH_IOS_XCTESTRUN/)
       return true
     })
   })
 })
 
-test("ignores non-PilotAgent DerivedData entries", async () => {
+test("ignores non-TapsmithAgent DerivedData entries", async () => {
   await withFakeHome((home, findLatestXctestrun) => {
     // A sibling Xcode project's DerivedData should not be returned.
     const otherDir = join(

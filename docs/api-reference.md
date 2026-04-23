@@ -1,6 +1,6 @@
 # API Reference
 
-Complete reference for all public APIs in the `pilot` package.
+Complete reference for all public APIs in the `tapsmith` package.
 
 ## Locators
 
@@ -74,7 +74,7 @@ device.locator({ xpath: "//android.widget.Button[@text='OK']" })
 
 > The `getBy*` methods and `locator()` are also available on every `ElementHandle`. Calling them on a parent locator scopes the search to its descendants. See [ElementHandle Scoping](#scoping).
 
-> **iOS wrapper suppression.** When traversing the iOS accessibility tree, Pilot drops a matching `XCUIElementTypeOther` container if a descendant *also* matches the same selector and shares the wrapper's `accessibilityIdentifier` (or, when the wrapper's identifier is empty, its `accessibilityLabel`). This collapses the redundant wrappers React Native (and SwiftUI in some configurations) emit around interactive elements, so a `getByText("Submit")` resolves to the actual control rather than the surrounding container. The visible text of the wrapper and descendant is *not* compared — identifier/label match alone is enough. If your native iOS app deliberately exposes an `.other` container with the same identifier as a child you also want addressable, the outer wrapper will be silently suppressed in favour of the child — give the wrapper a unique `accessibilityIdentifier` (or use `device.locator({ id: ... })`) to address it directly.
+> **iOS wrapper suppression.** When traversing the iOS accessibility tree, Tapsmith drops a matching `XCUIElementTypeOther` container if a descendant *also* matches the same selector and shares the wrapper's `accessibilityIdentifier` (or, when the wrapper's identifier is empty, its `accessibilityLabel`). This collapses the redundant wrappers React Native (and SwiftUI in some configurations) emit around interactive elements, so a `getByText("Submit")` resolves to the actual control rather than the surrounding container. The visible text of the wrapper and descendant is *not* compared — identifier/label match alone is enough. If your native iOS app deliberately exposes an `.other` container with the same identifier as a child you also want addressable, the outer wrapper will be silently suppressed in favour of the child — give the wrapper a unique `accessibilityIdentifier` (or use `device.locator({ id: ... })`) to address it directly.
 
 ---
 
@@ -158,7 +158,7 @@ await device.setDevice("emulator-5554");
 
 ### `device.startAgent(targetPackage: string): Promise<void>`
 
-Start the Pilot on-device agent for the given app package.
+Start the Tapsmith on-device agent for the given app package.
 
 ```typescript
 await device.startAgent("com.myapp");
@@ -423,7 +423,7 @@ Close the gRPC connection to the daemon.
 
 ### Network Interception
 
-Pilot supports Playwright-style network interception. Route handlers let you mock, modify, or abort HTTP/HTTPS requests made by the app under test.
+Tapsmith supports Playwright-style network interception. Route handlers let you mock, modify, or abort HTTP/HTTPS requests made by the app under test.
 
 #### `device.route(url, handler, options?): Promise<void>`
 
@@ -447,11 +447,11 @@ Remove a previously registered route handler. If `handler` is omitted, all handl
 
 Remove all registered route handlers.
 
-#### `device.waitForRequest(urlOrPredicate, options?): Promise<PilotRequest>`
+#### `device.waitForRequest(urlOrPredicate, options?): Promise<TapsmithRequest>`
 
 Wait for a network request matching the pattern.
 
-- `urlOrPredicate`: `string | RegExp | ((request: PilotRequest) => boolean)`
+- `urlOrPredicate`: `string | RegExp | ((request: TapsmithRequest) => boolean)`
 - `options.timeout?`: `number` — timeout in ms (default: device timeout)
 
 #### `device.waitForResponse(urlOrPredicate, options?): Promise<NetworkResponseEventData>`
@@ -475,7 +475,7 @@ Unsubscribe from network events.
 
 The `Route` object is passed to route handlers. It provides methods to decide how to handle the intercepted request.
 
-#### `route.request(): PilotRequest`
+#### `route.request(): TapsmithRequest`
 
 Returns the intercepted request.
 
@@ -527,7 +527,7 @@ await device.route('**/api/users/*', async (route) => {
 })
 ```
 
-### PilotRequest
+### TapsmithRequest
 
 Properties: `method`, `url`, `headers`, `postData`, `isHttps`.
 
@@ -919,7 +919,7 @@ const box = await device.getByText("Header", { exact: true }).boundingBox();
 
 The `expect()` function creates assertions for an `ElementHandle` or a plain value. Locator assertions auto-wait by polling until the condition is met or the timeout expires.
 
-### `expect(elementHandle: ElementHandle): PilotAssertions`
+### `expect(elementHandle: ElementHandle): TapsmithAssertions`
 
 Create an assertion object for the given element handle.
 
@@ -937,7 +937,7 @@ expect("hello").toContain("ell");
 expect([1, 2, 3]).toHaveLength(3);
 ```
 
-### `expect.soft(elementHandle: ElementHandle): PilotAssertions`
+### `expect.soft(elementHandle: ElementHandle): TapsmithAssertions`
 
 Create a soft assertion that records failures without stopping the test. Failures are collected and can be flushed at the end.
 
@@ -1206,7 +1206,7 @@ expect(() => parse("bad")).toThrow("Invalid");
 
 ## Test Runner
 
-Pilot includes a built-in test runner with an API inspired by Jest and Playwright.
+Tapsmith includes a built-in test runner with an API inspired by Jest and Playwright.
 
 ### `test(name: string, fn: (fixtures: TestFixtures) => Promise<void>): void`
 
@@ -1388,7 +1388,7 @@ test("shows created item", async ({ device, request }) => {
 ### `request.delete(url, options?)`
 ### `request.head(url, options?)`
 
-Send an HTTP request. Returns a `PilotAPIResponse`. **Does not throw on non-2xx responses** (matching Playwright's behavior) — check `.ok` or `.status` instead.
+Send an HTTP request. Returns a `TapsmithAPIResponse`. **Does not throw on non-2xx responses** (matching Playwright's behavior) — check `.ok` or `.status` instead.
 
 | Parameter | Type | Description |
 |---|---|---|
@@ -1403,7 +1403,7 @@ Send an HTTP request. Returns a `PilotAPIResponse`. **Does not throw on non-2xx 
 
 Send a request with an explicit method via `options.method`. Defaults to `GET`.
 
-### `PilotAPIResponse`
+### `TapsmithAPIResponse`
 
 | Property / Method | Type | Description |
 |---|---|---|
@@ -1424,7 +1424,7 @@ The response body is eagerly buffered, so `.json()`, `.text()`, and `.body()` ca
 Set `baseURL` and `extraHTTPHeaders` in your config or via `test.use()`:
 
 ```typescript
-import { defineConfig } from "pilot";
+import { defineConfig } from "tapsmith";
 
 export default defineConfig({
   baseURL: "https://api.example.com",
@@ -1455,12 +1455,12 @@ This gives full visibility into test-level API calls alongside device interactio
 
 ## Configuration
 
-### `defineConfig(overrides?: Partial<PilotConfig>): PilotConfig`
+### `defineConfig(overrides?: Partial<TapsmithConfig>): TapsmithConfig`
 
-Create a Pilot configuration by merging overrides with defaults. Used in `pilot.config.ts`.
+Create a Tapsmith configuration by merging overrides with defaults. Used in `tapsmith.config.ts`.
 
 ```typescript
-import { defineConfig } from "pilot";
+import { defineConfig } from "tapsmith";
 
 export default defineConfig({
   apk: "./app-debug.apk",
@@ -1475,7 +1475,7 @@ See the [Configuration](configuration.md) guide for all options.
 Projects group test files with shared options and dependency ordering, mirroring Playwright's project concept. Each project can target its own device by overriding device-shaping fields under `use:`. Setup projects run first; dependent projects run after their dependencies complete.
 
 ```typescript
-import { defineConfig } from "pilot";
+import { defineConfig } from "tapsmith";
 
 export default defineConfig({
   projects: [
@@ -1487,7 +1487,7 @@ export default defineConfig({
     {
       name: "authenticated",
       dependencies: ["setup"],
-      use: { appState: "./pilot-results/auth-state.tar.gz" },
+      use: { appState: "./tapsmith-results/auth-state.tar.gz" },
       testMatch: ["**/app-state.test.ts"],
     },
   ],
@@ -1497,7 +1497,7 @@ export default defineConfig({
 **Per-device targeting (Android + iOS):**
 
 ```typescript
-import { defineConfig } from "pilot";
+import { defineConfig } from "tapsmith";
 
 export default defineConfig({
   package: "com.example.app",
@@ -1517,14 +1517,14 @@ export default defineConfig({
         platform: "ios",
         simulator: "iPhone 16",
         app: "./ios/MyApp.app",
-        iosXctestrun: "./ios-agent/PilotAgent.xctestrun",
+        iosXctestrun: "./ios-agent/TapsmithAgent.xctestrun",
       },
     },
   ],
 });
 ```
 
-Run with `pilot test --workers 2` to execute both projects in parallel
+Run with `tapsmith test --workers 2` to execute both projects in parallel
 (one worker per device target). Run with `--workers 1` to run them
 sequentially with a device switch between projects. Both `--ui` and
 `--watch` honor per-project devices and route file execution to the
@@ -1541,9 +1541,9 @@ correct device.
 | `use` | `UseOptions` | Per-project option overrides (applied under file-level `test.use()`). Includes the device-shaping fields documented above. |
 | `workers` | `number` | Number of parallel workers (devices) for this project. Additive — does not consume from the global `workers` budget. When unset, the project shares the global budget proportionally to file count. |
 
-### `loadConfig(dir?: string): Promise<PilotConfig>`
+### `loadConfig(dir?: string): Promise<TapsmithConfig>`
 
-Load configuration from a `pilot.config.ts`, `pilot.config.js`, or `pilot.config.mjs` file. Falls back to defaults if no config file exists. This is used internally by the CLI.
+Load configuration from a `tapsmith.config.ts`, `tapsmith.config.js`, or `tapsmith.config.mjs` file. Falls back to defaults if no config file exists. This is used internally by the CLI.
 
 ---
 
@@ -1613,14 +1613,14 @@ await device.tracing.stopChunk({ path: 'traces/chunk-2.zip' });
 
 ## Reporters
 
-Pilot includes a reporter system inspired by Playwright. Reporters receive lifecycle events during a test run and produce output in various formats.
+Tapsmith includes a reporter system inspired by Playwright. Reporters receive lifecycle events during a test run and produce output in various formats.
 
 ### Configuration
 
-Configure reporters in `pilot.config.ts`:
+Configure reporters in `tapsmith.config.ts`:
 
 ```typescript
-import { defineConfig } from "pilot";
+import { defineConfig } from "tapsmith";
 
 export default defineConfig({
   // Single reporter
@@ -1634,7 +1634,7 @@ export default defineConfig({
 });
 ```
 
-**Auto-detection:** When `reporter` is not set, Pilot uses `list` for local runs and `dot` for CI (detected via the `CI` environment variable). The `github` reporter is automatically added when running in GitHub Actions.
+**Auto-detection:** When `reporter` is not set, Tapsmith uses `list` for local runs and `dot` for CI (detected via the `CI` environment variable). The `github` reporter is automatically added when running in GitHub Actions.
 
 ### Built-in reporters
 
@@ -1655,19 +1655,19 @@ export default defineConfig({
 
 | Option | Type | Default |
 | --- | --- | --- |
-| `outputFile` | `string` | `"pilot-results/results.json"` |
+| `outputFile` | `string` | `"tapsmith-results/results.json"` |
 
 **`junit`**
 
 | Option | Type | Default |
 | --- | --- | --- |
-| `outputFile` | `string` | `"pilot-results/results.xml"` |
+| `outputFile` | `string` | `"tapsmith-results/results.xml"` |
 
 **`html`**
 
 | Option | Type | Default |
 | --- | --- | --- |
-| `outputFolder` | `string` | `"pilot-report"` |
+| `outputFolder` | `string` | `"tapsmith-report"` |
 | `open` | `"always" \| "never" \| "on-failure"` | `"on-failure"` |
 
 **`blob`**
@@ -1678,13 +1678,13 @@ export default defineConfig({
 
 ### Custom reporters
 
-Implement the `PilotReporter` interface:
+Implement the `TapsmithReporter` interface:
 
 ```typescript
-import type { PilotReporter, FullResult } from "pilot";
-import type { TestResult } from "pilot";
+import type { TapsmithReporter, FullResult } from "tapsmith";
+import type { TestResult } from "tapsmith";
 
-class MyReporter implements PilotReporter {
+class MyReporter implements TapsmithReporter {
   onRunStart(config, fileCount) {
     console.log(`Running ${fileCount} test files`);
   }
@@ -1709,23 +1709,23 @@ export default defineConfig({
 });
 ```
 
-### `PilotReporter` interface
+### `TapsmithReporter` interface
 
-All types are importable from `"pilot"`:
+All types are importable from `"tapsmith"`:
 
 ```typescript
 import type {
-  PilotReporter,
+  TapsmithReporter,
   FullResult,
-  PilotConfig,
+  TapsmithConfig,
   TestResult,
   SuiteResult,
-} from "pilot";
+} from "tapsmith";
 ```
 
 ```typescript
-interface PilotReporter {
-  onRunStart?(config: PilotConfig, fileCount: number): void;
+interface TapsmithReporter {
+  onRunStart?(config: TapsmithConfig, fileCount: number): void;
   onTestFileStart?(filePath: string): void;
   onTestEnd?(test: TestResult): void;
   onTestFileEnd?(filePath: string, results: TestResult[]): void;
@@ -1782,58 +1782,58 @@ Summary: 12 passed | 45.2s (setup 30.1s, tests 15.1s)
 
 ## CLI
 
-### `pilot test [files...]`
+### `tapsmith test [files...]`
 
 Run test files. If no files are specified, discovers tests using the `testMatch` patterns from your config.
 
 ```bash
-npx pilot test
-npx pilot test tests/login.test.ts tests/signup.test.ts
+npx tapsmith test
+npx tapsmith test tests/login.test.ts tests/signup.test.ts
 ```
 
-### `pilot test --device <serial>` / `pilot test -d <serial>`
+### `tapsmith test --device <serial>` / `tapsmith test -d <serial>`
 
 Target a specific device by its ADB serial number. This is mainly useful for
 single-device debugging or reproducing an issue on one known device.
 
 ```bash
-npx pilot test --device emulator-5554
+npx tapsmith test --device emulator-5554
 ```
 
 For multi-worker emulator runs, prefer config-based provisioning with
 `workers`, `launchEmulators`, and `avd`.
 
-### `pilot test --workers <n>` / `pilot test -j <n>`
+### `tapsmith test --workers <n>` / `tapsmith test -j <n>`
 
 Run tests in parallel across `n` devices. Each worker gets its own device/emulator and daemon instance. Tests are distributed via a work-stealing queue for natural load balancing.
 
 ```bash
-npx pilot test --workers 4
-npx pilot test -j 2
+npx tapsmith test --workers 4
+npx tapsmith test -j 2
 ```
 
 Overrides the `workers` config option. Requires enough connected devices or `launchEmulators: true` with an `avd` configured. In parallel mode, each test result includes a `workerIndex` field and console reporters show `[worker N]` tags.
 
-### `pilot test --shard=x/y`
+### `tapsmith test --shard=x/y`
 
 Split the test suite deterministically across `y` machines, running only shard `x`. Shards are assigned by file index (`file_index % total === current - 1`).
 
 ```bash
 # In a CI matrix with 4 jobs:
-npx pilot test --shard=1/4
-npx pilot test --shard=2/4
-npx pilot test --shard=3/4
-npx pilot test --shard=4/4
+npx tapsmith test --shard=1/4
+npx tapsmith test --shard=2/4
+npx tapsmith test --shard=3/4
+npx tapsmith test --shard=4/4
 ```
 
-When sharding is active, the `blob` reporter is automatically added so results can be merged later with `pilot merge-reports`.
+When sharding is active, the `blob` reporter is automatically added so results can be merged later with `tapsmith merge-reports`.
 
-### `pilot show-trace <file.zip>`
+### `tapsmith show-trace <file.zip>`
 
 Open the trace viewer in the default browser to inspect a recorded trace.
 
 ```bash
-npx pilot show-trace test-results/traces/trace-my_test.zip
+npx tapsmith show-trace test-results/traces/trace-my_test.zip
 ```
 
 The trace viewer shows:
@@ -1843,40 +1843,40 @@ The trace viewer shows:
 - **Detail tabs** — Call info, Console output, Source code, View hierarchy, Network requests, Errors
 - **Keyboard navigation** — Arrow keys or j/k to move between actions
 
-### `pilot test --trace <mode>`
+### `tapsmith test --trace <mode>`
 
 Record traces during test execution. Overrides the `trace` config option.
 
 ```bash
-npx pilot test --trace on                    # Record all tests
-npx pilot test --trace retain-on-failure     # Only keep traces for failures
+npx tapsmith test --trace on                    # Record all tests
+npx tapsmith test --trace retain-on-failure     # Only keep traces for failures
 ```
 
-### `pilot test --network` / `pilot test --no-network`
+### `tapsmith test --network` / `tapsmith test --no-network`
 
 Enable or disable network capture when tracing. By default, network capture is enabled whenever tracing is active. Use `--no-network` to disable it.
 
 ```bash
-npx pilot test --trace on --no-network      # Trace without network capture
+npx tapsmith test --trace on --no-network      # Trace without network capture
 ```
 
-### `pilot merge-reports [dir]`
+### `tapsmith merge-reports [dir]`
 
 Merge blob reports from sharded CI runs into a single HTML report.
 
 ```bash
 # After collecting all shard blob-report/ directories:
-npx pilot merge-reports           # reads from blob-report/
-npx pilot merge-reports ./blobs   # custom directory
+npx tapsmith merge-reports           # reads from blob-report/
+npx tapsmith merge-reports ./blobs   # custom directory
 ```
 
-### `pilot show-report [dir]`
+### `tapsmith show-report [dir]`
 
 Open the HTML test report in the default browser.
 
 ```bash
-npx pilot show-report               # opens pilot-report/index.html
-npx pilot show-report ./my-report   # custom directory
+npx tapsmith show-report               # opens tapsmith-report/index.html
+npx tapsmith show-report ./my-report   # custom directory
 ```
 
 ### iOS physical-device commands
@@ -1885,56 +1885,56 @@ These commands support running tests on USB-attached iPhones/iPads. See
 [docs/ios-physical-devices.md](./ios-physical-devices.md) for the full
 setup walkthrough.
 
-#### `pilot list-devices [--json]`
+#### `tapsmith list-devices [--json]`
 
-Print a table of every device Pilot can target right now — Android (ADB),
+Print a table of every device Tapsmith can target right now — Android (ADB),
 iOS simulators (simctl), and iOS physical (devicectl) — with a one-line
 status (`Ready` or an imperative fix). `--json` emits the row model for
 scripting.
 
-#### `pilot setup-ios-device [udid]`
+#### `tapsmith setup-ios-device [udid]`
 
 Run the per-device preflight checklist for a physical iOS device: pairing,
 Developer Mode, Developer Disk Image, USB transport, built agent cache,
 firewall stealth mode, and the Xcode 26 CoreDevice sudo prompt probe.
 Prints per-check `ok`/`fix` output and exits non-zero if anything blocks
-`pilot test`. With no UDID, auto-selects the single attached device.
+`tapsmith test`. With no UDID, auto-selects the single attached device.
 
-#### `pilot build-ios-agent [--team <id>] [--device|--simulator]`
+#### `tapsmith build-ios-agent [--team <id>] [--device|--simulator]`
 
-Build the signed `PilotAgent` XCUITest bundle for the current device /
+Build the signed `TapsmithAgent` XCUITest bundle for the current device /
 provisioning profile. Auto-detects the Apple Developer team ID from Xcode's
 preferences (or keychain) if `--team` is omitted. The resulting
-`.xctestrun` is cached under `~/.pilot/` and picked up automatically by
-`pilot test`.
+`.xctestrun` is cached under `~/.tapsmith/` and picked up automatically by
+`tapsmith test`.
 
-#### `pilot configure-ios-network <udid> [--ssid <name>] [--device-name <name>]`
+#### `tapsmith configure-ios-network <udid> [--ssid <name>] [--device-name <name>]`
 
 Generate a `.mobileconfig` profile that routes the physical device's Wi-Fi
-traffic through Pilot's MITM proxy for decrypted HTTPS capture, and reveal
+traffic through Tapsmith's MITM proxy for decrypted HTTPS capture, and reveal
 it in Finder so you can AirDrop it to the device. `--ssid` targets a
 specific Wi-Fi network (defaults to the host's current SSID); `--device-name`
 sets the profile's `PayloadDisplayName`.
 
-#### `pilot refresh-ios-network <udid>`
+#### `tapsmith refresh-ios-network <udid>`
 
 Regenerate the profile for a device whose host IP or Wi-Fi SSID has
 changed since the last run. Same shape as `configure-ios-network` — the
 difference is only wording in the output.
 
-#### `pilot verify-ios-network <udid>`
+#### `tapsmith verify-ios-network <udid>`
 
 End-to-end sanity check that the installed profile plus the trusted CA
 actually produce decrypted HTTPS capture. Starts the proxy, asks you to
-load an HTTPS page in Safari on the device, then reports whether Pilot
+load an HTTPS page in Safari on the device, then reports whether Tapsmith
 saw the request and could decrypt the body. Exits non-zero on failure
 with fix-it hints for each failure mode.
 
-### `pilot --version` / `pilot -v`
+### `tapsmith --version` / `tapsmith -v`
 
-Print the Pilot version.
+Print the Tapsmith version.
 
-### `pilot --help` / `pilot -h`
+### `tapsmith --help` / `tapsmith -h`
 
 Show help text with available commands and options.
 
@@ -1947,7 +1947,7 @@ Test hybrid apps that embed WebViews (login screens, payment flows, in-app brows
 ### Prerequisites
 
 - **Android**: The app must enable WebView debugging: `WebView.setWebContentsDebuggingEnabled(true)`. React Native WebView provides a `webviewDebuggingEnabled` prop.
-- **iOS**: The WKWebView must set `isInspectable = true` (required since iOS 16.4). React Native WebView provides a `webviewDebuggingEnabled` prop which sets this automatically. Pilot connects directly to the simulator's WebKit Inspector — no external tools needed.
+- **iOS**: The WKWebView must set `isInspectable = true` (required since iOS 16.4). React Native WebView provides a `webviewDebuggingEnabled` prop which sets this automatically. Tapsmith connects directly to the simulator's WebKit Inspector — no external tools needed.
 
 ### `device.webview(packageName?: string): Promise<WebViewHandle>`
 
@@ -2081,9 +2081,9 @@ await expect(webview.locator(".loaded")).toBeVisible({ timeout: 10_000 })
 
 ## MCP Server
 
-Pilot includes a built-in MCP server that lets AI coding agents interact with devices, run tests, and inspect results. It supports two transport modes:
+Tapsmith includes a built-in MCP server that lets AI coding agents interact with devices, run tests, and inspect results. It supports two transport modes:
 
-- **SSE mode** (via `pilot test --ui`) — agent shares the UI session with full test tree, results, watch mode, and mutual exclusion. 16 tools available.
-- **Stdio mode** (via `pilot mcp-server`) — standalone agent with its own daemon and device. 11 tools available.
+- **SSE mode** (via `tapsmith test --ui`) -- agent shares the UI session with full test tree, results, watch mode, and mutual exclusion. 16 tools available.
+- **Stdio mode** (via `tapsmith mcp-server`) -- standalone agent with its own daemon and device. 11 tools available.
 
 See the [MCP Server Guide](mcp-server.md) for setup instructions, the full tool reference, and the recommended workflow.

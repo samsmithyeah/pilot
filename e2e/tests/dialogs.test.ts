@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test } from "pilot"
+import { beforeEach, describe, expect, test } from "tapsmith"
 import { DialogsScreen } from "../screens/dialogs.screen.js"
 
 describe("Dialogs screen", () => {

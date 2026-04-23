@@ -1,26 +1,26 @@
-# Pilot
+# Tapsmith
 
 Mobile app testing framework with a Playwright-inspired API. Three-tier architecture:
-**TypeScript SDK** (test runner + assertions) → **gRPC** → **Rust daemon** (pilot-core) → **ADB/simctl + socket** → **On-device agent** (Android: Kotlin/UIAutomator2, iOS: Swift/XCUITest).
+**TypeScript SDK** (test runner + assertions) → **gRPC** → **Rust daemon** (tapsmith-core) → **ADB/simctl + socket** → **On-device agent** (Android: Kotlin/UIAutomator2, iOS: Swift/XCUITest).
 
 ## Project structure
 
 ```
-packages/pilot/        # TypeScript SDK — selectors, element handles, assertions, runner, CLI
-packages/pilot-core/   # Rust daemon — gRPC server, ADB/simctl bridge, device management
-agent/                 # Android Kotlin agent — UIAutomator2 instrumentation
-ios-agent/             # iOS Swift agent — XCUITest instrumentation
-proto/pilot.proto      # gRPC contract (single proto file, buf for linting)
-docs/                  # User-facing documentation
-test-app/              # React Native (Expo) test app for E2E testing
-e2e/                   # E2E test suite run against the test app
+packages/tapsmith/        # TypeScript SDK — selectors, element handles, assertions, runner, CLI
+packages/tapsmith-core/   # Rust daemon — gRPC server, ADB/simctl bridge, device management
+agent/                    # Android Kotlin agent — UIAutomator2 instrumentation
+ios-agent/                # iOS Swift agent — XCUITest instrumentation
+proto/tapsmith.proto      # gRPC contract (single proto file, buf for linting)
+docs/                     # User-facing documentation
+test-app/                 # React Native (Expo) test app for E2E testing
+e2e/                      # E2E test suite run against the test app
 ```
 
 Each component has independent dependencies and build lifecycle (not a JS monorepo).
 
 ## Build & test commands
 
-### TypeScript SDK (`packages/pilot/`)
+### TypeScript SDK (`packages/tapsmith/`)
 ```bash
 npm ci                  # install deps
 npm run typecheck       # tsc --noEmit
@@ -30,7 +30,7 @@ npm run knip            # unused code detection
 npm run build           # tsc → dist/
 ```
 
-### Rust daemon (`packages/pilot-core/`)
+### Rust daemon (`packages/tapsmith-core/`)
 ```bash
 cargo fmt -- --check    # formatting
 cargo clippy -- -D warnings  # lint (warnings are errors)
@@ -50,11 +50,11 @@ Requires `protobuf-compiler` installed for tonic-build.
 cd ios-agent && ./create-xcode-project.sh    # first time only
 # Simulator build (unsigned, builds once per iOS version):
 xcodebuild build-for-testing \
-  -project PilotAgent.xcodeproj \
-  -scheme PilotAgentUITests \
+  -project TapsmithAgent.xcodeproj \
+  -scheme TapsmithAgentUITests \
   -destination 'platform=iOS Simulator,name=iPhone 16'
-# Physical device build (signed via the Pilot CLI, one-time per device/profile):
-npx pilot build-ios-agent                    # auto-detects team ID from Xcode
+# Physical device build (signed via the Tapsmith CLI, one-time per device/profile):
+npx tapsmith build-ios-agent                    # auto-detects team ID from Xcode
 ```
 
 See `docs/ios-physical-devices.md` for the full physical-device walkthrough.
@@ -93,7 +93,7 @@ GitHub Actions runs 4 parallel jobs: `proto-lint`, `typescript`, `rust`, `androi
 
 ## Design principles
 
-- **Playwright is the bar.** The goal is to match Playwright's robustness, reliability, and developer experience for mobile. Don't cut corners — handle edge cases, add proper error messages, implement auto-waiting correctly, and write thorough tests.
+- **Playwright is the bar.** The goal is to match Playwright's robustness, reliability, and developer experience for mobile. Don't cut corners -- handle edge cases, add proper error messages, implement auto-waiting correctly, and write thorough tests.
 - **Don't reinvent the wheel.** Use well-maintained open source packages rather than writing custom implementations. If a proven library exists for the job (parsing, diffing, formatting, etc.), prefer it over hand-rolling.
 
 ## Documentation

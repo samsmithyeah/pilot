@@ -3,7 +3,7 @@ node_modules/
 
 # Build outputs
 dist/
-packages/pilot-core/target/
+packages/tapsmith-core/target/
 *.class
 *.dex
 *.apk
@@ -27,9 +27,12 @@ agent/local.properties
 Thumbs.db
 
 # Test artifacts
+tapsmith-results/
+tapsmith-report/
+blob-report/
+
 pilot-results/
 pilot-report/
-blob-report/
 
 # Environment
 .env

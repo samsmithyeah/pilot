@@ -1,4 +1,4 @@
-import { Device } from "pilot"
+import { Device } from "tapsmith"
 
 export class DialogsScreen {
   constructor(private device: Device) {}

@@ -1,6 +1,6 @@
 # Getting Started
 
-This guide walks you through installing Pilot, writing your first test, and running it against an Android or iOS device/simulator.
+This guide walks you through installing Tapsmith, writing your first test, and running it against an Android or iOS device/simulator.
 
 ## Prerequisites
 
@@ -15,7 +15,7 @@ Before you begin, make sure you have the following installed:
 | Android device or emulator | Android 8.0+ (API 26+) | `adb devices` |
 
 If you are using a single emulator or device, you can start it yourself and let
-Pilot detect it automatically. Pilot can also launch emulator instances for you
+Tapsmith detect it automatically. Tapsmith can also launch emulator instances for you
 when configured with `launchEmulators` and `avd`.
 
 ### iOS
@@ -26,7 +26,7 @@ when configured with `launchEmulators` and `avd`.
 | Xcode | 15+ | `xcodebuild -version` |
 | iOS Simulator | iOS 17+ | `xcrun simctl list devices` |
 
-Pilot manages iOS simulators automatically. Set the `simulator` config option to
+Tapsmith manages iOS simulators automatically. Set the `simulator` config option to
 choose which simulator to boot (defaults to `iPhone 17`).
 
 For **physical iOS devices**, additional prerequisites apply (libimobiledevice,
@@ -35,19 +35,19 @@ Apple Developer account, device pairing). See [iOS physical devices](./ios-physi
 ## Installation
 
 ```bash
-npm install pilot
+npm install tapsmith
 ```
 
-This installs the TypeScript SDK, test runner, and the Pilot daemon binary for your platform.
+This installs the TypeScript SDK, test runner, and the Tapsmith daemon binary for your platform.
 
 ## Create a Configuration File
 
-Create `pilot.config.ts` in your project root:
+Create `tapsmith.config.ts` in your project root:
 
 ### Android
 
 ```typescript
-import { defineConfig } from "pilot";
+import { defineConfig } from "tapsmith";
 
 export default defineConfig({
   apk: "./app/build/outputs/apk/debug/app-debug.apk",
@@ -56,12 +56,12 @@ export default defineConfig({
 });
 ```
 
-The only required option is `apk` -- the path to the Android APK you want to test. If you want Pilot to auto-launch the app before tests, also set `package`. `activity` is optional and usually not needed.
+The only required option is `apk` -- the path to the Android APK you want to test. If you want Tapsmith to auto-launch the app before tests, also set `package`. `activity` is optional and usually not needed.
 
 ### iOS
 
 ```typescript
-import { defineConfig } from "pilot";
+import { defineConfig } from "tapsmith";
 
 export default defineConfig({
   app: "./build/MyApp.app",
@@ -71,7 +71,7 @@ export default defineConfig({
 });
 ```
 
-For iOS, set `app` to the path to the `.app` bundle built for the iOS Simulator. The `package` option is the bundle identifier. Pilot auto-detects the platform from `app` (iOS) vs `apk` (Android), or you can set `platform: "ios"` explicitly.
+For iOS, set `app` to the path to the `.app` bundle built for the iOS Simulator. The `package` option is the bundle identifier. Tapsmith auto-detects the platform from `app` (iOS) vs `apk` (Android), or you can set `platform: "ios"` explicitly.
 
 See the [Configuration](configuration.md) guide for all available options.
 
@@ -80,7 +80,7 @@ See the [Configuration](configuration.md) guide for all available options.
 For parallel Android emulator runs, use:
 
 ```typescript
-import { defineConfig } from "pilot";
+import { defineConfig } from "tapsmith";
 
 export default defineConfig({
   apk: "./app/build/outputs/apk/debug/app-debug.apk",
@@ -91,14 +91,14 @@ export default defineConfig({
 });
 ```
 
-When `avd` is set, Pilot defaults to using that AVD for provisioned emulator
+When `avd` is set, Tapsmith defaults to using that AVD for provisioned emulator
 capacity. Set `deviceStrategy: "prefer-connected"` if you want connected
 devices to win instead.
 
 For parallel iOS simulator runs:
 
 ```typescript
-import { defineConfig } from "pilot";
+import { defineConfig } from "tapsmith";
 
 export default defineConfig({
   app: "./build/MyApp.app",
@@ -108,14 +108,14 @@ export default defineConfig({
 });
 ```
 
-Pilot provisions additional simulator clones automatically for multi-worker iOS runs.
+Tapsmith provisions additional simulator clones automatically for multi-worker iOS runs.
 
 ## Write Your First Test
 
 Create a file at `tests/smoke.test.ts`:
 
 ```typescript
-import { test, expect } from "pilot";
+import { test, expect } from "tapsmith";
 
 test("app launches and shows welcome screen", async ({ device }) => {
   // Wait for the welcome text to appear
@@ -140,48 +140,48 @@ A few things to note:
 ## Run Your Tests
 
 ```bash
-npx pilot test
+npx tapsmith test
 ```
 
-Pilot will:
+Tapsmith will:
 
-1. Connect to the Pilot daemon (starting it if needed).
+1. Connect to the Tapsmith daemon (starting it if needed).
 2. Detect your connected device or emulator.
-3. Install the APK under test and the Pilot agent.
+3. Install the APK under test and the Tapsmith agent.
 4. Discover all test files matching `**/*.test.ts` and `**/*.spec.ts`.
 5. Run each test sequentially and report results.
 
-For multi-worker runs, Pilot will assign one device per worker. If
+For multi-worker runs, Tapsmith will assign one device per worker. If
 `launchEmulators: true` is configured, it will launch additional emulator
 instances automatically. If `avd` is set, those instances will use that AVD.
 
 ### Run a specific file
 
 ```bash
-npx pilot test tests/smoke.test.ts
+npx tapsmith test tests/smoke.test.ts
 ```
 
 ### Run on multiple devices in parallel
 
 ```bash
-npx pilot test --workers 4
+npx tapsmith test --workers 4
 ```
 
-Or configure `workers` in `pilot.config.ts`. Each worker gets its own device. See [CI Setup](ci-setup.md) for sharding across CI machines.
+Or configure `workers` in `tapsmith.config.ts`. Each worker gets its own device. See [CI Setup](ci-setup.md) for sharding across CI machines.
 
 ### Target a specific device
 
 If you need to debug against one known device, specify which one to use:
 
 ```bash
-npx pilot test --device emulator-5554
+npx tapsmith test --device emulator-5554
 ```
 
 For normal parallel runs, prefer `workers + launchEmulators + avd` in config.
 
 ## Understanding the Output
 
-Pilot prints results to the terminal with pass/fail status and timing for each test:
+Tapsmith prints results to the terminal with pass/fail status and timing for each test:
 
 ```
 Found 2 test file(s)
@@ -196,12 +196,12 @@ Results:
 Summary: 2 passed | 4.05s
 ```
 
-When a test fails, Pilot prints the error message, a partial stack trace, and the path to a screenshot captured at the moment of failure:
+When a test fails, Tapsmith prints the error message, a partial stack trace, and the path to a screenshot captured at the moment of failure:
 
 ```
   FAIL  can navigate to settings (30012ms)
         Expected element {"text":"Settings"} to be visible, but it was not
-        Screenshot: pilot-results/screenshots/can_navigate_to_settings-1710345600000.png
+        Screenshot: tapsmith-results/screenshots/can_navigate_to_settings-1710345600000.png
 ```
 
 ## Organizing Tests
@@ -209,7 +209,7 @@ When a test fails, Pilot prints the error message, a partial stack trace, and th
 You can use `describe` blocks and hooks to organize your tests:
 
 ```typescript
-import { test, describe, beforeEach, expect } from "pilot";
+import { test, describe, beforeEach, expect } from "tapsmith";
 
 describe("Login flow", () => {
   beforeEach(async () => {
@@ -236,5 +236,5 @@ describe("Login flow", () => {
 
 - Learn about choosing the right selectors in the [Selectors Guide](selectors.md).
 - Browse the complete [API Reference](api-reference.md).
-- Configure Pilot for your project in the [Configuration](configuration.md) guide.
+- Configure Tapsmith for your project in the [Configuration](configuration.md) guide.
 - Set up automated testing in the [CI Setup](ci-setup.md) guide.

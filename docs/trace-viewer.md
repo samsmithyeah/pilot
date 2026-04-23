@@ -1,15 +1,15 @@
 # Trace Viewer
 
-Pilot's trace viewer records screenshots, view hierarchy snapshots, console output, and logcat at each test step, then lets you scrub through a timeline to debug failures. It's the mobile-native equivalent of Playwright's Trace Viewer.
+Tapsmith's trace viewer records screenshots, view hierarchy snapshots, console output, and logcat at each test step, then lets you scrub through a timeline to debug failures. It's the mobile-native equivalent of Playwright's Trace Viewer.
 
 ## Recording Traces
 
 ### Via configuration
 
-Add `trace` to your `pilot.config.ts`:
+Add `trace` to your `tapsmith.config.ts`:
 
 ```typescript
-import { defineConfig } from "pilot";
+import { defineConfig } from "tapsmith";
 
 export default defineConfig({
   trace: "on", // Record every test
@@ -21,8 +21,8 @@ export default defineConfig({
 Override the config with the `--trace` flag:
 
 ```bash
-npx pilot test --trace on
-npx pilot test --trace retain-on-failure
+npx tapsmith test --trace on
+npx tapsmith test --trace retain-on-failure
 ```
 
 ### Via programmatic API
@@ -30,7 +30,7 @@ npx pilot test --trace retain-on-failure
 Control tracing within your tests:
 
 ```typescript
-import { test } from "pilot";
+import { test } from "tapsmith";
 
 test("checkout flow", async ({ device }) => {
   await device.tracing.start();
@@ -61,7 +61,7 @@ test("checkout flow", async ({ device }) => {
 ### Local viewer
 
 ```bash
-npx pilot show-trace test-results/traces/trace-my_test.zip
+npx tapsmith show-trace test-results/traces/trace-my_test.zip
 ```
 
 This starts a local server and opens the trace viewer in your browser.
@@ -106,14 +106,14 @@ Shows before/after screenshots for the selected action:
 
 ## Network Capture
 
-Pilot can capture HTTP/HTTPS traffic from the device during test execution. Network requests are recorded alongside other trace data and displayed in the trace viewer's Network tab.
+Tapsmith can capture HTTP/HTTPS traffic from the device during test execution. Network requests are recorded alongside other trace data and displayed in the trace viewer's Network tab.
 
 ### Enabling network capture
 
 Network capture is enabled by default when tracing is active. Control it with the `network` field in `TraceConfig`:
 
 ```typescript
-import { defineConfig } from "pilot";
+import { defineConfig } from "tapsmith";
 
 export default defineConfig({
   trace: {
@@ -138,7 +138,7 @@ When network capture is enabled, the Rust daemon starts a local MITM proxy and r
 
 **Android** — the daemon uses `adb reverse` to forward the proxy port to the device and configures the device's HTTP proxy setting via `adb shell settings put global http_proxy`.
 
-**iOS simulator** — the daemon spawns the `Mitmproxy Redirector.app` launcher (from a local `brew install mitmproxy`), which triggers the macOS Network Extension that ships with mitmproxy. The NE intercepts TCP flows from the simulator's process tree on a per-PID basis and redirects them into Pilot's MITM proxy over a per-worker Unix socket. Parallel iOS workers each get their own isolated session. See [iOS network capture](./ios-network-capture.md) for first-run setup (one-time System Extension approval) and troubleshooting.
+**iOS simulator** — the daemon spawns the `Mitmproxy Redirector.app` launcher (from a local `brew install mitmproxy`), which triggers the macOS Network Extension that ships with mitmproxy. The NE intercepts TCP flows from the simulator's process tree on a per-PID basis and redirects them into Tapsmith's MITM proxy over a per-worker Unix socket. Parallel iOS workers each get their own isolated session. See [iOS network capture](./ios-network-capture.md) for first-run setup (one-time System Extension approval) and troubleshooting.
 
 **iOS physical device** — not yet supported; follow-up work.
 
@@ -186,14 +186,14 @@ The format uses `version: 1` for forward compatibility.
 
 ```yaml
 - name: Run tests
-  run: npx pilot test --trace retain-on-failure
+  run: npx tapsmith test --trace retain-on-failure
 
 - name: Upload traces
   if: failure()
   uses: actions/upload-artifact@v4
   with:
-    name: pilot-traces
-    path: pilot-results/traces/
+    name: tapsmith-traces
+    path: tapsmith-results/traces/
     retention-days: 30
 ```
 
@@ -202,7 +202,7 @@ The format uses `version: 1` for forward compatibility.
 Download the trace artifact from your CI run and open it:
 
 ```bash
-npx pilot show-trace pilot-results/traces/trace-login_test.zip
+npx tapsmith show-trace tapsmith-results/traces/trace-login_test.zip
 ```
 
 ## Deep Linking
