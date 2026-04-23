@@ -45,21 +45,37 @@ import { getProfileExpiryInfo, formatExpiryWarning } from './ios-profile-expiry.
  *   2. `~/.tapsmith/ios-agent/` — previously extracted from the npm package
  *   3. Extract bundled source from the npm package to `~/.tapsmith/ios-agent/`
  */
+function getPackageVersion(): string {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../package.json'), 'utf8'));
+    return pkg.version ?? '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+}
+
 export function resolveIosAgentDir(cwd?: string): string {
   // 1. Monorepo
   const monorepo = path.resolve(cwd ?? process.cwd(), 'ios-agent');
   if (fs.existsSync(path.join(monorepo, 'TapsmithAgent.xcodeproj'))) return monorepo;
 
-  // 2. Previously extracted
+  // 2. Previously extracted — re-extract if version changed
   const cached = path.join(os.homedir(), '.tapsmith', 'ios-agent');
-  if (fs.existsSync(path.join(cached, 'TapsmithAgent.xcodeproj'))) return cached;
+  const versionFile = path.join(cached, '.tapsmith-version');
+  const currentVersion = getPackageVersion();
+  const cachedVersion = fs.existsSync(versionFile) ? fs.readFileSync(versionFile, 'utf8').trim() : '';
+
+  if (fs.existsSync(path.join(cached, 'TapsmithAgent.xcodeproj')) && cachedVersion === currentVersion) {
+    return cached;
+  }
 
   // 3. Extract from bundled npm package source
   const bundled = path.resolve(__dirname, 'ios-agent');
   if (fs.existsSync(path.join(bundled, 'TapsmithAgent.xcodeproj'))) {
+    if (fs.existsSync(cached)) fs.rmSync(cached, { recursive: true, force: true });
     fs.mkdirSync(cached, { recursive: true });
     fs.cpSync(bundled, cached, { recursive: true });
-    // Ensure create-xcode-project.sh is executable
+    fs.writeFileSync(versionFile, currentVersion);
     const script = path.join(cached, 'create-xcode-project.sh');
     if (fs.existsSync(script)) {
       try { fs.chmodSync(script, 0o755); } catch {}

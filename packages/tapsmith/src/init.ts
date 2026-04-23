@@ -459,10 +459,10 @@ export function generateConfig(
     lines.push("      testMatch: ['**/*.test.ts'],");
     lines.push('      use: {');
     lines.push("        platform: 'android',");
-    lines.push(`        apk: '${android.apkPath}',`);
+    lines.push(`        apk: '${esc(android.apkPath)}',`);
     if (android.useEmulators) {
       lines.push('        launchEmulators: true,');
-      if (android.avd) lines.push(`        avd: '${android.avd}',`);
+      if (android.avd) lines.push(`        avd: '${esc(android.avd)}',`);
     }
     lines.push('      },');
     lines.push('    },');
@@ -472,8 +472,8 @@ export function generateConfig(
     lines.push("      testMatch: ['**/*.test.ts'],");
     lines.push('      use: {');
     lines.push("        platform: 'ios',");
-    lines.push(`        app: '${ios.appPath}',`);
-    if (ios.simulator) lines.push(`        simulator: '${ios.simulator}',`);
+    lines.push(`        app: '${esc(ios.appPath)}',`);
+    if (ios.simulator) lines.push(`        simulator: '${esc(ios.simulator)}',`);
     lines.push('      },');
     lines.push('    },');
 

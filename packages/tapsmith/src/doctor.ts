@@ -102,10 +102,6 @@ function checkConfigFile(checks: CheckList): void {
 
 function checkAdb(checks: CheckList): boolean {
   try {
-    execFileSync('which', ['adb'], {
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
     const versionOutput = execFileSync('adb', ['--version'], {
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -299,7 +295,7 @@ export async function runDoctor(): Promise<void> {
   // Detect whether Android platform tools are available or config references an APK
   const hasAndroid = (() => {
     try {
-      execFileSync('which', ['adb'], {
+      execFileSync('adb', ['--version'], {
         encoding: 'utf-8',
         stdio: ['ignore', 'pipe', 'pipe'],
       });
