@@ -103,21 +103,10 @@ describe("Selector & assertion regressions", () => {
     await expect(device.getByText("Test Screens", { exact: true })).toHaveRole("header")
   })
 
-  // ─── DOCUMENTED LIMITATION: typing "%s" types a literal space ───
-  // Android's typeTextWithoutFocus replaces ' ' with the `input text` token
-  // `%s` so spaces survive shell-arg tokenization. The reverse round-trip
-  // means a literal "%s" in user text comes out as a space. iOS doesn't
-  // have this issue. Split per-platform so a regression that silently
-  // inverts the behavior on either one fails loudly.
-  test("type() — documented %s limitation (Android → literal space)", async ({ device, platform }) => {
-    if (platform !== "android") return
-    await device.getByDescription("Login Form").tap()
-    await device.getByTestId("email-input").type("a%sb")
-    await expect(device.getByTestId("email-input")).toHaveValue("a b")
-  })
-
-  test("type() — %s round-trips verbatim on iOS", async ({ device, platform }) => {
-    if (platform !== "ios") return
+  // ─── %s in type() round-trips verbatim on both platforms ───
+  // Previously Android's `input text` shell command treated `%s` as a space
+  // token, but the agent now handles escaping correctly.
+  test("type() — %s round-trips verbatim", async ({ device }) => {
     await device.getByDescription("Login Form").tap()
     await device.getByTestId("email-input").type("a%sb")
     await expect(device.getByTestId("email-input")).toHaveValue("a%sb")

@@ -3861,6 +3861,9 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                             )
                             .await);
                     }
+                    if let Some(parent) = std::path::Path::new(local_path).parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
                     let output = tokio::process::Command::new("tar")
                         .args(["czf", local_path, "-C", &scratch_path, "."])
                         .output()
@@ -3908,6 +3911,9 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                 let _ = ios::device::terminate_app(&serial, pkg).await;
 
                 // Create tar.gz archive of the data container
+                if let Some(parent) = std::path::Path::new(local_path).parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
                 let output = tokio::process::Command::new("tar")
                     .args(["czf", local_path, "-C", &container, "."])
                     .output()
@@ -3983,6 +3989,9 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                 }
 
                 // 4. Pull archive to host
+                if let Some(parent) = std::path::Path::new(local_path).parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
                 if let Err(e) = adb::pull_file(&serial, &device_tmp, local_path).await {
                     let _ = adb::shell_lenient(&serial, &format!("rm -f {device_tmp}")).await;
                     return Ok(self

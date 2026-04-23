@@ -18,6 +18,7 @@ import * as fs from 'node:fs';
 import { watch as chokidarWatch, type FSWatcher } from 'chokidar';
 import { minimatch } from 'minimatch';
 import type { TapsmithConfig } from './config.js';
+import { findDaemonBin } from './daemon-bin.js';
 import type { Device } from './device.js';
 import { TapsmithGrpcClient } from './grpc-client.js';
 import { createReporters, ReporterDispatcher, type FullResult, type TapsmithReporter } from './reporter.js';
@@ -194,7 +195,7 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
 
     const baseDaemonPort = Number.parseInt(ctx.daemonAddress.split(':').pop() ?? '50051', 10);
     const baseAgentPort = 18700;
-    const rawBin = process.env.TAPSMITH_DAEMON_BIN ?? ctx.config.daemonBin ?? 'tapsmith-core';
+    const rawBin = process.env.TAPSMITH_DAEMON_BIN ?? ctx.config.daemonBin ?? findDaemonBin();
     const daemonBin = rawBin.includes(path.sep) || rawBin.startsWith('.')
       ? path.resolve(ctx.config.rootDir, rawBin)
       : rawBin;

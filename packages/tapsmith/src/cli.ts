@@ -39,6 +39,7 @@ import {
 } from './emulator.js';
 import { isRecoverableInfrastructureError } from './worker-protocol.js';
 import { findPidsOnPort, freeStaleAgentPort } from './port-utils.js';
+import { findDaemonBin } from './daemon-bin.js';
 
 // ─── ANSI helpers ───
 
@@ -287,7 +288,7 @@ async function ensureDaemonRunning(address: string, daemonBin?: string, platform
   freeStaleAgentPort(18700);
 
   // Start a fresh daemon
-  const resolvedBin = process.env.TAPSMITH_DAEMON_BIN ?? daemonBin ?? 'tapsmith-core';
+  const resolvedBin = process.env.TAPSMITH_DAEMON_BIN ?? daemonBin ?? findDaemonBin();
   const daemonArgs = ['--port', port];
   if (platform) daemonArgs.push('--platform', platform);
   // Optional: redirect the spawned daemon's stdout/stderr to a file when

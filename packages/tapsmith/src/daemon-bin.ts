@@ -38,6 +38,7 @@ export function findDaemonBin(): string {
   candidates.push(
     path.resolve(process.cwd(), 'packages/tapsmith-core/target/release', BIN_NAME),
     path.resolve(process.cwd(), '../tapsmith-core/target/release', BIN_NAME),
+    path.resolve(process.cwd(), '../packages/tapsmith-core/target/release', BIN_NAME),
     path.resolve(process.cwd(), '../../packages/tapsmith-core/target/release', BIN_NAME),
   );
 

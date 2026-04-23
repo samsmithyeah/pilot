@@ -13,6 +13,7 @@ import * as net from 'node:net';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { resolveDeviceStrategy, type TapsmithConfig } from './config.js';
+import { findDaemonBin } from './daemon-bin.js';
 import { TapsmithGrpcClient } from './grpc-client.js';
 import type { TestResult, SuiteResult } from './runner.js';
 import type { TapsmithReporter, FullResult } from './reporter.js';
@@ -342,7 +343,7 @@ export async function runParallel(opts: DispatcherOptions, _portOffset = 0): Pro
   // This daemon will also serve as worker 0's daemon.
   const baseDaemonPort = Number.parseInt(config.daemonAddress.split(':').pop() ?? '50051', 10);
   const baseAgentPort = 18700;
-  const rawBin = process.env.TAPSMITH_DAEMON_BIN ?? config.daemonBin ?? 'tapsmith-core';
+  const rawBin = process.env.TAPSMITH_DAEMON_BIN ?? config.daemonBin ?? findDaemonBin();
   const daemonBin = rawBin.includes(path.sep) || rawBin.startsWith('.')
     ? path.resolve(config.rootDir, rawBin)
     : rawBin;

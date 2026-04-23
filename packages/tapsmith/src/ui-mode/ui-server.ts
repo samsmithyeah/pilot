@@ -23,6 +23,7 @@ import { McpEventEmitter } from '../mcp/events.js';
 import type { TestDispatcher, TestRunResult, TestResultEntry, TestTreeEntry, SessionInfo } from '../mcp/index.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import type { TapsmithConfig } from '../config.js';
+import { findDaemonBin } from '../daemon-bin.js';
 import { TapsmithGrpcClient } from '../grpc-client.js';
 import type { Device } from '../device.js';
 import type { ResolvedProject } from '../project.js';
@@ -1174,7 +1175,7 @@ export async function startUIServer(
       10,
     );
     const baseAgentPort = 18700;
-    const rawBin = process.env.TAPSMITH_DAEMON_BIN ?? ctx.config.daemonBin ?? 'tapsmith-core';
+    const rawBin = process.env.TAPSMITH_DAEMON_BIN ?? ctx.config.daemonBin ?? findDaemonBin();
     const daemonBin = rawBin.includes(path.sep) || rawBin.startsWith('.')
       ? path.resolve(ctx.config.rootDir, rawBin)
       : rawBin;
@@ -1839,7 +1840,7 @@ export async function startUIServer(
       10,
     );
     const baseAgentPort = 18700;
-    const rawBin = process.env.TAPSMITH_DAEMON_BIN ?? ctx.config.daemonBin ?? 'tapsmith-core';
+    const rawBin = process.env.TAPSMITH_DAEMON_BIN ?? ctx.config.daemonBin ?? findDaemonBin();
     const daemonBin = rawBin.includes(path.sep) || rawBin.startsWith('.')
       ? path.resolve(ctx.config.rootDir, rawBin)
       : rawBin;
