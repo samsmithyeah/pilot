@@ -3944,8 +3944,10 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                 }
             }
             Platform::Android => {
-                let device_tmp =
-                    format!("/data/local/tmp/tapsmith-app-state-{}.tar.gz", Uuid::new_v4());
+                let device_tmp = format!(
+                    "/data/local/tmp/tapsmith-app-state-{}.tar.gz",
+                    Uuid::new_v4()
+                );
                 let data_dir = format!("/data/data/{pkg}");
                 let tar_timeout = Duration::from_secs(300);
 
@@ -4219,8 +4221,10 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                 }
             }
             Platform::Android => {
-                let device_tmp =
-                    format!("/data/local/tmp/tapsmith-app-state-{}.tar.gz", Uuid::new_v4());
+                let device_tmp = format!(
+                    "/data/local/tmp/tapsmith-app-state-{}.tar.gz",
+                    Uuid::new_v4()
+                );
                 let data_dir = format!("/data/data/{pkg}");
                 let tar_timeout = Duration::from_secs(300);
 

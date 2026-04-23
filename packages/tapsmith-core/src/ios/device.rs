@@ -134,8 +134,10 @@ fn parse_simctl_runtime_version(runtime: &str) -> String {
 /// device is unpaired or DDI services are unavailable, which breaks naive
 /// stdout parsing.
 pub async fn list_physical_devices() -> Result<Vec<IosDevice>> {
-    let json_path =
-        std::env::temp_dir().join(format!("tapsmith-devicectl-list-{}.json", std::process::id()));
+    let json_path = std::env::temp_dir().join(format!(
+        "tapsmith-devicectl-list-{}.json",
+        std::process::id()
+    ));
     let json_path_str = json_path.to_string_lossy().to_string();
 
     let output = Command::new("xcrun")

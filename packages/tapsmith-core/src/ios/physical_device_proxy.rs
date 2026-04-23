@@ -229,8 +229,10 @@ pub struct MobileconfigInputs {
 pub fn generate_mobileconfig(inputs: &MobileconfigInputs) -> Result<Vec<u8>> {
     use plist::Dictionary;
 
-    let payload_identifier_root =
-        format!("dev.tapsmith.networkcapture.{}", sanitize_udid(&inputs.udid));
+    let payload_identifier_root = format!(
+        "dev.tapsmith.networkcapture.{}",
+        sanitize_udid(&inputs.udid)
+    );
 
     // ── Wi-Fi payload ──
     let wifi_uuid = uuid::Uuid::new_v4().to_string();
@@ -351,7 +353,10 @@ pub fn generate_mobileconfig(inputs: &MobileconfigInputs) -> Result<Vec<u8>> {
                 .into(),
         ),
     );
-    top.insert("PayloadOrganization".into(), Value::String("Tapsmith".into()));
+    top.insert(
+        "PayloadOrganization".into(),
+        Value::String("Tapsmith".into()),
+    );
     top.insert("PayloadScope".into(), Value::String("User".into()));
     top.insert("PayloadRemovalDisallowed".into(), Value::Boolean(false));
     top.insert(

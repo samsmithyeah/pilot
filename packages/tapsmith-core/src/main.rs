@@ -187,9 +187,9 @@ async fn main() -> Result<()> {
     info!(%addr, "Starting Tapsmith gRPC server");
 
     Server::builder()
-        .add_service(proto::tapsmith_service_server::TapsmithServiceServer::from_arc(
-            service_handle.clone(),
-        ))
+        .add_service(
+            proto::tapsmith_service_server::TapsmithServiceServer::from_arc(service_handle.clone()),
+        )
         .serve_with_shutdown(addr, shutdown_signal())
         .await
         .context("gRPC server failed")?;

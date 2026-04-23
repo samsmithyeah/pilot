@@ -306,8 +306,10 @@ impl IosRedirect {
         // a world-writable `/tmp` is not relevant to our threat model
         // (developer machine, single user) — and `remove_file` before
         // `bind` below closes the narrow pre-creation window.
-        let listener_path =
-            PathBuf::from(format!("/tmp/tapsmith-redirector-{}.sock", std::process::id()));
+        let listener_path = PathBuf::from(format!(
+            "/tmp/tapsmith-redirector-{}.sock",
+            std::process::id()
+        ));
         if let Err(e) = std::fs::remove_file(&listener_path) {
             if e.kind() != std::io::ErrorKind::NotFound {
                 return Err(e).with_context(|| {
@@ -810,7 +812,8 @@ fn resolve_redirector_path() -> Result<PathBuf> {
 /// `~/.tapsmith/redirector/Mitmproxy Redirector.app/...`.
 fn cached_extract_bin() -> Result<PathBuf> {
     let home = dirs::home_dir().context("no home directory")?;
-    Ok(home.join(".tapsmith/redirector/Mitmproxy Redirector.app/Contents/MacOS/Mitmproxy Redirector"))
+    Ok(home
+        .join(".tapsmith/redirector/Mitmproxy Redirector.app/Contents/MacOS/Mitmproxy Redirector"))
 }
 
 /// Find the `Mitmproxy Redirector.app.tar` shipped inside the mitmproxy
