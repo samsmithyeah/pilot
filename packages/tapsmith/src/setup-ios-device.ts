@@ -361,7 +361,7 @@ export function checkDeviceConnection(): { ok: boolean; devices: PhysicalDeviceI
     return {
       ok: false,
       devices: [],
-      label: 'Physical iOS device connected',
+      label: 'Physical iOS device paired',
       fix: [
         'No physical iOS device found. To connect one:',
         '  1) Plug the device into this Mac via USB',
@@ -374,7 +374,7 @@ export function checkDeviceConnection(): { ok: boolean; devices: PhysicalDeviceI
       ],
     };
   }
-  return { ok: true, devices, label: 'Physical iOS device connected' };
+  return { ok: true, devices, label: 'Physical iOS device paired' };
 }
 
 // ─── Pretty-printing ─────────────────────────────────────────────────────

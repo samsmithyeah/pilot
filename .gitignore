@@ -4,6 +4,7 @@ node_modules/
 # Build outputs
 dist/
 packages/tapsmith-core/target/
+packages/tapsmith/tapsmith-*.tgz
 *.class
 *.dex
 *.apk

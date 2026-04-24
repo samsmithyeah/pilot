@@ -1,13 +1,23 @@
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import Enquirer from 'enquirer';
+import figlet from 'figlet';
 import { findDaemonBin } from './daemon-bin.js';
 import { findAgentApk, findAgentTestApk } from './agent-resolve.js';
 
-// @clack/prompts is ESM-only — loaded dynamically in runInit() and
-// assigned here so every helper in this module can reference it.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let p: any;
+const DIM = '\x1b[2m';
+const BOLD = '\x1b[1m';
+const GREEN = '\x1b[32m';
+const YELLOW = '\x1b[33m';
+const RED = '\x1b[31m';
+const RESET = '\x1b[0m';
+
+const bold = (s: string): string => `${BOLD}${s}${RESET}`;
+const green = (s: string): string => `${GREEN}${s}${RESET}`;
+const dim = (s: string): string => `${DIM}${s}${RESET}`;
+
+const enquirer = new Enquirer();
 
 // ─── Helpers ───
 
@@ -32,17 +42,6 @@ function tryExec(cmd: string, args: string[]): string | undefined {
   } catch {
     return undefined;
   }
-}
-
-function bail(): never {
-  p.cancel('Setup cancelled.');
-  process.exit(0);
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function guard<T>(value: T | symbol): T {
-  if (typeof value === 'symbol') bail();
-  return value as T;
 }
 
 // ─── Environment scanning ───
@@ -128,10 +127,10 @@ function scanEnvironment(): EnvScan {
 }
 
 function displayEnvironment(env: EnvScan): void {
+  const ok = (msg: string): string => `  ${green('✓')} ${msg}`;
+  const warn = (msg: string): string => `  ${YELLOW}⚠${RESET} ${msg}`;
+  const fail = (msg: string): string => `  ${RED}✗${RESET} ${msg}`;
   const lines: string[] = [];
-  const ok = (msg: string): string => `  \x1b[32m✓\x1b[0m ${msg}`;
-  const warn = (msg: string): string => `  \x1b[33m⚠\x1b[0m ${msg}`;
-  const fail = (msg: string): string => `  \x1b[31m✗\x1b[0m ${msg}`;
 
   const major = parseInt(env.nodeVersion.split('.')[0], 10);
   lines.push(major >= 18 ? ok(`Node.js ${env.nodeVersion}`) : fail(`Node.js ${env.nodeVersion} (requires >= 18)`));
@@ -150,7 +149,18 @@ function displayEnvironment(env: EnvScan): void {
 
   if (env.avds.length > 0) lines.push(ok(`${env.avds.length} Android AVDs available`));
 
-  p.log.step('Environment\n' + lines.join('\n'));
+  console.log();
+  console.log(`  ${bold('Environment')}`);
+  console.log(lines.join('\n'));
+  console.log();
+}
+
+// ─── Prompt helpers ───
+
+async function ask<T>(question: Record<string, unknown>): Promise<T> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const result = await enquirer.prompt({ ...question, name: '_' } as any) as Record<string, T>;
+  return result['_'];
 }
 
 // ─── Platform-specific questions ───
@@ -173,16 +183,14 @@ interface IosConfig {
 }
 
 async function configureAndroid(env: EnvScan): Promise<AndroidConfig> {
-  p.log.step('\x1b[1mAndroid\x1b[0m');
+  console.log(`  ${bold('Android')}`);
 
-  const apkPath = guard(await p.text({
+  const apkPath = await ask<string>({
+    type: 'input',
     message: 'Where is your Android APK?',
-    placeholder: './android/app/build/outputs/apk/debug/app-debug.apk',
-    validate: (val: string | undefined) => {
-      if (!val || val.trim().length === 0) return 'APK path is required';
-      return undefined;
-    },
-  }));
+    initial: './android/app/build/outputs/apk/debug/app-debug.apk',
+    validate: (val: string) => val.trim().length > 0 || 'APK path is required',
+  });
 
   let packageName: string | undefined;
   const aapt = tryExec('aapt2', ['dump', 'badging', apkPath]);
@@ -190,59 +198,57 @@ async function configureAndroid(env: EnvScan): Promise<AndroidConfig> {
     const match = aapt.match(/package: name='([^']+)'/);
     if (match) {
       packageName = match[1];
-      p.log.info(`Detected package: ${packageName}`);
+      console.log(dim(`  Detected package: ${packageName}`));
     }
   }
   if (!packageName) {
-    packageName = guard(await p.text({
+    packageName = await ask<string>({
+      type: 'input',
       message: 'What is your app\'s package name?',
-      placeholder: 'com.example.myapp',
-      validate: (val: string | undefined) => {
-        if (!val || val.trim().length === 0) return 'Package name is required';
-        return undefined;
-      },
-    }));
+      initial: 'com.example.myapp',
+      validate: (val: string) => val.trim().length > 0 || 'Package name is required',
+    });
   }
 
-  const deviceType = guard(await p.select({
-    message: 'How will you run tests?',
-    options: [
-      { value: 'emulators', label: 'Emulators', hint: 'Tapsmith auto-launches emulators' },
-      { value: 'physical', label: 'Physical devices', hint: 'USB-connected devices' },
-      { value: 'both', label: 'Both' },
+  const deviceType = await ask<string>({
+    type: 'select',
+    message: 'How will you run Android tests?',
+    choices: [
+      { name: 'emulators', message: 'Emulators', hint: 'Tapsmith auto-launches emulators' },
+      { name: 'physical', message: 'Physical devices', hint: 'USB-connected devices' },
+      { name: 'both', message: 'Both' },
     ],
-  }));
+  });
 
   const useEmulators = deviceType === 'emulators' || deviceType === 'both';
   let avd: string | undefined;
 
   if (useEmulators && env.avds.length > 0) {
-    avd = guard(await p.select({
+    avd = await ask<string>({
+      type: 'select',
       message: 'Which AVD should Tapsmith auto-launch?',
-      options: env.avds.map((a: string) => ({ value: a, label: a })),
-    }));
+      choices: env.avds.map((a) => ({ name: a, message: a })),
+    });
   } else if (useEmulators) {
-    p.log.warn('No AVDs found. Create one in Android Studio, then set `avd` in your config.');
+    console.log(`  ${YELLOW}⚠${RESET} No AVDs found. Create one in Android Studio, then set ${bold('avd')} in your config.`);
   }
 
   if (deviceType === 'physical' || deviceType === 'both') {
-    p.log.info('Make sure USB debugging is enabled on your device.');
+    console.log(dim('  Make sure USB debugging is enabled on your device.'));
   }
 
   return { apkPath, packageName, useEmulators, avd };
 }
 
 async function configureIos(env: EnvScan): Promise<IosConfig> {
-  p.log.step('\x1b[1miOS\x1b[0m');
+  console.log(`  ${bold('iOS')}`);
 
-  const appPath = guard(await p.text({
+  const appPath = await ask<string>({
+    type: 'input',
     message: 'Where is your iOS .app bundle? (simulator build)',
-    placeholder: './ios/build/Build/Products/Debug-iphonesimulator/MyApp.app',
-    validate: (val: string | undefined) => {
-      if (!val || val.trim().length === 0) return '.app path is required';
-      return undefined;
-    },
-  }));
+    initial: './ios/build/Build/Products/Debug-iphonesimulator/MyApp.app',
+    validate: (val: string) => val.trim().length > 0 || '.app path is required',
+  });
 
   let bundleId: string | undefined;
   const plistPath = path.join(appPath, 'Info.plist');
@@ -250,28 +256,27 @@ async function configureIos(env: EnvScan): Promise<IosConfig> {
     const plistOut = tryExec('/usr/libexec/PlistBuddy', ['-c', 'Print :CFBundleIdentifier', plistPath]);
     if (plistOut) {
       bundleId = plistOut;
-      p.log.info(`Detected bundle ID: ${bundleId}`);
+      console.log(dim(`  Detected bundle ID: ${bundleId}`));
     }
   }
   if (!bundleId) {
-    bundleId = guard(await p.text({
+    bundleId = await ask<string>({
+      type: 'input',
       message: 'What is your app\'s bundle identifier?',
-      placeholder: 'com.example.myapp',
-      validate: (val: string | undefined) => {
-        if (!val || val.trim().length === 0) return 'Bundle ID is required';
-        return undefined;
-      },
-    }));
+      initial: 'com.example.myapp',
+      validate: (val: string) => val.trim().length > 0 || 'Bundle ID is required',
+    });
   }
 
-  const deviceType = guard(await p.select({
+  const deviceType = await ask<string>({
+    type: 'select',
     message: 'How will you run iOS tests?',
-    options: [
-      { value: 'simulators', label: 'Simulators' },
-      { value: 'physical', label: 'Physical devices', hint: 'requires code signing' },
-      { value: 'both', label: 'Both' },
+    choices: [
+      { name: 'simulators', message: 'Simulators' },
+      { name: 'physical', message: 'Physical devices', hint: 'requires code signing' },
+      { name: 'both', message: 'Both' },
     ],
-  }));
+  });
 
   let simulator: string | undefined;
   if (deviceType === 'simulators' || deviceType === 'both') {
@@ -284,17 +289,13 @@ async function configureIos(env: EnvScan): Promise<IosConfig> {
         }
       }
       const unique = [...seen.values()].slice(0, 20);
-      simulator = guard(await p.select({
+      simulator = await ask<string>({
+        type: 'select',
         message: 'Which simulator?',
-        options: unique.map((s: SimulatorInfo) => ({
-          value: s.name,
-          label: s.name,
-          hint: s.runtime,
-        })),
-        maxItems: 10,
-      }));
+        choices: unique.map((s) => ({ name: s.name, message: s.name, hint: s.runtime })),
+      });
     } else {
-      p.log.warn('No iOS simulators found. Install one via Xcode.');
+      console.log(`  ${YELLOW}⚠${RESET} No iOS simulators found. Install one via Xcode.`);
       simulator = 'iPhone 17';
     }
   }
@@ -303,10 +304,7 @@ async function configureIos(env: EnvScan): Promise<IosConfig> {
   let deviceAppPath: string | undefined;
 
   if (usePhysicalDevice) {
-    p.log.step('Physical iOS device preflight');
-
-    const spin = p.spinner();
-    spin.start('Running preflight checks...');
+    console.log(`\n  ${bold('Physical iOS device preflight')}`);
 
     try {
       const {
@@ -325,53 +323,50 @@ async function configureIos(env: EnvScan): Promise<IosConfig> {
         checkDeviceConnection(),
       ];
 
-      const lines: string[] = [];
       let failures = 0;
       for (const r of results) {
         if (r.ok) {
-          lines.push(`  \x1b[32m✓\x1b[0m ${r.label}`);
+          console.log(`  ${green('✓')} ${r.label}`);
         } else {
           failures++;
-          lines.push(`  \x1b[31m✗\x1b[0m ${r.label}${r.fix ? '\n    ' + r.fix.join('\n    ') : ''}`);
+          console.log(`  ${RED}✗${RESET} ${r.label}${r.fix ? '\n    ' + r.fix.join('\n    ') : ''}`);
         }
       }
-      spin.stop(failures > 0
-        ? `${failures} preflight check(s) failed`
-        : 'Preflight passed');
-      p.log.message(lines.join('\n'));
+      if (failures > 0) {
+        console.log(`\n  ${YELLOW}⚠${RESET} ${failures} preflight check(s) failed. Fix these before testing on physical devices.`);
+      }
     } catch (err) {
-      spin.stop('Preflight failed');
-      p.log.warn(`Could not run preflight: ${err instanceof Error ? err.message : String(err)}`);
+      console.log(`  ${YELLOW}⚠${RESET} Could not run preflight: ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    const buildAgent = guard(await p.confirm({
+    const buildAgent = await ask<boolean>({
+      type: 'confirm',
       message: 'Build the iOS agent for physical devices? (requires Xcode, ~30s)',
-      initialValue: true,
-    }));
+      initial: true,
+    });
 
     if (buildAgent) {
-      const spin2 = p.spinner();
-      spin2.start('Building iOS agent...');
+      console.log(dim('  Building iOS agent...'));
       try {
         const { buildIosAgent } = await import('./build-ios-agent.js');
         await buildIosAgent({ quiet: true });
-        spin2.stop('iOS agent built');
+        console.log(`  ${green('✓')} iOS agent built`);
       } catch (err) {
-        spin2.stop('Build failed');
-        p.log.warn(`iOS agent build failed: ${err instanceof Error ? err.message : String(err)}`);
-        p.log.info('You can run `npx tapsmith build-ios-agent` later.');
+        console.log(`  ${YELLOW}⚠${RESET} iOS agent build failed: ${err instanceof Error ? err.message : String(err)}`);
+        console.log(dim('  You can run `npx tapsmith build-ios-agent` later.'));
       }
     }
 
-    deviceAppPath = guard(await p.text({
+    deviceAppPath = await ask<string>({
+      type: 'input',
       message: 'Where is your device build .app? (must be an iphoneos build, not simulator)',
-      placeholder: './ios/build/Build/Products/Release-iphoneos/MyApp.app',
-      validate: (val: string | undefined) => {
-        if (!val || val.trim().length === 0) return 'Device app path is required';
+      initial: './ios/build/Build/Products/Release-iphoneos/MyApp.app',
+      validate: (val: string) => {
+        if (val.trim().length === 0) return 'Device app path is required';
         if (val.includes('iphonesimulator')) return 'This looks like a simulator build — physical devices need an iphoneos build';
-        return undefined;
+        return true;
       },
-    }));
+    });
   }
 
   return { appPath, bundleId, simulator, usePhysicalDevice, deviceAppPath };
@@ -382,37 +377,47 @@ async function configureIos(env: EnvScan): Promise<IosConfig> {
 async function setupNetworkCapture(
   platforms: Platform[],
   env: EnvScan,
+  androidHasPhysicalDevice: boolean,
   iosHasPhysicalDevice: boolean,
 ): Promise<boolean> {
-  const enableNetwork = guard(await p.confirm({
+  const enableNetwork = await ask<boolean>({
+    type: 'confirm',
     message: 'Enable network trace capture? (records HTTP/HTTPS traffic during tests)',
-    initialValue: false,
-  }));
+    initial: true,
+  });
 
   if (!enableNetwork) return false;
 
-  // Quick inline checks instead of delegating to the verbose setup commands
   const lines: string[] = [];
 
   if (platforms.includes('android')) {
-    lines.push('  \x1b[32m✓\x1b[0m Android — works automatically');
+    lines.push(`  ${green('✓')} Android emulator — works automatically`);
+    if (androidHasPhysicalDevice) {
+      lines.push(`  ${YELLOW}⚠${RESET} Android physical — add the Tapsmith CA to your app's res/xml/network_security_config.xml:`);
+      lines.push(dim('    <network-security-config>'));
+      lines.push(dim('      <debug-overrides><trust-anchors>'));
+      lines.push(dim('        <certificates src="user" />'));
+      lines.push(dim('      </trust-anchors></debug-overrides>'));
+      lines.push(dim('    </network-security-config>'));
+    }
   }
 
   if (platforms.includes('ios') && env.isMacOS) {
     const hasMitmproxy = !!tryExec('brew', ['list', 'mitmproxy']);
     if (hasMitmproxy) {
-      lines.push('  \x1b[32m✓\x1b[0m iOS simulator — mitmproxy ready');
+      lines.push(`  ${green('✓')} iOS simulator — mitmproxy ready`);
     } else {
-      lines.push('  \x1b[33m⚠\x1b[0m iOS simulator — run `brew install mitmproxy` then `npx tapsmith setup-ios`');
+      lines.push(`  ${YELLOW}⚠${RESET} iOS simulator — run \`brew install mitmproxy\` then \`npx tapsmith setup-ios\``);
     }
   }
 
   if (iosHasPhysicalDevice) {
-    lines.push('  \x1b[33m⚠\x1b[0m iOS physical — run `npx tapsmith configure-ios-network <udid>` per device');
+    lines.push(`  ${YELLOW}⚠${RESET} iOS physical — run \`npx tapsmith configure-ios-network <udid>\` per device`);
   }
 
   if (lines.length > 0) {
-    p.log.step('Network capture\n' + lines.join('\n'));
+    console.log(`\n  ${bold('Network capture')}`);
+    console.log(lines.join('\n'));
   }
 
   return true;
@@ -510,57 +515,48 @@ test('app launches successfully', async ({ device }) => {
 // ─── Main wizard ───
 
 export async function runInit(): Promise<void> {
-  p = await import('@clack/prompts');
-
-  p.intro(`\x1b[1mTapsmith\x1b[0m v${getVersion()}`);
+  console.log();
+  const banner = figlet.textSync('Tapsmith', { font: 'Three Point' });
+  console.log(banner.split('\n').map((l) => `  ${GREEN}${l}${RESET}`).join('\n'));
+  console.log(dim(`  v${getVersion()}`));
 
   // Check for existing config
   const configNames = ['tapsmith.config.ts', 'tapsmith.config.mjs', 'tapsmith.config.js'];
   const existingConfig = configNames.find((name) => fs.existsSync(path.resolve(process.cwd(), name)));
   if (existingConfig) {
-    const overwrite = guard(await p.confirm({
+    const overwrite = await ask<boolean>({
+      type: 'confirm',
       message: `Found existing ${existingConfig}. Overwrite it?`,
-      initialValue: false,
-    }));
+      initial: false,
+    });
     if (!overwrite) {
-      p.outro('Keeping existing config. Run `npx tapsmith doctor` to verify your setup.');
+      console.log(dim('  Keeping existing config. Run `npx tapsmith doctor` to verify your setup.'));
       return;
     }
   }
 
   // Step 1: Environment scan
-  const spin = p.spinner();
-  spin.start('Scanning environment...');
   const env = scanEnvironment();
-  spin.stop('Environment scanned');
   displayEnvironment(env);
 
   // Step 2: Platform selection
-  const availablePlatforms: Array<{ value: Platform; label: string; hint?: string }> = [];
-  if (env.adbVersion) {
-    availablePlatforms.push({ value: 'android', label: 'Android' });
-  } else {
-    availablePlatforms.push({ value: 'android', label: 'Android', hint: 'ADB not found — install Android SDK platform-tools' });
-  }
+  const platformChoices: Array<{ name: string; message: string; hint?: string }> = [
+    { name: 'android', message: 'Android' },
+  ];
   if (env.isMacOS) {
-    if (env.xcodeVersion) {
-      availablePlatforms.push({ value: 'ios', label: 'iOS' });
-    } else {
-      availablePlatforms.push({ value: 'ios', label: 'iOS', hint: 'Xcode not found' });
-    }
+    platformChoices.push({ name: 'ios', message: 'iOS' });
+    platformChoices.push({ name: 'both', message: 'Both' });
   }
 
-  if (availablePlatforms.length === 0) {
-    p.log.error('No platform tools detected. Install ADB (Android) or Xcode (iOS) first.');
-    p.outro('');
-    process.exit(1);
-  }
+  const platformChoice = await ask<string>({
+    type: 'select',
+    message: 'Which platform(s) will you test?',
+    choices: platformChoices,
+  });
 
-  const selectedPlatforms: Platform[] = guard(await p.multiselect({
-    message: 'Which platforms will you test?',
-    options: availablePlatforms,
-    required: true,
-  }));
+  const selectedPlatforms: Platform[] = platformChoice === 'both'
+    ? ['android', 'ios']
+    : [platformChoice as Platform];
 
   // Step 3 & 4: Platform configuration
   let androidConfig: AndroidConfig | undefined;
@@ -574,8 +570,9 @@ export async function runInit(): Promise<void> {
   }
 
   // Step 5: Network capture
+  const androidHasPhysicalDevice = androidConfig?.useEmulators === false;
   const iosHasPhysicalDevice = iosConfig?.usePhysicalDevice ?? false;
-  const enableNetwork = await setupNetworkCapture(selectedPlatforms, env, iosHasPhysicalDevice);
+  const enableNetwork = await setupNetworkCapture(selectedPlatforms, env, androidHasPhysicalDevice, iosHasPhysicalDevice);
 
   // Step 6: iOS simulator agent check
   if (selectedPlatforms.includes('ios') && iosConfig && !iosConfig.usePhysicalDevice) {
@@ -583,14 +580,14 @@ export async function runInit(): Promise<void> {
       const { findSimulatorXctestrun } = await import('./ios-device-resolve.js');
       const xctestrun = findSimulatorXctestrun();
       if (!xctestrun) {
-        const buildSim = guard(await p.confirm({
+        const buildSim = await ask<boolean>({
+          type: 'confirm',
           message: 'No iOS simulator agent found. Build it now? (~30s, requires Xcode)',
-          initialValue: true,
-        }));
+          initial: true,
+        });
 
         if (buildSim) {
-          const simSpin = p.spinner();
-          simSpin.start('Building iOS simulator agent...');
+          console.log(dim('  Building iOS simulator agent...'));
           try {
             const { resolveIosAgentDir } = await import('./build-ios-agent.js');
             const iosAgentDir = resolveIosAgentDir();
@@ -605,10 +602,9 @@ export async function runInit(): Promise<void> {
               `-scheme TapsmithAgentUITests ` +
               `-destination '${dest}' 2>&1`,
             ], { stdio: ['ignore', 'pipe', 'pipe'], timeout: 120_000 });
-            simSpin.stop('iOS simulator agent built');
+            console.log(`  ${green('✓')} iOS simulator agent built`);
           } catch (err) {
-            simSpin.stop('Build failed');
-            p.log.warn(`iOS simulator agent build failed: ${err instanceof Error ? err.message : String(err)}`);
+            console.log(`  ${YELLOW}⚠${RESET} Build failed: ${err instanceof Error ? err.message : String(err)}`);
           }
         }
       }
@@ -619,51 +615,44 @@ export async function runInit(): Promise<void> {
 
   // Step 7: Generate config
   const configContent = generateConfig(selectedPlatforms, androidConfig, iosConfig, enableNetwork);
-  p.log.step('Generated config:');
-  p.note(configContent, 'tapsmith.config.ts');
 
-  const confirmConfig = guard(await p.confirm({
-    message: 'Write tapsmith.config.ts?',
-    initialValue: true,
-  }));
-
-  if (confirmConfig) {
-    fs.writeFileSync(path.resolve(process.cwd(), 'tapsmith.config.ts'), configContent);
-    p.log.success('tapsmith.config.ts created');
-  }
+  fs.writeFileSync(path.resolve(process.cwd(), 'tapsmith.config.ts'), configContent);
+  console.log(`  ${green('✓')} tapsmith.config.ts created`);
 
   // Step 8: Example test
-  const createTest = guard(await p.confirm({
+  const createTest = await ask<boolean>({
+    type: 'confirm',
     message: 'Generate example test file?',
-    initialValue: true,
-  }));
+    initial: true,
+  });
 
   if (createTest) {
     const testDir = path.resolve(process.cwd(), 'tests');
     const testPath = path.resolve(testDir, 'example.test.ts');
 
     if (fs.existsSync(testPath)) {
-      p.log.warn('tests/example.test.ts already exists, skipping.');
+      console.log(`  ${YELLOW}⚠${RESET} tests/example.test.ts already exists, skipping.`);
     } else {
       fs.mkdirSync(testDir, { recursive: true });
       fs.writeFileSync(testPath, generateExampleTest());
-      p.log.success('tests/example.test.ts created');
+      console.log(`  ${green('✓')} tests/example.test.ts created`);
     }
   }
 
   // Step 9: Next steps
-  const nextSteps = [
-    'Run your tests:     npx tapsmith test',
-    'List devices:       npx tapsmith list-devices',
-    'Health check:       npx tapsmith doctor',
-  ];
+  console.log();
+  console.log(`  ${bold('Next steps')}`);
+  console.log(`  Run your tests:     ${green('npx tapsmith test')}`);
+  console.log(`  List devices:       ${green('npx tapsmith list-devices')}`);
+  console.log(`  Health check:       ${green('npx tapsmith doctor')}`);
 
   if (selectedPlatforms.length > 1) {
-    nextSteps.push('');
-    nextSteps.push('Run Android only:   npx tapsmith test --project android');
-    nextSteps.push('Run iOS only:       npx tapsmith test --project ios');
+    console.log();
+    console.log(`  Run Android only:   ${green('npx tapsmith test --project android')}`);
+    console.log(`  Run iOS only:       ${green('npx tapsmith test --project ios')}`);
   }
 
-  p.note(nextSteps.join('\n'), 'Next steps');
-  p.outro('Happy testing!');
+  console.log();
+  console.log(dim('  Happy testing!'));
+  console.log();
 }
