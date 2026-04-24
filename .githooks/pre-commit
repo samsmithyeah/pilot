@@ -21,6 +21,8 @@ if echo "$CHANGED_FILES" | grep -q '^packages/tapsmith/'; then
   (cd packages/tapsmith && npm run lint)
   echo "▸ TypeScript: test"
   (cd packages/tapsmith && npm run test)
+  echo "▸ TypeScript: knip"
+  (cd packages/tapsmith && npm run knip)
 fi
 
 # ─── Proto ───

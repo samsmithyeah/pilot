@@ -171,6 +171,7 @@ interface AndroidConfig {
   apkPath: string;
   packageName?: string;
   useEmulators: boolean;
+  usePhysicalDevices: boolean;
   avd?: string;
 }
 
@@ -237,7 +238,8 @@ async function configureAndroid(env: EnvScan): Promise<AndroidConfig> {
     console.log(dim('  Make sure USB debugging is enabled on your device.'));
   }
 
-  return { apkPath, packageName, useEmulators, avd };
+  const usePhysicalDevices = deviceType === 'physical' || deviceType === 'both';
+  return { apkPath, packageName, useEmulators, usePhysicalDevices, avd };
 }
 
 async function configureIos(env: EnvScan): Promise<IosConfig> {
@@ -570,7 +572,7 @@ export async function runInit(): Promise<void> {
   }
 
   // Step 5: Network capture
-  const androidHasPhysicalDevice = androidConfig?.useEmulators === false;
+  const androidHasPhysicalDevice = androidConfig?.usePhysicalDevices ?? false;
   const iosHasPhysicalDevice = iosConfig?.usePhysicalDevice ?? false;
   const enableNetwork = await setupNetworkCapture(selectedPlatforms, env, androidHasPhysicalDevice, iosHasPhysicalDevice);
 

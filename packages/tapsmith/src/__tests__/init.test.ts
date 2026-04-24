@@ -5,7 +5,7 @@ describe('generateConfig()', () => {
   it('generates single-platform Android config', () => {
     const config = generateConfig(
       ['android'],
-      { apkPath: './app.apk', packageName: 'com.example.app', useEmulators: true, avd: 'Pixel_7' },
+      { apkPath: './app.apk', packageName: 'com.example.app', useEmulators: true, usePhysicalDevices: false, avd: 'Pixel_7' },
       undefined,
       false,
     );
@@ -35,7 +35,7 @@ describe('generateConfig()', () => {
   it('generates dual-platform config with projects', () => {
     const config = generateConfig(
       ['android', 'ios'],
-      { apkPath: './app.apk', packageName: 'com.example.app', useEmulators: false },
+      { apkPath: './app.apk', packageName: 'com.example.app', useEmulators: false, usePhysicalDevices: true },
       { appPath: './MyApp.app', bundleId: 'com.example.app', simulator: 'iPhone 17', usePhysicalDevice: false },
       true,
     );
@@ -51,7 +51,7 @@ describe('generateConfig()', () => {
   it('includes iOS device project when physical device configured', () => {
     const config = generateConfig(
       ['android', 'ios'],
-      { apkPath: './app.apk', useEmulators: false },
+      { apkPath: './app.apk', useEmulators: false, usePhysicalDevices: true },
       {
         appPath: './MyApp.app',
         simulator: 'iPhone 17',
@@ -69,7 +69,7 @@ describe('generateConfig()', () => {
   it('includes network tracing when enabled', () => {
     const config = generateConfig(
       ['android'],
-      { apkPath: './app.apk', useEmulators: false },
+      { apkPath: './app.apk', useEmulators: false, usePhysicalDevices: true },
       undefined,
       true,
     );
@@ -80,7 +80,7 @@ describe('generateConfig()', () => {
   it('escapes single quotes in paths', () => {
     const config = generateConfig(
       ['android'],
-      { apkPath: "./path with 'quotes'/app.apk", packageName: 'com.example', useEmulators: false },
+      { apkPath: "./path with 'quotes'/app.apk", packageName: 'com.example', useEmulators: false, usePhysicalDevices: true },
       undefined,
       false,
     );
