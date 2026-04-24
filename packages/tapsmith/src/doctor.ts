@@ -118,7 +118,7 @@ function checkAdb(checks: CheckList): boolean {
 
 function checkAndroidHome(checks: CheckList): void {
   try {
-    const androidHome = process.env.ANDROID_HOME;
+    const androidHome = process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT;
     if (androidHome) {
       pass(checks, `ANDROID_HOME ${dim(androidHome)}`);
     } else {

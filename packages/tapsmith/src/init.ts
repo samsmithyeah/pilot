@@ -393,7 +393,7 @@ async function configureIos(env: EnvScan): Promise<IosConfig> {
 async function setupNetworkCapture(
   platforms: Platform[],
   env: EnvScan,
-  androidHasPhysicalDevice: boolean,
+  androidConfig: AndroidConfig | undefined,
   iosHasPhysicalDevice: boolean,
 ): Promise<boolean> {
   const enableNetwork = await ask<boolean>({
@@ -406,9 +406,11 @@ async function setupNetworkCapture(
 
   const lines: string[] = [];
 
-  if (platforms.includes('android')) {
-    lines.push(`  ${green('✓')} Android emulator — works automatically`);
-    if (androidHasPhysicalDevice) {
+  if (platforms.includes('android') && androidConfig) {
+    if (androidConfig.useEmulators) {
+      lines.push(`  ${green('✓')} Android emulator — works automatically`);
+    }
+    if (androidConfig.usePhysicalDevices) {
       lines.push(`  ${YELLOW}⚠${RESET} Android physical — add the Tapsmith CA to your app's res/xml/network_security_config.xml:`);
       lines.push(dim('    <network-security-config>'));
       lines.push(dim('      <debug-overrides><trust-anchors>'));
@@ -531,6 +533,17 @@ test('app launches successfully', async ({ device }) => {
 // ─── Main wizard ───
 
 export async function runInit(): Promise<void> {
+  try {
+    await runInitInner();
+  } catch {
+    console.log();
+    console.log(dim('  Setup cancelled.'));
+    console.log();
+    process.exit(0);
+  }
+}
+
+async function runInitInner(): Promise<void> {
   console.log();
   const banner = figlet.textSync('Tapsmith', { font: 'Three Point' });
   console.log(banner.split('\n').map((l) => `  ${GREEN}${l}${RESET}`).join('\n'));
@@ -586,12 +599,11 @@ export async function runInit(): Promise<void> {
   }
 
   // Step 5: Network capture
-  const androidHasPhysicalDevice = androidConfig?.usePhysicalDevices ?? false;
   const iosHasPhysicalDevice = iosConfig?.usePhysicalDevice ?? false;
-  const enableNetwork = await setupNetworkCapture(selectedPlatforms, env, androidHasPhysicalDevice, iosHasPhysicalDevice);
+  const enableNetwork = await setupNetworkCapture(selectedPlatforms, env, androidConfig, iosHasPhysicalDevice);
 
   // Step 6: iOS simulator agent check
-  if (selectedPlatforms.includes('ios') && iosConfig && !iosConfig.usePhysicalDevice) {
+  if (selectedPlatforms.includes('ios') && iosConfig && (iosConfig.simulator || !iosConfig.usePhysicalDevice)) {
     try {
       const { findSimulatorXctestrun } = await import('./ios-device-resolve.js');
       const xctestrun = findSimulatorXctestrun();
