@@ -357,6 +357,6 @@ export async function runDoctor(): Promise<void> {
   console.log();
 
   if (errors > 0) {
-    process.exit(1);
+    process.exitCode = 1;
   }
 }

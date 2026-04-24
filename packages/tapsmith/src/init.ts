@@ -537,11 +537,15 @@ test('app launches successfully', async ({ device }) => {
 export async function runInit(): Promise<void> {
   try {
     await runInitInner();
-  } catch {
+  } catch (err) {
     console.log();
-    console.log(dim('  Setup cancelled.'));
+    if (err === '' || (err instanceof Error && err.message === '')) {
+      console.log(dim('  Setup cancelled.'));
+    } else {
+      console.error(`  ${RED}✗${RESET} ${err instanceof Error ? err.message : String(err)}`);
+    }
     console.log();
-    process.exit(0);
+    process.exit(1);
   }
 }
 

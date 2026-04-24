@@ -195,18 +195,6 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Download Android agent APK
-        uses: actions/download-artifact@v4
-        with:
-          name: android-agent-apk
-          path: packages/tapsmith/dist/agents/android/
-
-      - name: Download Android agent test APK
-        uses: actions/download-artifact@v4
-        with:
-          name: android-agent-test-apk
-          path: packages/tapsmith/dist/agents/android/
-
       - name: Set version from tag
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
@@ -223,6 +211,19 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      # Download agent APKs AFTER build (build starts with rm -rf dist)
+      - name: Download Android agent APK
+        uses: actions/download-artifact@v4
+        with:
+          name: android-agent-apk
+          path: packages/tapsmith/dist/agents/android/
+
+      - name: Download Android agent test APK
+        uses: actions/download-artifact@v4
+        with:
+          name: android-agent-test-apk
+          path: packages/tapsmith/dist/agents/android/
 
       - name: Verify package contents
         run: |
