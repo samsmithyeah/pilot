@@ -8,7 +8,9 @@
     "tapsmith": "dist/cli.js"
   },
   "scripts": {
-    "build": "npm run clean && tsc && chmod +x dist/cli.js && npm run build:trace-viewer && npm run build:ui-mode",
+    "build": "npm run clean && tsc && chmod +x dist/cli.js && mkdir -p dist/proto && cp ../../proto/tapsmith.proto dist/proto/ && npm run build:agents && npm run build:ios-agent-src && npm run build:trace-viewer && npm run build:ui-mode",
+    "build:agents": "(mkdir -p dist/agents/android; [ -f ../../agent/app/build/outputs/apk/debug/app-debug.apk ] && cp ../../agent/app/build/outputs/apk/debug/app-debug.apk dist/agents/android/; [ -f ../../agent/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk ] && cp ../../agent/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk dist/agents/android/) || true",
+    "build:ios-agent-src": "(mkdir -p dist/ios-agent; [ -d ../../ios-agent/TapsmithAgent ] && cp -r ../../ios-agent/TapsmithAgent dist/ios-agent/; [ -d ../../ios-agent/TapsmithAgent.xcodeproj ] && cp -r ../../ios-agent/TapsmithAgent.xcodeproj dist/ios-agent/; [ -f ../../ios-agent/create-xcode-project.sh ] && cp ../../ios-agent/create-xcode-project.sh dist/ios-agent/; [ -f ../../ios-agent/Package.swift ] && cp ../../ios-agent/Package.swift dist/ios-agent/) || true",
     "clean": "rm -rf dist",
     "build:trace-viewer": "vite build",
     "build:ui-mode": "vite build --config vite.config.ui-mode.ts",
@@ -51,7 +53,9 @@
     "bplist-creator": "^0.1.1",
     "bplist-parser": "^0.3.2",
     "chokidar": "^4.0.3",
+    "enquirer": "^2.4.1",
     "fflate": "^0.8.2",
+    "figlet": "^1.11.0",
     "glob": "^11.0.0",
     "minimatch": "^10.2.4",
     "open": "^10.2.0",
@@ -74,6 +78,12 @@
     "vite": "^5.4.21",
     "vite-plugin-singlefile": "^2.3.2",
     "vitest": "^3.0.0"
+  },
+  "optionalDependencies": {
+    "@tapsmith/core-darwin-arm64": "0.1.0",
+    "@tapsmith/core-darwin-x64": "0.1.0",
+    "@tapsmith/core-linux-arm64": "0.1.0",
+    "@tapsmith/core-linux-x64": "0.1.0"
   },
   "engines": {
     "node": ">=18"

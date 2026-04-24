@@ -30,9 +30,62 @@
 
 import { execFileSync, spawn } from 'node:child_process';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { glob } from 'glob';
 import { getProfileExpiryInfo, formatExpiryWarning } from './ios-profile-expiry.js';
+
+// ─── iOS agent source resolution ────────────────────────────────────────
+
+/**
+ * Locate the `ios-agent/` directory containing the Swift source and Xcode project.
+ *
+ * Resolution order:
+ *   1. `<cwd>/ios-agent/` — monorepo layout
+ *   2. `~/.tapsmith/ios-agent/` — previously extracted from the npm package
+ *   3. Extract bundled source from the npm package to `~/.tapsmith/ios-agent/`
+ */
+function getPackageVersion(): string {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../package.json'), 'utf8'));
+    return pkg.version ?? '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+}
+
+export function resolveIosAgentDir(cwd?: string): string {
+  // 1. Monorepo
+  const monorepo = path.resolve(cwd ?? process.cwd(), 'ios-agent');
+  if (fs.existsSync(path.join(monorepo, 'TapsmithAgent.xcodeproj'))) return monorepo;
+
+  // 2. Previously extracted — re-extract if version changed
+  const cached = path.join(os.homedir(), '.tapsmith', 'ios-agent');
+  const versionFile = path.join(cached, '.tapsmith-version');
+  const currentVersion = getPackageVersion();
+  const cachedVersion = fs.existsSync(versionFile) ? fs.readFileSync(versionFile, 'utf8').trim() : '';
+
+  if (fs.existsSync(path.join(cached, 'TapsmithAgent.xcodeproj')) && cachedVersion === currentVersion) {
+    return cached;
+  }
+
+  // 3. Extract from bundled npm package source
+  const bundled = path.resolve(__dirname, 'ios-agent');
+  if (fs.existsSync(path.join(bundled, 'TapsmithAgent.xcodeproj'))) {
+    if (fs.existsSync(cached)) fs.rmSync(cached, { recursive: true, force: true });
+    fs.mkdirSync(cached, { recursive: true });
+    fs.cpSync(bundled, cached, { recursive: true });
+    fs.writeFileSync(versionFile, currentVersion);
+    const script = path.join(cached, 'create-xcode-project.sh');
+    if (fs.existsSync(script)) {
+      try { fs.chmodSync(script, 0o755); } catch { /* non-fatal — build will fail later if script isn't executable */ }
+    }
+    return cached;
+  }
+
+  // Nothing found — return the monorepo path so the caller gets a clear error
+  return monorepo;
+}
 
 const DIM = '\x1b[2m';
 const BOLD = '\x1b[1m';
@@ -58,6 +111,8 @@ export interface BuildIosAgentOptions {
   verbose?: boolean
   /** Override the DerivedData output directory. */
   derivedDataPath?: string
+  /** Suppress informational output (config hints, timing). Used when called from the init wizard. */
+  quiet?: boolean
 }
 
 // ─── Team ID resolution (DX win #1) ──────────────────────────────────────
@@ -325,11 +380,11 @@ export function matchKnownErrorHint(line: string): ErrorHint | undefined {
 // ─── xcodebuild invocation ───────────────────────────────────────────────
 
 export async function buildIosAgent(options: BuildIosAgentOptions): Promise<string> {
-  const cwd = options.cwd ?? process.cwd();
-  const iosAgentDir = path.resolve(cwd, 'ios-agent');
+  const iosAgentDir = resolveIosAgentDir(options.cwd);
+
   if (!fs.existsSync(path.join(iosAgentDir, 'TapsmithAgent.xcodeproj'))) {
     throw new Error(
-      `ios-agent/TapsmithAgent.xcodeproj not found under ${iosAgentDir}.\n` +
+      `ios-agent/TapsmithAgent.xcodeproj not found.\n` +
         '  Run this command from the Tapsmith repo root, or pass a different --cwd.',
     );
   }
@@ -370,12 +425,14 @@ export async function buildIosAgent(options: BuildIosAgentOptions): Promise<stri
     `DEVELOPMENT_TEAM=${teamId}`,
   ];
 
-  console.log(bold('Building TapsmithAgent runner for iOS devices…'));
-  console.log(dim(`  team:         ${teamId}`));
-  console.log(dim(`  destination:  generic/platform=iOS`));
-  console.log(dim(`  derivedData:  ${derivedDataPath}`));
-  console.log(dim('  Typical build time: 60–120s on first run, <10s incremental.'));
-  console.log();
+  if (!options.quiet) {
+    console.log(bold('Building TapsmithAgent runner for iOS devices…'));
+    console.log(dim(`  team:         ${teamId}`));
+    console.log(dim(`  destination:  generic/platform=iOS`));
+    console.log(dim(`  derivedData:  ${derivedDataPath}`));
+    console.log(dim('  Typical build time: 60–120s on first run, <10s incremental.'));
+    console.log();
+  }
 
   const startedAt = Date.now();
   const { ok, tailLines } = await runXcodebuild('xcodebuild', args, options.verbose === true);
@@ -421,25 +478,27 @@ export async function buildIosAgent(options: BuildIosAgentOptions): Promise<stri
 
   stripRootInstallKeys(newest);
 
-  console.log();
-  console.log(green(`✓ Built TapsmithAgent runner in ${elapsedSec}s.`));
-  console.log();
+  if (!options.quiet) {
+    console.log();
+    console.log(green(`✓ Built TapsmithAgent runner in ${elapsedSec}s.`));
+    console.log();
 
-  // Surface provisioning-profile expiry up front. Free Apple Developer
-  // accounts roll the profile every 7 days — without a heads-up, users
-  // run into cryptic signing errors mid-test a week later.
-  const expiry = getProfileExpiryInfo(newest);
-  if (expiry) {
-    const warning = formatExpiryWarning(expiry);
-    if (warning) {
-      console.log(`  ${yellow('⚠')} ${warning}`);
-      console.log();
+    // Surface provisioning-profile expiry up front. Free Apple Developer
+    // accounts roll the profile every 7 days — without a heads-up, users
+    // run into cryptic signing errors mid-test a week later.
+    const expiry = getProfileExpiryInfo(newest);
+    if (expiry) {
+      const warning = formatExpiryWarning(expiry);
+      if (warning) {
+        console.log(`  ${yellow('⚠')} ${warning}`);
+        console.log();
+      }
     }
-  }
 
-  console.log('  Add to your ' + bold('tapsmith.config.ts') + ':');
-  console.log(`    ${dim('iosXctestrun:')} ${green("'" + path.relative(cwd, newest) + "'")}`);
-  console.log();
+    console.log('  Add to your ' + bold('tapsmith.config.ts') + ':');
+    console.log(`    ${dim('iosXctestrun:')} ${green("'" + path.relative(options.cwd ?? process.cwd(), newest) + "'")}`);
+    console.log();
+  }
   return newest;
 }
 
