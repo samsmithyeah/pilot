@@ -167,7 +167,12 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           cd npm-packages/${{ matrix.pkg }}
-          npm version "$VERSION" --no-git-tag-version
+          node -e "
+            const fs = require('fs');
+            const pkg = require('./package.json');
+            pkg.version = '$VERSION';
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
 
       - name: Publish
         working-directory: npm-packages/${{ matrix.pkg }}
@@ -199,11 +204,10 @@ jobs:
       - name: Set version from tag
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          npm version "$VERSION" --no-git-tag-version
-          # Update optionalDependencies to match
           node -e "
             const pkg = require('./package.json');
             const fs = require('fs');
+            pkg.version = '$VERSION';
             for (const dep of Object.keys(pkg.optionalDependencies || {})) {
               pkg.optionalDependencies[dep] = '$VERSION';
             }
