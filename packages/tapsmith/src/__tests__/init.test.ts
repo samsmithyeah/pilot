@@ -48,6 +48,19 @@ describe('generateConfig()', () => {
     expect(config).toContain("trace: { mode: 'retain-on-failure' },");
   });
 
+  it('puts package name per-project in dual-platform config', () => {
+    const config = generateConfig(
+      ['android', 'ios'],
+      { apkPath: './app.apk', packageName: 'com.example.android', useEmulators: false, usePhysicalDevices: true },
+      { appPath: './MyApp.app', bundleId: 'com.example.ios', simulator: 'iPhone 17', usePhysicalDevice: false },
+      false,
+    );
+
+    expect(config).not.toMatch(/^  package:/m);
+    expect(config).toContain("package: 'com.example.android',");
+    expect(config).toContain("package: 'com.example.ios',");
+  });
+
   it('includes iOS device project when physical device configured', () => {
     const config = generateConfig(
       ['android', 'ios'],

@@ -200,7 +200,7 @@ async function configureAndroid(env: EnvScan): Promise<AndroidConfig> {
     if (androidHome) {
       const buildTools = path.join(androidHome, 'build-tools');
       if (fs.existsSync(buildTools)) {
-        const versions = fs.readdirSync(buildTools).sort().reverse();
+        const versions = fs.readdirSync(buildTools).sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
         for (const v of versions) {
           const candidate = path.join(buildTools, v, 'aapt2');
           if (fs.existsSync(candidate)) { aapt2Bin = candidate; break; }
@@ -300,7 +300,7 @@ async function configureIos(env: EnvScan): Promise<IosConfig> {
       const seen = new Map<string, SimulatorInfo>();
       for (const sim of env.simulators) {
         const existing = seen.get(sim.name);
-        if (!existing || sim.runtime > existing.runtime) {
+        if (!existing || sim.runtime.localeCompare(existing.runtime, undefined, { numeric: true }) > 0) {
           seen.set(sim.name, sim);
         }
       }
@@ -456,11 +456,11 @@ export function generateConfig(
 
   const esc = (s: string): string => s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 
-  const pkg = android?.packageName ?? ios?.bundleId;
-  if (pkg) lines.push(`  package: '${esc(pkg)}',`);
   if (enableNetwork) lines.push("  trace: { mode: 'retain-on-failure' },");
 
   if (platforms.length === 1) {
+    const pkg = android?.packageName ?? ios?.bundleId;
+    if (pkg) lines.push(`  package: '${esc(pkg)}',`);
     if (android) {
       lines.push(`  apk: '${esc(android.apkPath)}',`);
       if (android.useEmulators) {
@@ -482,6 +482,7 @@ export function generateConfig(
     lines.push("      testMatch: ['**/*.test.ts'],");
     lines.push('      use: {');
     lines.push("        platform: 'android',");
+    if (android.packageName) lines.push(`        package: '${esc(android.packageName)}',`);
     lines.push(`        apk: '${esc(android.apkPath)}',`);
     if (android.useEmulators) {
       lines.push('        launchEmulators: true,');
@@ -495,6 +496,7 @@ export function generateConfig(
     lines.push("      testMatch: ['**/*.test.ts'],");
     lines.push('      use: {');
     lines.push("        platform: 'ios',");
+    if (ios.bundleId) lines.push(`        package: '${esc(ios.bundleId)}',`);
     lines.push(`        app: '${esc(ios.appPath)}',`);
     if (ios.simulator) lines.push(`        simulator: '${esc(ios.simulator)}',`);
     lines.push('      },');
@@ -621,7 +623,7 @@ async function runInitInner(): Promise<void> {
             const iosAgentDir = resolveIosAgentDir();
             const createScript = path.join(iosAgentDir, 'create-xcode-project.sh');
             if (fs.existsSync(createScript)) {
-              try { execFileSync(createScript, [], { cwd: iosAgentDir, stdio: 'ignore' }); } catch { /* optional — xcodebuild will fail below if needed */ }
+              try { execFileSync('sh', [createScript], { cwd: iosAgentDir, stdio: 'ignore' }); } catch { /* optional — xcodebuild will fail below if needed */ }
             }
             const dest = iosConfig.simulator
               ? `platform=iOS Simulator,name=${iosConfig.simulator}`
@@ -646,8 +648,12 @@ async function runInitInner(): Promise<void> {
   // Step 7: Generate config
   const configContent = generateConfig(selectedPlatforms, androidConfig, iosConfig, enableNetwork);
 
-  fs.writeFileSync(path.resolve(process.cwd(), 'tapsmith.config.ts'), configContent);
-  console.log(`  ${green('✓')} tapsmith.config.ts created`);
+  try {
+    fs.writeFileSync(path.resolve(process.cwd(), 'tapsmith.config.ts'), configContent);
+    console.log(`  ${green('✓')} tapsmith.config.ts created`);
+  } catch (err) {
+    console.log(`  ${RED}✗${RESET} Failed to write tapsmith.config.ts: ${err instanceof Error ? err.message : String(err)}`);
+  }
 
   // Step 8: Example test
   const createTest = await ask<boolean>({
