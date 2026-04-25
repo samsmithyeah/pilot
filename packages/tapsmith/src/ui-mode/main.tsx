@@ -277,9 +277,9 @@ function App() {
         success: true,
         bounds: inFlight.bounds,
         point: inFlight.point,
-        hasScreenshotBefore: true,
+        hasScreenshotBefore: inFlight.hasScreenshotBefore,
         hasScreenshotAfter: false,
-        hasHierarchyBefore: true,
+        hasHierarchyBefore: inFlight.hasHierarchyBefore,
         hasHierarchyAfter: false,
       } satisfies ActionTraceEvent;
     }
@@ -295,6 +295,10 @@ function App() {
       duration: 0,
       attempts: 0,
       bounds: inFlight.bounds,
+      hasScreenshotBefore: inFlight.hasScreenshotBefore,
+      hasScreenshotAfter: false,
+      hasHierarchyBefore: inFlight.hasHierarchyBefore,
+      hasHierarchyAfter: false,
     } satisfies AssertionTraceEvent;
   }, [actionEvents, selectedIndex, currentTrace?.inFlightAction]);
 
@@ -485,8 +489,12 @@ function App() {
         });
         if (msg.tracePath) {
           setTestTraces((prev) => {
-            const data = prev.get(statusKey);
-            if (!data) return prev;
+            // On reconnect we replay test-status for tests that completed
+            // before the connection drop. The client's trace map has no
+            // entry for those tests (events are streamed live and never
+            // refetched), so create a stub so the tracePath is at least
+            // saved — without it the Download Trace button can't appear.
+            const data = prev.get(statusKey) ?? emptyTraceData(msg.filePath);
             const next = new Map(prev);
             next.set(statusKey, { ...data, tracePath: msg.tracePath });
             return next;
@@ -591,6 +599,10 @@ function App() {
               );
               if (prevWithBounds?.bounds) inheritedBounds = prevWithBounds.bounds;
             }
+            // ev is narrowed to ActionTraceEvent | AssertionTraceEvent here;
+            // both have these flags (assertion's are optional, hence the ??).
+            const hasShotBefore = !!ev.hasScreenshotBefore;
+            const hasHierBefore = !!ev.hasHierarchyBefore;
             const inFlightAction: InFlightAction = ev.type === 'action'
               ? {
                   actionIndex: ev.actionIndex,
@@ -601,6 +613,8 @@ function App() {
                   startedAt: ev.timestamp,
                   bounds: inheritedBounds,
                   point: (ev as ActionTraceEvent).point,
+                  hasScreenshotBefore: hasShotBefore,
+                  hasHierarchyBefore: hasHierBefore,
                 }
               : {
                   actionIndex: ev.actionIndex,
@@ -610,6 +624,8 @@ function App() {
                   failed: false,
                   startedAt: ev.timestamp,
                   bounds: inheritedBounds,
+                  hasScreenshotBefore: hasShotBefore,
+                  hasHierarchyBefore: hasHierBefore,
                 };
             const next = new Map(map);
             next.set(key, { ...data, screenshots, hierarchies, inFlightAction });

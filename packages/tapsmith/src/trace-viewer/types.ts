@@ -29,4 +29,10 @@ export interface InFlightAction {
   bounds?: { left: number; top: number; right: number; bottom: number }
   /** Tap/swipe target point, for the screenshot overlay. */
   point?: { x: number; y: number }
+  /** Whether the started event carried a before-screenshot. Synthesized
+   * events in main.tsx use this so api-request actions (which don't
+   * capture) don't claim to have a screenshot. */
+  hasScreenshotBefore: boolean
+  /** Whether the started event carried a before-hierarchy snapshot. */
+  hasHierarchyBefore: boolean
 }

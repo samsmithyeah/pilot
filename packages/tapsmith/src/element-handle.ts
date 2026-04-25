@@ -927,7 +927,7 @@ export class ElementHandle {
             await this._traceQuery(
               'scrollIntoView',
               `Visible after ${i} scroll(s)`,
-              0,
+              Date.now() - start,
               res.element.bounds,
             );
             return;
