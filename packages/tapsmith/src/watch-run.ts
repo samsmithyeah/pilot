@@ -19,6 +19,7 @@ import { isNetworkTracingEnabled, networkHostsForPac } from './trace/types.js';
 import {
   serializeTestResult,
   serializeSuiteResult,
+  deserializeRegExpArray,
   type SerializedConfig,
   type RunFileUseOptions,
 } from './worker-protocol.js';
@@ -85,6 +86,8 @@ function configFromSerialized(s: SerializedConfig, daemonAddress: string): Tapsm
     resetAppWaitMs: s.resetAppWaitMs,
     baseURL: s.baseURL,
     extraHTTPHeaders: s.extraHTTPHeaders,
+    grep: deserializeRegExpArray(s.grep),
+    grepInvert: deserializeRegExpArray(s.grepInvert),
   };
 }
 
@@ -171,6 +174,9 @@ async function handleRun(msg: WatchRunMessage): Promise<void> {
     reporter: reporterProxy,
     projectUseOptions: msg.projectUseOptions,
     projectName: msg.projectName,
+    // configFromSerialized stores grep/grepInvert as RegExp[] (from deserialization).
+    grep: Array.isArray(config.grep) ? config.grep : undefined,
+    grepInvert: Array.isArray(config.grepInvert) ? config.grepInvert : undefined,
   });
 
   const results = collectResults(suiteResult);

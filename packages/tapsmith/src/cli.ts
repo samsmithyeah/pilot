@@ -11,7 +11,7 @@
 
 import * as path from 'node:path';
 import * as fs from 'node:fs';
-import { loadConfig, resolveDeviceStrategy, EXPLICIT_WORKERS, isExplicitWorkers, type TapsmithConfig } from './config.js';
+import { loadConfig, normalizeGrep, resolveDeviceStrategy, EXPLICIT_WORKERS, isExplicitWorkers, type TapsmithConfig } from './config.js';
 import { TapsmithGrpcClient } from './grpc-client.js';
 import { Device } from './device.js';
 import { runTestFile, collectResults, type TestResult, type SuiteResult } from './runner.js';
@@ -38,7 +38,7 @@ import {
   waitForDeviceStability,
   ensureAdbRoot,
 } from './emulator.js';
-import { isRecoverableInfrastructureError } from './worker-protocol.js';
+import { isRecoverableInfrastructureError, serializeRegExpArray } from './worker-protocol.js';
 import { findPidsOnPort, freeStaleAgentPort } from './port-utils.js';
 import { findDaemonBin } from './daemon-bin.js';
 
@@ -870,6 +870,19 @@ interface CliArgs {
   version: boolean;
   help: boolean;
   tsxReexec: boolean;
+  /** Pattern from `--grep` / `-g`. Compiled to a RegExp later. */
+  grep?: string;
+  /** Pattern from `--grep-invert` / `-gv`. Compiled to a RegExp later. */
+  grepInvert?: string;
+}
+
+function compileGrepPattern(pattern: string, flag: string): RegExp {
+  try {
+    return new RegExp(pattern);
+  } catch (err) {
+    console.error(red(`${flag} is not a valid regular expression: ${(err as Error).message}`));
+    process.exit(1);
+  }
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -959,6 +972,16 @@ function parseArgs(argv: string[]): CliArgs {
       args.config = rest[++i];
     } else if (arg?.startsWith('--config=')) {
       args.config = arg.slice('--config='.length);
+    } else if (arg === '--grep' || arg === '-g') {
+      args.grep = rest[++i];
+    } else if (arg?.startsWith('--grep=')) {
+      args.grep = arg.slice('--grep='.length);
+    } else if (arg?.startsWith('-g=')) {
+      args.grep = arg.slice('-g='.length);
+    } else if (arg === '--grep-invert') {
+      args.grepInvert = rest[++i];
+    } else if (arg?.startsWith('--grep-invert=')) {
+      args.grepInvert = arg.slice('--grep-invert='.length);
     } else if (arg === '--force-install') {
       args.forceInstall = true;
     } else if (arg === '--__tsx-reexec') {
@@ -1093,6 +1116,10 @@ function buildSerializedConfig(cfg: TapsmithConfig): import('./worker-protocol.j
     simulator: cfg.simulator,
     resetAppDeepLink: cfg.resetAppDeepLink,
     resetAppWaitMs: cfg.resetAppWaitMs,
+    baseURL: cfg.baseURL,
+    extraHTTPHeaders: cfg.extraHTTPHeaders,
+    grep: serializeRegExpArray(normalizeGrep(cfg.grep)),
+    grepInvert: serializeRegExpArray(normalizeGrep(cfg.grepInvert)),
   };
 }
 
@@ -1302,6 +1329,8 @@ ${bold('Options:')}
   --trace <mode>           Trace mode: off, on, on-first-retry, on-all-retries,
                            retain-on-failure, retain-on-first-failure
   -c, --config <path>      Path to config file (default: tapsmith.config.ts)
+  -g, --grep <pattern>     Run only tests whose fullName matches this regex
+  --grep-invert <pattern>  Skip tests whose fullName matches this regex
   --force-install          Reinstall the app even if already installed
   -v, --version            Print version
   -h, --help               Show this help
@@ -1487,6 +1516,12 @@ async function main(): Promise<void> {
   }
   if (args.trace) {
     config.trace = args.trace as TapsmithConfig['trace'];
+  }
+  if (args.grep !== undefined) {
+    config.grep = compileGrepPattern(args.grep, '--grep');
+  }
+  if (args.grepInvert !== undefined) {
+    config.grepInvert = compileGrepPattern(args.grepInvert, '--grep-invert');
   }
 
   // Validate watch mode constraints
@@ -1990,6 +2025,8 @@ async function main(): Promise<void> {
 
           reporter.onTestFileStart(file);
 
+          const projectGrepRe = normalizeGrep(project.grep);
+          const projectGrepInvertRe = normalizeGrep(project.grepInvert);
           const suiteResult = await runTestFileWithRecovery(file, {
             config: projectConfig,
             device: device!,
@@ -1998,6 +2035,8 @@ async function main(): Promise<void> {
             reporter,
             projectUseOptions: project.use,
             projectName: project.name !== 'default' ? project.name : undefined,
+            projectGrep: projectGrepRe.length > 0 ? projectGrepRe : undefined,
+            projectGrepInvert: projectGrepInvertRe.length > 0 ? projectGrepInvertRe : undefined,
             sessionContext: {
               label: `Device ${projectConfig.device}`,
               config: projectConfig,
@@ -2069,9 +2108,13 @@ async function runTestFileWithRecovery(
     reporter: ReporterDispatcher
     projectUseOptions?: Record<string, unknown>
     projectName?: string
+    projectGrep?: RegExp[]
+    projectGrepInvert?: RegExp[]
     sessionContext: import('./session-preflight.js').SessionPreflightContext
   },
 ): Promise<SuiteResult> {
+  const grep = normalizeGrep(opts.config.grep);
+  const grepInvert = normalizeGrep(opts.config.grepInvert);
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
       const suite = await runTestFile(file, {
@@ -2082,6 +2125,10 @@ async function runTestFileWithRecovery(
         abortFileOnError: isRecoverableInfrastructureError,
         projectUseOptions: opts.projectUseOptions,
         projectName: opts.projectName,
+        grep: grep.length > 0 ? grep : undefined,
+        grepInvert: grepInvert.length > 0 ? grepInvert : undefined,
+        projectGrep: opts.projectGrep,
+        projectGrepInvert: opts.projectGrepInvert,
       });
       const fileResults = collectResults(suite);
       const infraFailure = fileResults.find(

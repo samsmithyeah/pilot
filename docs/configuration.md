@@ -50,6 +50,8 @@ For emulator-managed runs, the recommended path is `launchEmulators + avd`.
 | `launchEmulators` | `boolean` | `false` | Automatically launch Android emulators to fill the requested worker count. |
 | `avd` | `string` | `undefined` | AVD name to use for `launchEmulators` (Android). When set, Tapsmith launches repeated instances of this AVD. |
 | `trace` | `TraceMode \| Partial<TraceConfig>` | `"off"` | Trace recording mode. See [TraceMode](#tracemode) below. |
+| `grep` | `RegExp \| RegExp[]` | `undefined` | Run only tests whose fullName (`describe > test`) matches at least one of these regular expressions. Mirrors Playwright's `grep` and the `--grep` / `-g` CLI flag. |
+| `grepInvert` | `RegExp \| RegExp[]` | `undefined` | Skip tests whose fullName matches any of these regular expressions. Mirrors Playwright's `grepInvert` and the `--grep-invert` CLI flag. |
 
 ### `ScreenshotMode`
 

@@ -180,6 +180,19 @@ export interface TapsmithConfig {
    * Per-request headers override these when names collide.
    */
   extraHTTPHeaders?: Record<string, string>;
+
+  /**
+   * Run only tests whose fullName (`describe > test`) matches at least one of
+   * these regular expressions. Mirrors Playwright's `grep` /  `--grep` CLI flag.
+   * Combined with `grepInvert` via logical AND.
+   */
+  grep?: RegExp | RegExp[];
+
+  /**
+   * Skip tests whose fullName (`describe > test`) matches any of these regular
+   * expressions. Mirrors Playwright's `grepInvert` / `--grep-invert` CLI flag.
+   */
+  grepInvert?: RegExp | RegExp[];
 }
 
 // ─── Per-scope option overrides ───
@@ -268,6 +281,16 @@ export interface ProjectConfig {
    * ]
    */
   workers?: number;
+  /**
+   * Per-project grep filter, intersected with the root `grep`. Mirrors
+   * Playwright's per-project `grep`.
+   */
+  grep?: RegExp | RegExp[];
+  /**
+   * Per-project grep-invert filter, unioned with the root `grepInvert`.
+   * Mirrors Playwright's per-project `grepInvert`.
+   */
+  grepInvert?: RegExp | RegExp[];
 }
 
 const DEFAULT_CONFIG: TapsmithConfig = {
@@ -290,6 +313,15 @@ export function defineConfig(overrides: Partial<TapsmithConfig> = {}): TapsmithC
     { ...DEFAULT_CONFIG, ...overrides },
     overrides.workers !== undefined,
   );
+}
+
+/**
+ * Normalize a `grep` / `grepInvert` value (RegExp, RegExp[], or undefined)
+ * into a plain RegExp[]. Returns an empty array when undefined.
+ */
+export function normalizeGrep(value: RegExp | RegExp[] | undefined): RegExp[] {
+  if (!value) return [];
+  return Array.isArray(value) ? value : [value];
 }
 
 /**
