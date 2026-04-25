@@ -157,6 +157,18 @@ export class WebViewHandle {
       ctx.captureHierarchy,
     );
 
+    // Stream a "started" lifecycle signal so UI mode can render an in-flight
+    // row with a spinner while the WebView action runs.
+    ctx.collector._emitActionStarted({
+      category: 'webview',
+      action,
+      selector: selectorStr,
+      sourceLocation,
+      log: [`webview.${action}(${selectorStr ?? ''})`],
+      hasScreenshotBefore: !!beforeCaptures.screenshotBefore,
+      hasHierarchyBefore: !!beforeCaptures.hierarchyBefore,
+    });
+
     const start = Date.now();
     let success = true;
     let error: string | undefined;

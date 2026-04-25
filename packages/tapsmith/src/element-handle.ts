@@ -538,49 +538,67 @@ export class ElementHandle {
 
   /** Resolve this handle to an ElementInfo. Throws if not found within timeout. */
   async find(): Promise<ElementInfo> {
+    this._emitQueryStarted('find');
     const start = Date.now();
-    let result: ElementInfo;
-    if (this._hasModifiers()) {
-      result = await this._resolveOne();
-    } else {
-      const res = await this._client.findElement(this._selector, this._timeoutMs);
-      if (!res.found || !res.element) {
-        throw new Error(
-          res.errorMessage ||
-            `Element not found: ${this._describe()}`,
-        );
+    try {
+      let result: ElementInfo;
+      if (this._hasModifiers()) {
+        result = await this._resolveOne();
+      } else {
+        const res = await this._client.findElement(this._selector, this._timeoutMs);
+        if (!res.found || !res.element) {
+          throw new Error(
+            res.errorMessage ||
+              `Element not found: ${this._describe()}`,
+          );
+        }
+        result = res.element;
       }
-      result = res.element;
+      await this._traceQuery('find', `Found: ${result.text || result.className}`, Date.now() - start, result.bounds);
+      return result;
+    } catch (err) {
+      await this._traceQueryFailed('find', err, Date.now() - start);
+      throw err;
     }
-    await this._traceQuery('find', `Found: ${result.text || result.className}`, Date.now() - start, result.bounds);
-    return result;
   }
 
   /** Returns true if the element exists in the current UI. */
   async exists(): Promise<boolean> {
+    this._emitQueryStarted('exists');
     const start = Date.now();
-    let found: boolean;
-    if (this._hasModifiers()) {
-      try {
-        await this._resolveOne();
-        found = true;
-      } catch {
-        found = false;
+    try {
+      let found: boolean;
+      if (this._hasModifiers()) {
+        try {
+          await this._resolveOne();
+          found = true;
+        } catch {
+          found = false;
+        }
+      } else {
+        const res = await this._client.findElement(this._selector, this._timeoutMs);
+        found = res.found;
       }
-    } else {
-      const res = await this._client.findElement(this._selector, this._timeoutMs);
-      found = res.found;
+      await this._traceQuery('exists', `Exists: ${found}`, Date.now() - start);
+      return found;
+    } catch (err) {
+      await this._traceQueryFailed('exists', err, Date.now() - start);
+      throw err;
     }
-    await this._traceQuery('exists', `Exists: ${found}`, Date.now() - start);
-    return found;
   }
 
   /** Return the number of elements matching the selector (PILOT-14). */
   async count(): Promise<number> {
+    this._emitQueryStarted('count');
     const start = Date.now();
-    const elements = await this._resolveAll();
-    await this._traceQuery('count', `Count: ${elements.length}`, Date.now() - start);
-    return elements.length;
+    try {
+      const elements = await this._resolveAll();
+      await this._traceQuery('count', `Count: ${elements.length}`, Date.now() - start);
+      return elements.length;
+    } catch (err) {
+      await this._traceQueryFailed('count', err, Date.now() - start);
+      throw err;
+    }
   }
 
   /**
@@ -590,17 +608,23 @@ export class ElementHandle {
    * and performing actions will not re-query `findElements` for each handle.
    */
   async all(): Promise<ElementHandle[]> {
+    this._emitQueryStarted('all');
     const start = Date.now();
-    const resolvedElementsPromise = this._resolveAll();
-    const elements = await resolvedElementsPromise;
-    await this._traceQuery('all', `Found ${elements.length} element(s)`, Date.now() - start);
-    return elements.map((_, i) =>
-      new ElementHandle(this._client, this._selector, this._timeoutMs, {
-        ...this._options,
-        nthIndex: i,
-        resolvedElementsPromise,
-      }),
-    );
+    try {
+      const resolvedElementsPromise = this._resolveAll();
+      const elements = await resolvedElementsPromise;
+      await this._traceQuery('all', `Found ${elements.length} element(s)`, Date.now() - start);
+      return elements.map((_, i) =>
+        new ElementHandle(this._client, this._selector, this._timeoutMs, {
+          ...this._options,
+          nthIndex: i,
+          resolvedElementsPromise,
+        }),
+      );
+    } catch (err) {
+      await this._traceQueryFailed('all', err, Date.now() - start);
+      throw err;
+    }
   }
 
   // ── Actions ──
@@ -614,6 +638,27 @@ export class ElementHandle {
     if (!res.success) {
       throw new Error(res.errorMessage || fallbackMsg);
     }
+  }
+
+  /**
+   * @internal — Emit a "started" lifecycle signal for a query/scroll method
+   * that doesn't go through tracedAction. Call this before the slow part of
+   * the operation so UI mode shows an in-flight row with a spinner; the
+   * matching _traceQuery at completion fires the 'completed' signal.
+   */
+  private _emitQueryStarted(action: string): void {
+    const trace = this._traceCapture;
+    if (!trace) return;
+    const sourceLocation = extractSourceLocation(new Error().stack ?? '');
+    trace.collector._emitActionStarted({
+      category: 'other',
+      action,
+      selector: JSON.stringify(selectorToProto(this._selector)),
+      sourceLocation,
+      log: [],
+      hasScreenshotBefore: false,
+      hasHierarchyBefore: false,
+    });
   }
 
   /**
@@ -640,6 +685,38 @@ export class ElementHandle {
       hasHierarchyBefore: !!beforeCaptures.hierarchyBefore,
       hasHierarchyAfter: false,
       log: [result],
+    });
+  }
+
+  /**
+   * @internal — Emit a failed completion event for a query/scroll method
+   * that threw. Pairs with _emitQueryStarted at the same actionIndex so the
+   * UI mode in-flight slot clears even if user code catches the throw and
+   * keeps running.
+   */
+  private async _traceQueryFailed(action: string, err: unknown, durationMs: number): Promise<void> {
+    const trace = this._traceCapture;
+    if (!trace) return;
+    const sourceLocation = extractSourceLocation(new Error().stack ?? '');
+    const errMsg = err instanceof Error ? err.message : String(err);
+    const errStack = err instanceof Error ? err.stack : undefined;
+    const { captures: beforeCaptures } = await trace.collector.captureBeforeAction(
+      trace.takeScreenshot, trace.captureHierarchy,
+    );
+    trace.collector.addActionEvent({
+      category: 'other',
+      action,
+      selector: JSON.stringify(selectorToProto(this._selector)),
+      duration: durationMs,
+      success: false,
+      error: errMsg,
+      errorStack: errStack,
+      sourceLocation,
+      hasScreenshotBefore: !!beforeCaptures.screenshotBefore,
+      hasScreenshotAfter: false,
+      hasHierarchyBefore: !!beforeCaptures.hierarchyBefore,
+      hasHierarchyAfter: false,
+      log: [`${action} failed: ${errMsg}`],
     });
   }
 
@@ -824,54 +901,62 @@ export class ElementHandle {
     const maxScrolls = options?.maxScrolls ?? 5;
     const speed = options?.speed ?? 2000;
 
-    for (let i = 0; i <= maxScrolls; i++) {
-      try {
-        const res = await this._client.findElement(this._selector, SCROLL_PROBE_TIMEOUT_MS);
-        if (res.found && res.element?.visible) {
-          // Wait for scroll momentum to fully stop.  On iOS, momentum
-          // deceleration continues after a swipe, and the first tap during
-          // deceleration is consumed by the ScrollView (stops the scroll)
-          // rather than being delivered to the child view.  Poll until the
-          // element's position is stable for two consecutive checks.
-          if (i > 0) {
-            let lastY = res.element.bounds?.top;
-            for (let s = 0; s < 10; s++) {
-              await new Promise((r) => setTimeout(r, 100));
-              const probe = await this._client.findElement(this._selector, 500);
-              const curY = probe.element?.bounds?.top;
-              if (curY !== undefined && curY === lastY) break;
-              lastY = curY;
+    this._emitQueryStarted('scrollIntoView');
+    const start = Date.now();
+
+    try {
+      for (let i = 0; i <= maxScrolls; i++) {
+        try {
+          const res = await this._client.findElement(this._selector, SCROLL_PROBE_TIMEOUT_MS);
+          if (res.found && res.element?.visible) {
+            // Wait for scroll momentum to fully stop.  On iOS, momentum
+            // deceleration continues after a swipe, and the first tap during
+            // deceleration is consumed by the ScrollView (stops the scroll)
+            // rather than being delivered to the child view.  Poll until the
+            // element's position is stable for two consecutive checks.
+            if (i > 0) {
+              let lastY = res.element.bounds?.top;
+              for (let s = 0; s < 10; s++) {
+                await new Promise((r) => setTimeout(r, 100));
+                const probe = await this._client.findElement(this._selector, 500);
+                const curY = probe.element?.bounds?.top;
+                if (curY !== undefined && curY === lastY) break;
+                lastY = curY;
+              }
             }
+            await this._traceQuery(
+              'scrollIntoView',
+              `Visible after ${i} scroll(s)`,
+              0,
+              res.element.bounds,
+            );
+            return;
           }
-          await this._traceQuery(
-            'scrollIntoView',
-            `Visible after ${i} scroll(s)`,
-            0,
-            res.element.bounds,
-          );
-          return;
+        } catch (err) {
+          // findElement throws when the element isn't in the tree at all
+          // (e.g. virtualized list hasn't rendered it yet). This is expected
+          // during scrolling — swipe again and retry.
+          if (err instanceof Error && err.message.includes('UNAVAILABLE')) {
+            // gRPC transport error — daemon/agent is down, don't swallow
+            throw err;
+          }
         }
-      } catch (err) {
-        // findElement throws when the element isn't in the tree at all
-        // (e.g. virtualized list hasn't rendered it yet). This is expected
-        // during scrolling — swipe again and retry.
-        if (err instanceof Error && err.message.includes('UNAVAILABLE')) {
-          // gRPC transport error — daemon/agent is down, don't swallow
-          throw err;
+
+        if (i < maxScrolls) {
+          const swipeRes = await this._client.swipe(direction, { speed, distance: 0.6 });
+          if (!swipeRes.success) {
+            throw new Error(swipeRes.errorMessage || 'Swipe failed during scrollIntoView');
+          }
+          await new Promise((resolve) => setTimeout(resolve, SCROLL_SETTLE_MS));
         }
       }
 
-      if (i < maxScrolls) {
-        const swipeRes = await this._client.swipe(direction, { speed, distance: 0.6 });
-        if (!swipeRes.success) {
-          throw new Error(swipeRes.errorMessage || 'Swipe failed during scrollIntoView');
-        }
-        await new Promise((resolve) => setTimeout(resolve, SCROLL_SETTLE_MS));
-      }
+      throw new Error(
+        `scrollIntoView: ${this._describe()} was not visible after ${maxScrolls} scroll(s) in direction "${direction}"`,
+      );
+    } catch (err) {
+      await this._traceQueryFailed('scrollIntoView', err, Date.now() - start);
+      throw err;
     }
-
-    throw new Error(
-      `scrollIntoView: ${this._describe()} was not visible after ${maxScrolls} scroll(s) in direction "${direction}"`,
-    );
   }
 }

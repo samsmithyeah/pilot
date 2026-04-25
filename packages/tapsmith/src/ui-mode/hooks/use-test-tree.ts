@@ -17,12 +17,26 @@ export function useTestTree() {
 
   const setTestTree = useCallback((newFiles: TestTreeNode[]) => {
     setFiles(newFiles);
-    // Expand project nodes only — files and below start collapsed
-    const expanded = new Set<string>();
-    for (const node of newFiles) {
-      if (node.type === 'project') expanded.add(node.id);
-    }
-    setExpandedNodes(expanded);
+    // Preserve previously-expanded nodes whose IDs still exist in the new
+    // tree, then ensure project nodes are always expanded by default.
+    // Without this, every server-side `test-tree` broadcast (including the
+    // one fired on each WebSocket reconnect — e.g. after the laptop wakes
+    // from sleep) would collapse the user's path back to the project root,
+    // making the still-set `selectedTestId` visually invisible.
+    setExpandedNodes((prev) => {
+      const validIds = new Set<string>();
+      (function walk(nodes: TestTreeNode[]) {
+        for (const n of nodes) {
+          validIds.add(n.id);
+          if (n.children) walk(n.children);
+        }
+      })(newFiles);
+
+      const next = new Set<string>();
+      for (const id of prev) if (validIds.has(id)) next.add(id);
+      for (const node of newFiles) if (node.type === 'project') next.add(node.id);
+      return next;
+    });
   }, []);
 
   /** Expand all nodes in the tree. */

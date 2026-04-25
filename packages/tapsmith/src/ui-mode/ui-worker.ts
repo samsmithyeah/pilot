@@ -115,11 +115,12 @@ function setupTraceStreaming(dev: Device): void {
   const collector = dev.tracing._currentCollector;
   if (!collector) return;
 
-  collector.setEventCallback((event: AnyTraceEvent, screenshots) => {
+  collector.setEventCallback((event: AnyTraceEvent, screenshots, lifecycle) => {
     const msg: UIWorkerTraceEventMessage = {
       type: 'trace-event',
       workerId,
       event,
+      lifecycle,
       screenshotBefore: screenshots?.before?.toString('base64'),
       screenshotAfter: screenshots?.after?.toString('base64'),
       hierarchyBefore: screenshots?.hierarchyBefore,

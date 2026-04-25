@@ -1812,6 +1812,7 @@ describe("wrapAssertionWithTrace", () => {
       })),
       captureAfterAction: vi.fn(async () => ({})),
       addAssertionEvent: vi.fn(),
+      _emitAssertionStarted: vi.fn(),
       setPendingOperation: vi.fn(),
       clearPendingOperation: vi.fn(),
       trackPendingCapture: vi.fn(),

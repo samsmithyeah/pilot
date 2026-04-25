@@ -131,6 +131,10 @@ export interface TraceEventMessage {
    * collide on a single trace map entry. */
   projectName?: string
   event: AnyTraceEvent
+  /** Lifecycle stage of the action/assertion. Omitted = legacy completed.
+   * 'started' fires immediately after the before-capture so UI mode can show
+   * an in-progress row with a spinner; 'completed' carries the final result. */
+  lifecycle?: 'started' | 'completed'
   /** Base64-encoded PNG screenshot taken before the action. */
   screenshotBefore?: string
   /** Base64-encoded PNG screenshot taken after the action. */
@@ -447,6 +451,8 @@ export interface UIRunFileDoneMessage {
 export interface UIRunTraceEventMessage {
   type: 'trace-event'
   event: AnyTraceEvent
+  /** Lifecycle stage. Omitted = legacy completed. */
+  lifecycle?: 'started' | 'completed'
   screenshotBefore?: string
   screenshotAfter?: string
   hierarchyBefore?: string
@@ -573,6 +579,8 @@ export interface UIWorkerTraceEventMessage {
   type: 'trace-event'
   workerId: number
   event: AnyTraceEvent
+  /** Lifecycle stage. Omitted = legacy completed. */
+  lifecycle?: 'started' | 'completed'
   screenshotBefore?: string
   screenshotAfter?: string
   hierarchyBefore?: string
