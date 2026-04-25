@@ -781,7 +781,11 @@ async function runSuiteContext(
       // Notify UI mode (lightweight, no device actions) so subsequent trace
       // events can be tagged to this test. Must run before the group starts
       // so the test-start message arrives before any group-start events.
-      if (opts.onTestStart) {
+      // Skip when this is the first test and we already fired test-start
+      // before beforeAll — firing it twice makes the client wipe the
+      // beforeAll events that streamed live in the meantime, which is why
+      // the "beforeAll Hooks" section seemed to disappear in UI mode.
+      if (opts.onTestStart && fullName !== beforeAllFirstFullName) {
         await opts.onTestStart(fullName);
       }
 

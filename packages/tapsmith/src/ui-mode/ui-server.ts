@@ -967,6 +967,7 @@ export async function startUIServer(
               testFullName: currentTestFullName,
               projectName,
               event: response.event,
+              lifecycle: response.lifecycle,
               screenshotBefore: response.screenshotBefore,
               screenshotAfter: response.screenshotAfter,
               hierarchyBefore: response.hierarchyBefore,
@@ -1598,6 +1599,7 @@ export async function startUIServer(
                 testFullName: worker.currentTest ?? '',
                 projectName: worker.currentFile?.projectName,
                 event: msg.event,
+                lifecycle: msg.lifecycle,
                 screenshotBefore: msg.screenshotBefore,
                 screenshotAfter: msg.screenshotAfter,
                 hierarchyBefore: msg.hierarchyBefore,
@@ -2555,6 +2557,22 @@ export async function startUIServer(
 
     // Send current state to new client
     ws.send(JSON.stringify({ type: 'test-tree', files: testTree } satisfies ServerMessage));
+    // Replay accumulated test results so a reconnecting client (e.g. after
+    // the laptop wakes from sleep) sees the same passed/failed statuses it
+    // had before — `test-tree` ships a tree of 'idle' nodes, and individual
+    // `test-status` events aren't buffered.
+    for (const r of testResults.values()) {
+      ws.send(JSON.stringify({
+        type: 'test-status',
+        fullName: r.fullName,
+        filePath: r.filePath,
+        status: r.status,
+        duration: r.duration,
+        error: r.error,
+        tracePath: r.tracePath,
+        projectName: r.projectName,
+      } satisfies ServerMessage));
+    }
     ws.send(JSON.stringify(getMcpStatus()));
 
     if (multiWorker && workersInitialized) {

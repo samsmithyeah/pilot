@@ -125,6 +125,15 @@ export type TraceEventCallback = (
     hierarchyBefore?: string
     hierarchyAfter?: string
   },
+  /**
+   * Lifecycle stage of the event. Omitted for events that don't have a
+   * lifecycle (groups, console, error). For action/assertion events:
+   *   - 'started' fires immediately after the before-capture so UI mode can
+   *     render an in-progress row with a spinner; the event has placeholder
+   *     duration/success/passed and is NOT pushed to the persistent _events.
+   *   - 'completed' (or omitted) is the existing behavior.
+   */
+  lifecycle?: 'started' | 'completed',
 ) => void
 
 export class TraceCollector {
@@ -475,7 +484,7 @@ export class TraceCollector {
     this._events.push(full);
     const pending = this._pendingCaptures.get(this._actionIndex);
     this._pendingCaptures.delete(this._actionIndex);
-    this._onEvent?.(full, pending);
+    this._onEvent?.(full, pending, 'completed');
     this._actionIndex++;
   }
 
@@ -493,8 +502,75 @@ export class TraceCollector {
     this._events.push(full);
     const pending = this._pendingCaptures.get(this._actionIndex);
     this._pendingCaptures.delete(this._actionIndex);
-    this._onEvent?.(full, pending);
+    this._onEvent?.(full, pending, 'completed');
     this._actionIndex++;
+  }
+
+  /**
+   * Emit a "started" lifecycle signal for the in-flight action so UI mode
+   * can render an in-progress row with a spinner. Streams via _onEvent only —
+   * does NOT push to _events (saved trace archives carry only completed
+   * events) and does NOT increment _actionIndex (the matching addActionEvent
+   * will own the index).
+   *
+   * Caller passes the partial set of fields known at action start; the
+   * collector fills in type/actionIndex/timestamp and the placeholder
+   * `duration`/`success` fields needed to satisfy the ActionTraceEvent shape.
+   */
+  _emitActionStarted(
+    partial: Omit<
+      ActionTraceEvent,
+      'type' | 'actionIndex' | 'timestamp' | 'duration' | 'success'
+        | 'hasScreenshotAfter' | 'hasHierarchyAfter'
+    > & {
+      hasScreenshotAfter?: boolean
+      hasHierarchyAfter?: boolean
+    },
+  ): void {
+    if (!this._onEvent) return;
+    // Flush any pending group-starts so UI mode renders the group header
+    // (e.g. "beforeEach Hooks") immediately when the first action in the
+    // group goes in-flight, rather than only after it completes. Once
+    // streamed, the group is no longer eligible for the empty-group drop
+    // optimization — but if a started signal fires, content is incoming.
+    this._flushPendingGroups();
+    const full = {
+      ...partial,
+      type: 'action',
+      actionIndex: this._actionIndex,
+      timestamp: Date.now(),
+      duration: 0,
+      success: true,
+      hasScreenshotAfter: partial.hasScreenshotAfter ?? false,
+      hasHierarchyAfter: partial.hasHierarchyAfter ?? false,
+    } as ActionTraceEvent;
+    const pending = this._pendingCaptures.get(this._actionIndex);
+    this._onEvent(full, pending, 'started');
+  }
+
+  /**
+   * Emit a "started" lifecycle signal for an in-flight assertion. See
+   * _emitActionStarted for semantics — this is the assertion variant.
+   */
+  _emitAssertionStarted(
+    partial: Omit<
+      AssertionTraceEvent,
+      'type' | 'actionIndex' | 'timestamp' | 'duration' | 'attempts' | 'passed'
+    >,
+  ): void {
+    if (!this._onEvent) return;
+    this._flushPendingGroups();
+    const full = {
+      ...partial,
+      type: 'assertion',
+      actionIndex: this._actionIndex,
+      timestamp: Date.now(),
+      duration: 0,
+      attempts: 0,
+      passed: true,
+    } as AssertionTraceEvent;
+    const pending = this._pendingCaptures.get(this._actionIndex);
+    this._onEvent(full, pending, 'started');
   }
 
   // ── Groups ──

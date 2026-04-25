@@ -327,6 +327,7 @@ describe('APIRequestContext', () => {
   describe('trace integration', () => {
     let mockCollector: {
       addActionEvent: ReturnType<typeof vi.fn>
+      _emitActionStarted: ReturnType<typeof vi.fn>
       currentActionIndex: number
     };
 
@@ -335,6 +336,7 @@ describe('APIRequestContext', () => {
         addActionEvent: vi.fn(() => {
           mockCollector.currentActionIndex++;
         }),
+        _emitActionStarted: vi.fn(),
         currentActionIndex: 0,
       };
     });
