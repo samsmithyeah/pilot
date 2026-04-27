@@ -14,6 +14,10 @@ interface Props {
   /** UI mode only — the action/assertion currently in flight on the device.
    * Renders an extra row at the end of the list with a spinner. */
   inFlightAction?: InFlightAction | null
+  /** UI mode only — pre-flight progress text from the device-setup phase
+   * (e.g. "installing app demo.apk"). Replaces the empty state with a
+   * spinner + message while no actions have run yet. */
+  preflightMessage?: string
 }
 
 // Simple text-based icons — no emoji
@@ -104,7 +108,7 @@ function getSelectorDisplay(event: ActionTraceEvent | AssertionTraceEvent): stri
   }
 }
 
-export function ActionsPanel({ events, actionEvents, selectedIndex, pinnedIndex, onHover, onPin, metadata, showMetadata, inFlightAction }: Props) {
+export function ActionsPanel({ events, actionEvents, selectedIndex, pinnedIndex, onHover, onPin, metadata, showMetadata, inFlightAction, preflightMessage }: Props) {
   const [tab, setTab] = useState<'actions' | 'metadata'>('actions');
   const [filter, setFilter] = useState('');
   const selectedRef = useRef<HTMLDivElement>(null);
@@ -235,6 +239,12 @@ export function ActionsPanel({ events, actionEvents, selectedIndex, pinnedIndex,
               })()}
             </div>
           </>
+        ) : preflightMessage ? (
+          <div class="ui-empty-state preflight">
+            <div class="action-spinner preflight-spinner" aria-label="running" />
+            <div class="ui-empty-title">Running</div>
+            <div class="ui-empty-hint">{preflightMessage}</div>
+          </div>
         ) : (
           <div class="ui-empty-state">
             <div class="ui-empty-icon">{'\u25b6'}</div>

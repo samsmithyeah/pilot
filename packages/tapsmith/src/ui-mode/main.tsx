@@ -94,7 +94,7 @@ function App() {
 
   const { runElapsed, startRunTimer, stopRunTimer } = useRunTimer();
 
-  const tree = useTestTree();
+  const tree = useTestTree(isRunning);
   // Ref to tree methods so handleMessage doesn't depend on the tree object
   // (which is recreated each render), preventing useCallback churn.
   const treeRef = useRef(tree);
@@ -475,31 +475,25 @@ function App() {
           testWorkerMapRef.current.set(statusKey, msg.workerId);
         }
         treeRef.current.updateTestStatus(msg.fullName, msg.filePath, msg.status, msg.duration, msg.error, msg.projectName);
-        // Test ended — clear any stale in-flight slot so the spinner doesn't
-        // linger if a completed event was dropped (e.g. abrupt exit).
+        // Single reducer: clear any stale in-flight slot AND store tracePath
+        // (when present) in one render. Test end implies pre-flight done and
+        // any spinner should clear; on reconnect we may have no entry yet
+        // for this test, in which case stub one so the Download Trace
+        // button can appear.
         setTestTraces((prev) => {
-          const data = prev.get(statusKey);
-          if (!data || data.inFlightAction == null) {
-            // Still need to apply tracePath below, fall through to the next setter.
-            return prev;
-          }
+          const existing = prev.get(statusKey);
+          const needsClear = existing?.inFlightAction != null;
+          if (!existing && !msg.tracePath) return prev;
+          if (existing && !needsClear && !msg.tracePath) return prev;
+          const data = existing ?? emptyTraceData(msg.filePath);
           const next = new Map(prev);
-          next.set(statusKey, { ...data, inFlightAction: null });
+          next.set(statusKey, {
+            ...data,
+            inFlightAction: null,
+            ...(msg.tracePath ? { tracePath: msg.tracePath } : {}),
+          });
           return next;
         });
-        if (msg.tracePath) {
-          setTestTraces((prev) => {
-            // On reconnect we replay test-status for tests that completed
-            // before the connection drop. The client's trace map has no
-            // entry for those tests (events are streamed live and never
-            // refetched), so create a stub so the tracePath is at least
-            // saved — without it the Download Trace button can't appear.
-            const data = prev.get(statusKey) ?? emptyTraceData(msg.filePath);
-            const next = new Map(prev);
-            next.set(statusKey, { ...data, tracePath: msg.tracePath });
-            return next;
-          });
-        }
         // Auto-expand tree path to failing test, select it, and pin the failing action
         if (msg.status === 'failed') {
           treeRef.current.expandPathTo(msg.fullName, msg.filePath, msg.projectName);
@@ -538,7 +532,7 @@ function App() {
         const ev = msg.event;
         // Skip internal marker events from the visible event lists and from
         // auto-pin — their actionIndex is one past the last real event.
-        const isInternal = ev.type === 'action' && (ev as ActionTraceEvent).action === '__final_screenshot';
+        const isInternal = ev.type === 'action' && ev.action === '__final_screenshot';
         const isStarted = msg.lifecycle === 'started';
 
         setTestTraces((prev) => {
@@ -607,19 +601,19 @@ function App() {
               ? {
                   actionIndex: ev.actionIndex,
                   kind: 'action',
-                  label: (ev as ActionTraceEvent).action,
+                  label: ev.action,
                   selector: ev.selector,
                   failed: false,
                   startedAt: ev.timestamp,
                   bounds: inheritedBounds,
-                  point: (ev as ActionTraceEvent).point,
+                  point: ev.point,
                   hasScreenshotBefore: hasShotBefore,
                   hasHierarchyBefore: hasHierBefore,
                 }
               : {
                   actionIndex: ev.actionIndex,
                   kind: 'assertion',
-                  label: (ev as AssertionTraceEvent).assertion,
+                  label: ev.assertion,
                   selector: ev.selector,
                   failed: false,
                   startedAt: ev.timestamp,
@@ -646,7 +640,7 @@ function App() {
           }
           const events = isInternal ? data.events : [...data.events, eventToStore];
           const actionEvents = (!isInternal && (eventToStore.type === 'action' || eventToStore.type === 'assertion'))
-            ? [...data.actionEvents, eventToStore as ActionTraceEvent | AssertionTraceEvent]
+            ? [...data.actionEvents, eventToStore]
             : data.actionEvents;
 
           // Clear in-flight slot when the matching completion arrives.
@@ -868,6 +862,20 @@ function App() {
 
   // ─── Download trace ───
 
+  // Show an in-progress empty state in the Actions tab whenever the
+  // currently-viewed test is pending (play clicked, server hasn't yet
+  // confirmed the run started) or running but no action has streamed
+  // yet. The test explorer tree pulses across exactly this same window;
+  // this mirrors the visual on the Actions side so the panel doesn't
+  // look frozen during the IPC dispatch + ESM import + hooks-before-
+  // first-action gap.
+  const preflightMessage = useMemo<string | undefined>(() => {
+    if (!viewedTestNode) return undefined;
+    const isPending = tree.pendingIds.has(viewedTestNode.id);
+    const isRunning = viewedTestNode.status === 'running';
+    return isPending || isRunning ? 'Waiting for first action…' : undefined;
+  }, [viewedTestNode, tree.pendingIds]);
+
   const handleDownloadTrace = useCallback(async () => {
     if (!viewedTestName || !currentTrace?.tracePath) return;
     try {
@@ -930,6 +938,8 @@ function App() {
           onSend={handleSend}
           onStop={() => { send({ type: 'stop-run' }); setIsStopping(true); }}
           onToggleRunDeps={handleToggleRunDeps}
+          pendingIds={tree.pendingIds}
+          onSetPending={tree.setPending}
         />
       }
       filmstrip={
@@ -952,6 +962,7 @@ function App() {
           metadata={metadata}
           showMetadata={viewedTestNode?.type === 'test'}
           inFlightAction={currentTrace?.inFlightAction}
+          preflightMessage={preflightMessage}
         />
       }
       screenshotPanel={

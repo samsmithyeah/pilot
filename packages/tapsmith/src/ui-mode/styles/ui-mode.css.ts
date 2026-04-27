@@ -771,6 +771,11 @@ html, body, #app {
 .action-item.in-progress .action-icon { color: var(--color-text-muted); }
 .action-spinner { width: 12px; height: 12px; flex-shrink: 0; margin-left: auto; border: 2px solid var(--color-spinner-track); border-top-color: var(--color-accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
 
+/* Preflight empty state — shown in the Actions tab while the device is
+   being set up (worker progress streaming) and no actions have run yet.
+   Reuses the base .ui-empty-state flex layout; just sizes up the spinner. */
+.action-spinner.preflight-spinner { width: 24px; height: 24px; margin-left: 0; border-width: 3px; }
+
 .group-item { padding: 4px 10px; color: var(--color-text-muted); font-size: 11px; font-weight: 600; border-left: 2px solid var(--color-accent); background: var(--color-bg-group); }
 .group-item.lifecycle { border-left: none; background: var(--color-bg); color: var(--color-text-faint); font-size: 10px; text-transform: uppercase; letter-spacing: 1px; padding: 6px 10px 3px; margin-top: 2px; }
 
