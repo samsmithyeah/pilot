@@ -160,20 +160,18 @@ export function useTestTree(isRunning: boolean = false) {
     }
   }, [files, pendingIds]);
 
-  // Clear all pending when a run stops — only react to isRunning
-  // transitioning to false, NOT to pendingIds changing. Including pendingIds
-  // would immediately clear the pending state set by setPending() because
-  // isRunning is still false when the user clicks play (the server hasn't
-  // broadcast run-start yet).
-  const wasRunningRef = useRef(false);
+  // Clear all pending when isRunning transitions true → false (run ends).
+  // pendingIds is read via ref so the effect only fires on isRunning changes
+  // — including it as a dep would immediately clear pending set by
+  // setPending() because isRunning is still false at click time.
+  const pendingIdsRef = useRef(pendingIds);
+  pendingIdsRef.current = pendingIds;
   useEffect(() => {
-    const wasRunning = wasRunningRef.current;
-    wasRunningRef.current = isRunning;
-    if (wasRunning && !isRunning && pendingIds.size > 0) {
+    if (!isRunning && pendingIdsRef.current.size > 0) {
       pendingSnapshots.current.clear();
       setPendingIds(new Set());
     }
-  }, [isRunning, pendingIds]);
+  }, [isRunning]);
 
   /** Mark a node (and its subtree + ancestor chain) as pending — call when
    * the user clicks play, before the server has confirmed the run has

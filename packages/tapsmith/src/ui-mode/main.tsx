@@ -36,6 +36,14 @@ import { parseHierarchyXml } from '../trace-viewer/components/hierarchy-utils.js
 import type { HierarchyNode, Bounds } from '../trace-viewer/components/hierarchy-utils.js';
 import { uiModeStyles } from './styles/ui-mode.css.js';
 
+type ElementBounds = { left: number; top: number; right: number; bottom: number }
+
+function lastBoundsFrom(actionEvents: readonly (ActionTraceEvent | AssertionTraceEvent)[]): ElementBounds | undefined {
+  for (let i = actionEvents.length - 1; i >= 0; i--) {
+    if (actionEvents[i].bounds) return actionEvents[i].bounds;
+  }
+}
+
 // ─── App ───
 
 function App() {
@@ -583,16 +591,7 @@ function App() {
           // Started: set the in-flight slot, do NOT append to events/actionEvents.
           // The matching 'completed' event will land at the same actionIndex.
           if (isStarted && !isInternal && (ev.type === 'action' || ev.type === 'assertion')) {
-            // Inherit bounds from the most recent completed action when the
-            // started signal lacks them (e.g. assertions chained off a find).
-            // Without this the in-flight overlay flickers off between actions.
-            let inheritedBounds = ev.bounds;
-            if (!inheritedBounds) {
-              const prevWithBounds = [...data.actionEvents].reverse().find((e) =>
-                (e.type === 'action' || e.type === 'assertion') && e.bounds
-              );
-              if (prevWithBounds?.bounds) inheritedBounds = prevWithBounds.bounds;
-            }
+            const inheritedBounds = ev.bounds ?? lastBoundsFrom(data.actionEvents);
             // ev is narrowed to ActionTraceEvent | AssertionTraceEvent here;
             // both have these flags (assertion's are optional, hence the ??).
             const hasShotBefore = !!ev.hasScreenshotBefore;
@@ -627,16 +626,12 @@ function App() {
           }
 
           // Completed (or no lifecycle = legacy completed). Append event.
-          // For assertions/actions without bounds, inherit from the most
-          // recent action that had bounds (e.g. find() → toBe() chain).
+          // Inherit bounds from the most recent action when missing (e.g.
+          // find() → toBe() chain where the assertion has no bounds of its own).
           let eventToStore = ev;
-          if ((ev.type === 'assertion' && !ev.bounds) || (ev.type === 'action' && !ev.bounds)) {
-            const prevWithBounds = [...data.actionEvents].reverse().find((e) =>
-              (e.type === 'action' || e.type === 'assertion') && e.bounds
-            );
-            if (prevWithBounds?.bounds) {
-              eventToStore = { ...ev, bounds: prevWithBounds.bounds };
-            }
+          if ((ev.type === 'assertion' || ev.type === 'action') && !ev.bounds) {
+            const inherited = lastBoundsFrom(data.actionEvents);
+            if (inherited) eventToStore = { ...ev, bounds: inherited };
           }
           const events = isInternal ? data.events : [...data.events, eventToStore];
           const actionEvents = (!isInternal && (eventToStore.type === 'action' || eventToStore.type === 'assertion'))
