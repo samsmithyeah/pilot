@@ -860,6 +860,15 @@ function App() {
     }
   }, [viewedTraceKey, workers.length, send]);
 
+  // When the user clicks a completed test, pin to the last action so they
+  // see the final state rather than the first action.
+  useEffect(() => {
+    if (viewedTraceKey && autoFollowRef.current === 'manual' && actionEvents.length > 0) {
+      setPinnedIndex(actionEvents.length - 1);
+      setHoveredIndex(null);
+    }
+  }, [viewedTraceKey]);
+
   const handleSelectDeviceView = useCallback((mode: 'all' | number) => {
     setDeviceViewMode(mode);
     if (typeof mode === 'number') {
