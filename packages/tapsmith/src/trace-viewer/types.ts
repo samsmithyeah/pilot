@@ -7,6 +7,8 @@
  * for types it owns the rendering of.
  */
 
+import type { ActionCategory } from '../trace/types.js';
+
 /**
  * In-flight action/assertion currently being executed by the device.
  * Consumed by ActionsPanel to render the in-progress row with a spinner.
@@ -17,6 +19,7 @@
 export interface InFlightAction {
   actionIndex: number
   kind: 'action' | 'assertion'
+  category: ActionCategory
   /** Display label, e.g. "tap" or "toBeVisible". */
   label: string
   /** Serialized selector JSON (action) or selector string (assertion). */

@@ -278,7 +278,7 @@ function App() {
         type: 'action',
         actionIndex: inFlight.actionIndex,
         timestamp: inFlight.startedAt,
-        category: 'other',
+        category: inFlight.category,
         action: inFlight.label,
         selector: inFlight.selector,
         duration: 0,
@@ -600,6 +600,7 @@ function App() {
               ? {
                   actionIndex: ev.actionIndex,
                   kind: 'action',
+                  category: ev.category,
                   label: ev.action,
                   selector: ev.selector,
                   failed: false,
@@ -612,6 +613,7 @@ function App() {
               : {
                   actionIndex: ev.actionIndex,
                   kind: 'assertion',
+                  category: 'other',
                   label: ev.assertion,
                   selector: ev.selector,
                   failed: false,
