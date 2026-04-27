@@ -602,6 +602,7 @@ impl TapsmithServiceImpl {
                 }
                 _ => {
                     info!(%serial, "Cleaning up Android proxy settings on shutdown");
+                    adb::cleanup_iptables_redirect(serial).await;
                     if let Err(e) = adb::shell(serial, "settings put global http_proxy :0").await {
                         warn!(%serial, "Failed to reset http_proxy on shutdown: {e}");
                     }
@@ -3403,16 +3404,31 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                     error!("Failed to set up adb reverse: {e}");
                 }
 
-                let proxy_setting = format!("127.0.0.1:{device_port}");
-                info!(%serial, %proxy_setting, host_port, "Configuring device HTTP proxy via adb reverse");
+                info!(%serial, device_port, host_port, "Configuring Android proxy");
 
-                if let Err(e) = adb::shell(
-                    &serial,
-                    &format!("settings put global http_proxy {proxy_setting}"),
-                )
-                .await
-                {
-                    error!("Failed to set device proxy: {e}");
+                // PILOT-187: Use iptables transparent redirect instead of the
+                // system HTTP proxy setting. Some Android HTTP clients (notably
+                // React Native's fetch/OkHttp) don't issue CONNECT tunnels for
+                // HTTPS through the system proxy, causing HTTPS traffic to be
+                // recorded as http://. Transparent redirect intercepts at the
+                // TCP level, so TLS is correctly detected from the ClientHello.
+                let iptables_ok = adb::setup_iptables_redirect(&serial, device_port).await;
+                if !iptables_ok {
+                    // Fallback: set the system HTTP proxy for non-rooted devices
+                    // or emulators where iptables is unavailable.
+                    warn!(
+                        %serial,
+                        "iptables redirect unavailable, falling back to system HTTP proxy"
+                    );
+                    let proxy_setting = format!("127.0.0.1:{device_port}");
+                    if let Err(e) = adb::shell(
+                        &serial,
+                        &format!("settings put global http_proxy {proxy_setting}"),
+                    )
+                    .await
+                    {
+                        error!("Failed to set device proxy: {e}");
+                    }
                 }
                 *self.proxy_reverse_port.write().await = Some(device_port);
             }
@@ -3487,7 +3503,8 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                     info!(%serial, "iOS proxy stopped");
                 }
                 _ => {
-                    info!(%serial, "Reverting Android device HTTP proxy");
+                    info!(%serial, "Reverting Android proxy configuration");
+                    adb::cleanup_iptables_redirect(serial).await;
                     if let Err(e) = adb::shell(serial, "settings put global http_proxy :0").await {
                         warn!(%serial, "Failed to reset http_proxy: {e}");
                     }
