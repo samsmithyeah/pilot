@@ -83,6 +83,16 @@ export async function tracedAction(
     ctx.collector.captureBeforeAction(ctx.takeScreenshot, ctx.captureHierarchy),
   ]);
 
+  // Stream a "started" lifecycle signal so UI mode can render an in-flight
+  // row with a spinner immediately. The matching addActionEvent below will
+  // emit at the same actionIndex with lifecycle='completed'.
+  ctx.collector._emitActionStarted({
+    category, action, selector: selectorStr, inputValue: extra?.inputValue,
+    bounds, point, sourceLocation, log: [...log],
+    hasScreenshotBefore: !!beforeCaptures.screenshotBefore,
+    hasHierarchyBefore: !!beforeCaptures.hierarchyBefore,
+  });
+
   const start = Date.now();
   let success = true;
   let error: string | undefined;

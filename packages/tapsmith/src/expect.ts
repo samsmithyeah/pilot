@@ -277,6 +277,21 @@ function wrapAssertionWithTrace(
       trace.captureHierarchy,
     );
 
+    // Stream a "started" lifecycle signal so UI mode can render an in-flight
+    // row with a spinner — auto-waiting assertions like toBeVisible can poll
+    // for up to 30s before emitting their completed event.
+    trace.collector._emitAssertionStarted({
+      assertion: (negated ? "not." : "") + name,
+      selector: selectorStr,
+      sourceLocation,
+      soft: false,
+      negated,
+      hasScreenshotBefore: !!beforeCaptures.screenshotBefore,
+      hasScreenshotAfter: false,
+      hasHierarchyBefore: !!beforeCaptures.hierarchyBefore,
+      hasHierarchyAfter: false,
+    });
+
     let passed = true;
     let error: string | undefined;
     let caughtErr: unknown;
@@ -1598,6 +1613,20 @@ function createWebViewAssertions(
       traceCtx.takeScreenshot,
       traceCtx.captureHierarchy,
     );
+
+    // Stream a "started" lifecycle signal so UI mode can render an in-flight
+    // row with a spinner during the WebView assertion's poll loop.
+    traceCtx.collector._emitAssertionStarted({
+      assertion: (negated ? "not." : "") + name,
+      selector: selectorStr,
+      sourceLocation,
+      soft: false,
+      negated,
+      hasScreenshotBefore: !!beforeCaptures.screenshotBefore,
+      hasScreenshotAfter: false,
+      hasHierarchyBefore: !!beforeCaptures.hierarchyBefore,
+      hasHierarchyAfter: false,
+    });
 
     let passed = true;
     let error: string | undefined;

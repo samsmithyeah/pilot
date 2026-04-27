@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'preact/hooks';
 import type { AnyTraceEvent, ActionTraceEvent, AssertionTraceEvent, GroupTraceEvent, TraceMetadata } from '../../trace/types.js';
+import type { InFlightAction } from '../types.js';
 
 interface Props {
   events: AnyTraceEvent[]
@@ -10,6 +11,13 @@ interface Props {
   onPin: (index: number) => void
   metadata: TraceMetadata
   showMetadata?: boolean
+  /** UI mode only — the action/assertion currently in flight on the device.
+   * Renders an extra row at the end of the list with a spinner. */
+  inFlightAction?: InFlightAction | null
+  /** UI mode only — pre-flight progress text from the device-setup phase
+   * (e.g. "installing app demo.apk"). Replaces the empty state with a
+   * spinner + message while no actions have run yet. */
+  preflightMessage?: string
 }
 
 // Simple text-based icons — no emoji
@@ -57,13 +65,14 @@ function getIcon(event: ActionTraceEvent | AssertionTraceEvent): [string, string
   return ACTION_ICONS[event.action] ?? ['\u2022', 'tap'];
 }
 
-function getLabel(event: ActionTraceEvent | AssertionTraceEvent): string {
-  if (event.type === 'assertion') return event.assertion;
-  return event.action;
+function getInFlightIcon(item: InFlightAction): [string, string] {
+  // Use a neutral bullet for in-flight assertions — the tick (✓) implies
+  // a passed assertion, but at this point the assertion is still polling.
+  if (item.kind === 'assertion') return ['•', ''];
+  return ACTION_ICONS[item.label] ?? ['•', ''];
 }
 
-function getSelectorDisplay(event: ActionTraceEvent | AssertionTraceEvent): string {
-  const sel = event.selector;
+function parseSelectorString(sel: string | undefined): string {
   if (!sel) return '';
   try {
     const parsed = JSON.parse(sel);
@@ -78,7 +87,16 @@ function getSelectorDisplay(event: ActionTraceEvent | AssertionTraceEvent): stri
   }
 }
 
-export function ActionsPanel({ events, actionEvents, selectedIndex, pinnedIndex, onHover, onPin, metadata, showMetadata }: Props) {
+function getLabel(event: ActionTraceEvent | AssertionTraceEvent): string {
+  if (event.type === 'assertion') return event.assertion;
+  return event.action;
+}
+
+function getSelectorDisplay(event: ActionTraceEvent | AssertionTraceEvent): string {
+  return parseSelectorString(event.selector);
+}
+
+export function ActionsPanel({ events, actionEvents, selectedIndex, pinnedIndex, onHover, onPin, metadata, showMetadata, inFlightAction, preflightMessage }: Props) {
   const [tab, setTab] = useState<'actions' | 'metadata'>('actions');
   const [filter, setFilter] = useState('');
   const selectedRef = useRef<HTMLDivElement>(null);
@@ -112,6 +130,17 @@ export function ActionsPanel({ events, actionEvents, selectedIndex, pinnedIndex,
 
   const filterLower = filter.toLowerCase();
 
+  // Index assigned to the in-flight row — slots in right after the last
+  // completed action so its actionIndex matches the global index that the
+  // matching `addActionEvent` will eventually own. Auto-pin in main.tsx
+  // sets pinnedIndex to that same value, so the in-flight row highlights.
+  const inFlightItemIndex = actionIdx;
+  const inFlightSelector = inFlightAction ? parseSelectorString(inFlightAction.selector) : '';
+  const inFlightMatchesFilter = !filterLower || !inFlightAction
+    || inFlightAction.label.toLowerCase().includes(filterLower)
+    || inFlightSelector.toLowerCase().includes(filterLower);
+  const showInFlight = !!inFlightAction && inFlightMatchesFilter;
+
   return (
     <div class="actions-panel">
       <div class="actions-header">
@@ -120,7 +149,7 @@ export function ActionsPanel({ events, actionEvents, selectedIndex, pinnedIndex,
       </div>
 
       {tab === 'actions' && (
-        items.length > 0 ? (
+        (items.length > 0 || showInFlight) ? (
           <>
             <div class="actions-filter">
               <input
@@ -174,8 +203,36 @@ export function ActionsPanel({ events, actionEvents, selectedIndex, pinnedIndex,
                   </div>
                 );
               })}
+              {showInFlight && inFlightAction && (() => {
+                const isSelected = inFlightItemIndex === selectedIndex;
+                const isPinned = inFlightItemIndex === pinnedIndex;
+                const [icon, iconClass] = getInFlightIcon(inFlightAction);
+                return (
+                  <div
+                    key={`a-inflight-${inFlightAction.actionIndex}`}
+                    ref={isSelected ? selectedRef : undefined}
+                    class={`action-item in-progress${isSelected ? ' selected' : ''}${isPinned ? ' pinned' : ''}`}
+                    onMouseEnter={() => onHover(inFlightItemIndex)}
+                    onMouseLeave={() => onHover(null)}
+                    onClick={() => onPin(inFlightItemIndex)}
+                  >
+                    <span class={`action-icon ${iconClass}`}>{icon}</span>
+                    <div class="action-details">
+                      <span class="action-name">{inFlightAction.label}</span>
+                      {inFlightSelector && <span class="action-selector-text">{inFlightSelector}</span>}
+                    </div>
+                    <span class="action-spinner" aria-label="running" />
+                  </div>
+                );
+              })()}
             </div>
           </>
+        ) : preflightMessage ? (
+          <div class="ui-empty-state preflight">
+            <div class="action-spinner preflight-spinner" aria-label="running" />
+            <div class="ui-empty-title">Running</div>
+            <div class="ui-empty-hint">{preflightMessage}</div>
+          </div>
         ) : (
           <div class="ui-empty-state">
             <div class="ui-empty-icon">{'\u25b6'}</div>

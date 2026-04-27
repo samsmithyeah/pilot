@@ -16,6 +16,7 @@ import {
   EMPTY_ACTION_EVENTS,
   EMPTY_NETWORK,
   type TestTraceData,
+  type InFlightAction,
 } from './hooks/use-trace-data.js';
 import { useScreenMirror, useMultiScreenMirror } from './hooks/use-screen-mirror.js';
 import { useTestTree } from './hooks/use-test-tree.js';
@@ -34,6 +35,14 @@ import { SelectorTab, handlePickFromScreenshot, handleHoverFromScreenshot } from
 import { parseHierarchyXml } from '../trace-viewer/components/hierarchy-utils.js';
 import type { HierarchyNode, Bounds } from '../trace-viewer/components/hierarchy-utils.js';
 import { uiModeStyles } from './styles/ui-mode.css.js';
+
+type ElementBounds = { left: number; top: number; right: number; bottom: number }
+
+function lastBoundsFrom(actionEvents: readonly (ActionTraceEvent | AssertionTraceEvent)[]): ElementBounds | undefined {
+  for (let i = actionEvents.length - 1; i >= 0; i--) {
+    if (actionEvents[i].bounds) return actionEvents[i].bounds;
+  }
+}
 
 // ─── App ───
 
@@ -93,7 +102,7 @@ function App() {
 
   const { runElapsed, startRunTimer, stopRunTimer } = useRunTimer();
 
-  const tree = useTestTree();
+  const tree = useTestTree(isRunning);
   // Ref to tree methods so handleMessage doesn't depend on the tree object
   // (which is recreated each render), preventing useCallback churn.
   const treeRef = useRef(tree);
@@ -256,7 +265,50 @@ function App() {
     error: viewedTestNode?.error,
   }), [viewedTestName, viewedTestFile, viewedTestNode, isRunning, actionEvents.length, screenshots.size, testDeviceSerial, tapsmithVersion]);
 
-  const selectedEvent = actionEvents[selectedIndex];
+  // Prefer a real completed event at this index; fall back to a synthesized
+  // one from the in-flight slot so ScreenshotPanel can render the before-
+  // screenshot (and overlay bounds, if any) while the action is running.
+  const selectedEvent = useMemo<ActionTraceEvent | AssertionTraceEvent | undefined>(() => {
+    const completed = actionEvents[selectedIndex];
+    if (completed) return completed;
+    const inFlight = currentTrace?.inFlightAction;
+    if (!inFlight || inFlight.actionIndex !== selectedIndex) return undefined;
+    if (inFlight.kind === 'action') {
+      return {
+        type: 'action',
+        actionIndex: inFlight.actionIndex,
+        timestamp: inFlight.startedAt,
+        category: inFlight.category,
+        action: inFlight.label,
+        selector: inFlight.selector,
+        duration: 0,
+        success: true,
+        bounds: inFlight.bounds,
+        point: inFlight.point,
+        hasScreenshotBefore: inFlight.hasScreenshotBefore,
+        hasScreenshotAfter: false,
+        hasHierarchyBefore: inFlight.hasHierarchyBefore,
+        hasHierarchyAfter: false,
+      } satisfies ActionTraceEvent;
+    }
+    return {
+      type: 'assertion',
+      actionIndex: inFlight.actionIndex,
+      timestamp: inFlight.startedAt,
+      assertion: inFlight.label,
+      selector: inFlight.selector,
+      passed: true,
+      soft: false,
+      negated: false,
+      duration: 0,
+      attempts: 0,
+      bounds: inFlight.bounds,
+      hasScreenshotBefore: inFlight.hasScreenshotBefore,
+      hasScreenshotAfter: false,
+      hasHierarchyBefore: inFlight.hasHierarchyBefore,
+      hasHierarchyAfter: false,
+    } satisfies AssertionTraceEvent;
+  }, [actionEvents, selectedIndex, currentTrace?.inFlightAction]);
 
   // Hierarchy XML for the current action (used by selector playground)
   const currentHierarchyXml = useMemo(() => {
@@ -371,6 +423,19 @@ function App() {
         stopRunTimer();
         // Clear any tests/suites/files stuck in 'running' (e.g. after stop).
         treeRef.current.resetRunningStatuses();
+        // Clear any in-flight slots that didn't receive a completed event
+        // (e.g. run aborted mid-action) so spinners don't linger.
+        setTestTraces((prev) => {
+          let changed = false;
+          const next = new Map(prev);
+          for (const [k, data] of prev) {
+            if (data.inFlightAction != null) {
+              next.set(k, { ...data, inFlightAction: null });
+              changed = true;
+            }
+          }
+          return changed ? next : prev;
+        });
         break;
       case 'test-start': {
         const key = traceKey(msg.projectName, msg.fullName);
@@ -418,15 +483,25 @@ function App() {
           testWorkerMapRef.current.set(statusKey, msg.workerId);
         }
         treeRef.current.updateTestStatus(msg.fullName, msg.filePath, msg.status, msg.duration, msg.error, msg.projectName);
-        if (msg.tracePath) {
-          setTestTraces((prev) => {
-            const data = prev.get(statusKey);
-            if (!data) return prev;
-            const next = new Map(prev);
-            next.set(statusKey, { ...data, tracePath: msg.tracePath });
-            return next;
+        // Single reducer: clear any stale in-flight slot AND store tracePath
+        // (when present) in one render. Test end implies pre-flight done and
+        // any spinner should clear; on reconnect we may have no entry yet
+        // for this test, in which case stub one so the Download Trace
+        // button can appear.
+        setTestTraces((prev) => {
+          const existing = prev.get(statusKey);
+          const needsClear = existing?.inFlightAction != null;
+          if (!existing && !msg.tracePath) return prev;
+          if (existing && !needsClear && !msg.tracePath) return prev;
+          const data = existing ?? emptyTraceData(msg.filePath);
+          const next = new Map(prev);
+          next.set(statusKey, {
+            ...data,
+            inFlightAction: null,
+            ...(msg.tracePath ? { tracePath: msg.tracePath } : {}),
           });
-        }
+          return next;
+        });
         // Auto-expand tree path to failing test, select it, and pin the failing action
         if (msg.status === 'failed') {
           treeRef.current.expandPathTo(msg.fullName, msg.filePath, msg.projectName);
@@ -465,43 +540,31 @@ function App() {
         const ev = msg.event;
         // Skip internal marker events from the visible event lists and from
         // auto-pin — their actionIndex is one past the last real event.
-        const isInternal = ev.type === 'action' && (ev as ActionTraceEvent).action === '__final_screenshot';
+        const isInternal = ev.type === 'action' && ev.action === '__final_screenshot';
+        const isStarted = msg.lifecycle === 'started';
 
         setTestTraces((prev) => {
           const { data, map } = getOrCreateTrace(key, prev);
 
-          // Append event. For assertions without bounds, inherit from the
-          // most recent action that had bounds (e.g. find() → toBe() chain).
-          let eventToStore = ev;
-          if ((ev.type === 'assertion' && !ev.bounds) || (ev.type === 'action' && !ev.bounds)) {
-            const prevWithBounds = [...data.actionEvents].reverse().find((e) =>
-              (e.type === 'action' || e.type === 'assertion') && e.bounds
-            );
-            if (prevWithBounds?.bounds) {
-              eventToStore = { ...ev, bounds: prevWithBounds.bounds };
-            }
-          }
-          const events = isInternal ? data.events : [...data.events, eventToStore];
-          const actionEvents = (!isInternal && (eventToStore.type === 'action' || eventToStore.type === 'assertion'))
-            ? [...data.actionEvents, eventToStore as ActionTraceEvent | AssertionTraceEvent]
-            : data.actionEvents;
-
-          // Store screenshots/hierarchies
+          // Always store before-screenshot/hierarchy at action-XXX-before so
+          // the screenshot panel can display device state during execution.
+          // Both 'started' and 'completed' carry the same before-capture, so
+          // this runs identically for both branches.
           const screenshots = new Map(data.screenshots);
           const hierarchies = new Map(data.hierarchies);
           if (ev.type === 'action' || ev.type === 'assertion') {
             const pad = String(ev.actionIndex).padStart(3, '0');
             if (msg.screenshotBefore) {
-              const key = `screenshots/action-${pad}-before.png`;
-              const old = screenshots.get(key);
+              const k = `screenshots/action-${pad}-before.png`;
+              const old = screenshots.get(k);
               if (old) try { URL.revokeObjectURL(old); } catch { /* already revoked */ }
-              screenshots.set(key, base64ToBlobUrl(msg.screenshotBefore));
+              screenshots.set(k, base64ToBlobUrl(msg.screenshotBefore));
             }
             if (msg.screenshotAfter) {
-              const key = `screenshots/action-${pad}-after.png`;
-              const old = screenshots.get(key);
+              const k = `screenshots/action-${pad}-after.png`;
+              const old = screenshots.get(k);
               if (old) try { URL.revokeObjectURL(old); } catch { /* already revoked */ }
-              screenshots.set(key, base64ToBlobUrl(msg.screenshotAfter));
+              screenshots.set(k, base64ToBlobUrl(msg.screenshotAfter));
             }
             // For actions without screenshots (e.g. generic toBe assertions),
             // inherit the most recent screenshot so clicking them still shows
@@ -525,8 +588,67 @@ function App() {
             }
           }
 
+          // Started: set the in-flight slot, do NOT append to events/actionEvents.
+          // The matching 'completed' event will land at the same actionIndex.
+          if (isStarted && !isInternal && (ev.type === 'action' || ev.type === 'assertion')) {
+            const inheritedBounds = ev.bounds ?? lastBoundsFrom(data.actionEvents);
+            // ev is narrowed to ActionTraceEvent | AssertionTraceEvent here;
+            // both have these flags (assertion's are optional, hence the ??).
+            const hasShotBefore = !!ev.hasScreenshotBefore;
+            const hasHierBefore = !!ev.hasHierarchyBefore;
+            const inFlightAction: InFlightAction = ev.type === 'action'
+              ? {
+                  actionIndex: ev.actionIndex,
+                  kind: 'action',
+                  category: ev.category,
+                  label: ev.action,
+                  selector: ev.selector,
+                  failed: false,
+                  startedAt: ev.timestamp,
+                  bounds: inheritedBounds,
+                  point: ev.point,
+                  hasScreenshotBefore: hasShotBefore,
+                  hasHierarchyBefore: hasHierBefore,
+                }
+              : {
+                  actionIndex: ev.actionIndex,
+                  kind: 'assertion',
+                  category: 'other',
+                  label: ev.assertion,
+                  selector: ev.selector,
+                  failed: false,
+                  startedAt: ev.timestamp,
+                  bounds: inheritedBounds,
+                  hasScreenshotBefore: hasShotBefore,
+                  hasHierarchyBefore: hasHierBefore,
+                };
+            const next = new Map(map);
+            next.set(key, { ...data, screenshots, hierarchies, inFlightAction });
+            return next;
+          }
+
+          // Completed (or no lifecycle = legacy completed). Append event.
+          // Inherit bounds from the most recent action when missing (e.g.
+          // find() → toBe() chain where the assertion has no bounds of its own).
+          let eventToStore = ev;
+          if ((ev.type === 'assertion' || ev.type === 'action') && !ev.bounds) {
+            const inherited = lastBoundsFrom(data.actionEvents);
+            if (inherited) eventToStore = { ...ev, bounds: inherited };
+          }
+          const events = isInternal ? data.events : [...data.events, eventToStore];
+          const actionEvents = (!isInternal && (eventToStore.type === 'action' || eventToStore.type === 'assertion'))
+            ? [...data.actionEvents, eventToStore]
+            : data.actionEvents;
+
+          // Clear in-flight slot when the matching completion arrives.
+          const inFlightAction = data.inFlightAction
+            && (ev.type === 'action' || ev.type === 'assertion')
+            && data.inFlightAction.actionIndex === ev.actionIndex
+              ? null
+              : data.inFlightAction;
+
           const next = new Map(map);
-          next.set(key, { events, actionEvents, screenshots, hierarchies, sources: data.sources, network: data.network, networkBodies: data.networkBodies, filePath: data.filePath });
+          next.set(key, { ...data, events, actionEvents, screenshots, hierarchies, inFlightAction });
           return next;
         });
 
@@ -534,6 +656,8 @@ function App() {
         // Skip internal markers (e.g. __final_screenshot) — their actionIndex
         // is one past the last real event, so pinning to them leaves the UI
         // with nothing selected once the test ends.
+        // Pin on both 'started' and 'completed' so the in-flight row is
+        // highlighted while running, then stays selected after it lands.
         if (!isInternal && (ev.type === 'action' || ev.type === 'assertion') && key === activeTestRef.current
           && (!viewedTestNameRef.current || viewedTestNameRef.current === testName)) {
           setPinnedIndex(ev.actionIndex);
@@ -665,6 +789,50 @@ function App() {
     }
   }, [send]);
 
+  // Wrap tree.setPending to also clear trace data for the node being run so
+  // the Actions tab immediately shows the preflight "Waiting for first
+  // action…" message instead of lingering actions from the previous run.
+  // Without this, old actions stay visible until the server's run-start
+  // broadcast arrives and clears the trace — a noticeable delay, especially
+  // with multiple workers where ensureWorkersReady() adds latency.
+  const handleSetPending = useCallback((nodeId: string) => {
+    treeRef.current.setPending(nodeId);
+
+    const projectName = extractProject(nodeId);
+    const stripped = stripProjectPrefix(nodeId);
+    const sep = stripped.indexOf('::');
+    if (sep !== -1) {
+      // Test or suite node — clear its specific trace
+      const fullName = stripped.slice(sep + 2);
+      const key = traceKey(projectName, fullName);
+      setTestTraces((prev) => {
+        const old = prev.get(key);
+        if (!old) return prev;
+        revokeTraceScreenshots(old);
+        const next = new Map(prev);
+        next.delete(key);
+        return next;
+      });
+    } else {
+      // File or project node — clear all traces for matching file
+      setTestTraces((prev) => {
+        let changed = false;
+        const next = new Map<string, TestTraceData>();
+        for (const [k, data] of prev) {
+          const matchesFile = data.filePath === stripped;
+          const matchesProject = !projectName || k.startsWith(`${projectName}::`);
+          if (matchesFile && matchesProject) {
+            revokeTraceScreenshots(data);
+            changed = true;
+          } else {
+            next.set(k, data);
+          }
+        }
+        return changed ? next : prev;
+      });
+    }
+  }, [setTestTraces]);
+
   const handleToggleRunDeps = useCallback(() => {
     setRunDepsFirst((prev) => {
       const next = !prev;
@@ -691,6 +859,15 @@ function App() {
       send({ type: 'select-worker-view', mode: mode === 'all' ? 'all' : wid });
     }
   }, [viewedTraceKey, workers.length, send]);
+
+  // When the user clicks a completed test, pin to the last action so they
+  // see the final state rather than the first action.
+  useEffect(() => {
+    if (viewedTraceKey && autoFollowRef.current === 'manual' && actionEvents.length > 0) {
+      setPinnedIndex(actionEvents.length - 1);
+      setHoveredIndex(null);
+    }
+  }, [viewedTraceKey]);
 
   const handleSelectDeviceView = useCallback((mode: 'all' | number) => {
     setDeviceViewMode(mode);
@@ -734,6 +911,20 @@ function App() {
   }, [send]);
 
   // ─── Download trace ───
+
+  // Show an in-progress empty state in the Actions tab whenever the
+  // currently-viewed test is pending (play clicked, server hasn't yet
+  // confirmed the run started) or running but no action has streamed
+  // yet. The test explorer tree pulses across exactly this same window;
+  // this mirrors the visual on the Actions side so the panel doesn't
+  // look frozen during the IPC dispatch + ESM import + hooks-before-
+  // first-action gap.
+  const preflightMessage = useMemo<string | undefined>(() => {
+    if (!viewedTestNode) return undefined;
+    const isPending = tree.pendingIds.has(viewedTestNode.id);
+    const isRunning = viewedTestNode.status === 'running';
+    return isPending || isRunning ? 'Waiting for first action…' : undefined;
+  }, [viewedTestNode, tree.pendingIds]);
 
   const handleDownloadTrace = useCallback(async () => {
     if (!viewedTestName || !currentTrace?.tracePath) return;
@@ -797,6 +988,8 @@ function App() {
           onSend={handleSend}
           onStop={() => { send({ type: 'stop-run' }); setIsStopping(true); }}
           onToggleRunDeps={handleToggleRunDeps}
+          pendingIds={tree.pendingIds}
+          onSetPending={handleSetPending}
         />
       }
       filmstrip={
@@ -818,6 +1011,8 @@ function App() {
           onPin={handleActionPin}
           metadata={metadata}
           showMetadata={viewedTestNode?.type === 'test'}
+          inFlightAction={currentTrace?.inFlightAction}
+          preflightMessage={preflightMessage}
         />
       }
       screenshotPanel={

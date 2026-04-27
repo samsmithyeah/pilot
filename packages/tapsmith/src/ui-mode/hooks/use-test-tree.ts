@@ -5,24 +5,44 @@
  * and status updates from the server.
  */
 
-import { useState, useCallback, useMemo } from 'preact/hooks';
+import { useState, useCallback, useMemo, useRef, useEffect } from 'preact/hooks';
 import type { TestTreeNode, TestNodeStatus } from '../ui-protocol.js';
 
-export function useTestTree() {
+export function useTestTree(isRunning: boolean = false) {
   const [files, setFiles] = useState<TestTreeNode[]>([]);
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set());
   const [selectedTestId, setSelectedTestId] = useState<string | null>(null);
   const [nameFilter, setNameFilter] = useState('');
+  // Pending = play clicked but the worker hasn't fired test-start yet
+  // (covers IPC dispatch + ESM import + runner setup). Tracked here so the
+  // Actions tab can mirror the tree pulse with its own in-progress UI from
+  // the moment of the click, not just after test-start arrives.
+  const [pendingIds, setPendingIds] = useState<Set<string>>(new Set());
+  const pendingSnapshots = useRef<Map<string, TestTreeNode['status']>>(new Map());
   const [statusFilter, setStatusFilter] = useState<'all' | 'passed' | 'failed' | 'skipped'>('all');
 
   const setTestTree = useCallback((newFiles: TestTreeNode[]) => {
     setFiles(newFiles);
-    // Expand project nodes only — files and below start collapsed
-    const expanded = new Set<string>();
-    for (const node of newFiles) {
-      if (node.type === 'project') expanded.add(node.id);
-    }
-    setExpandedNodes(expanded);
+    // Preserve previously-expanded nodes whose IDs still exist in the new
+    // tree, then ensure project nodes are always expanded by default.
+    // Without this, every server-side `test-tree` broadcast (including the
+    // one fired on each WebSocket reconnect — e.g. after the laptop wakes
+    // from sleep) would collapse the user's path back to the project root,
+    // making the still-set `selectedTestId` visually invisible.
+    setExpandedNodes((prev) => {
+      const validIds = new Set<string>();
+      (function walk(nodes: TestTreeNode[]) {
+        for (const n of nodes) {
+          validIds.add(n.id);
+          if (n.children) walk(n.children);
+        }
+      })(newFiles);
+
+      const next = new Set<string>();
+      for (const id of prev) if (validIds.has(id)) next.add(id);
+      for (const node of newFiles) if (node.type === 'project') next.add(node.id);
+      return next;
+    });
   }, []);
 
   /** Expand all nodes in the tree. */
@@ -114,6 +134,69 @@ export function useTestTree() {
     setFiles((prev) => prev.map(resetRunningInTree));
   }, []);
 
+  // Pending lifecycle: clear a node from pending once its status has moved
+  // off the snapshot taken at click time. Catches the normal transition to
+  // 'running' AND the edge case where the worker jumps straight to a
+  // terminal state without an intermediate 'running'.
+  useEffect(() => {
+    if (pendingIds.size === 0) return;
+    const stillPending = new Set<string>();
+    const check = (node: TestTreeNode) => {
+      if (pendingIds.has(node.id)) {
+        const snapshot = pendingSnapshots.current.get(node.id);
+        const unchanged = snapshot === undefined
+          ? node.status !== 'running'
+          : node.status === snapshot;
+        if (unchanged) stillPending.add(node.id);
+      }
+      node.children?.forEach(check);
+    };
+    files.forEach(check);
+    if (stillPending.size !== pendingIds.size) {
+      for (const id of pendingIds) {
+        if (!stillPending.has(id)) pendingSnapshots.current.delete(id);
+      }
+      setPendingIds(stillPending);
+    }
+  }, [files, pendingIds]);
+
+  // Clear all pending when isRunning transitions true → false (run ends).
+  // pendingIds is read via ref so the effect only fires on isRunning changes
+  // — including it as a dep would immediately clear pending set by
+  // setPending() because isRunning is still false at click time.
+  const pendingIdsRef = useRef(pendingIds);
+  pendingIdsRef.current = pendingIds;
+  useEffect(() => {
+    if (!isRunning && pendingIdsRef.current.size > 0) {
+      pendingSnapshots.current.clear();
+      setPendingIds(new Set());
+    }
+  }, [isRunning]);
+
+  /** Mark a node (and its subtree + ancestor chain) as pending — call when
+   * the user clicks play, before the server has confirmed the run has
+   * started. */
+  const setPending = useCallback((nodeId: string) => {
+    const parentMap = buildParentMap(files);
+    const node = findNode(files, nodeId);
+    if (!node) return;
+    const ids = collectSubtreeIds(node);
+    let cur = parentMap.get(nodeId);
+    while (cur) {
+      ids.push(cur);
+      cur = parentMap.get(cur);
+    }
+    for (const id of ids) {
+      const n = findNode(files, id);
+      if (n) pendingSnapshots.current.set(id, n.status);
+    }
+    setPendingIds((prev) => {
+      const next = new Set(prev);
+      ids.forEach((id) => next.add(id));
+      return next;
+    });
+  }, [files]);
+
   // Filter the tree based on name and status
   const filteredFiles = useMemo(() => {
     if (!nameFilter && statusFilter === 'all') return files;
@@ -158,6 +241,7 @@ export function useTestTree() {
     nameFilter,
     statusFilter,
     counts,
+    pendingIds,
     setTestTree,
     toggleExpanded,
     expandAll,
@@ -170,7 +254,37 @@ export function useTestTree() {
     updateFileStatus,
     updateWatchEnabled,
     resetRunningStatuses,
+    setPending,
   };
+}
+
+// Helpers used by setPending (also used inside TestExplorer rendering)
+
+function buildParentMap(roots: TestTreeNode[]): Map<string, string> {
+  const map = new Map<string, string>();
+  const walk = (node: TestTreeNode, parentId?: string) => {
+    if (parentId) map.set(node.id, parentId);
+    node.children?.forEach((c) => walk(c, node.id));
+  };
+  roots.forEach((r) => walk(r));
+  return map;
+}
+
+function collectSubtreeIds(node: TestTreeNode, out: string[] = []): string[] {
+  out.push(node.id);
+  node.children?.forEach((c) => collectSubtreeIds(c, out));
+  return out;
+}
+
+function findNode(roots: TestTreeNode[], id: string): TestTreeNode | undefined {
+  for (const root of roots) {
+    if (root.id === id) return root;
+    if (root.children) {
+      const found = findNode(root.children, id);
+      if (found) return found;
+    }
+  }
+  return undefined;
 }
 
 // ─── Helpers ───

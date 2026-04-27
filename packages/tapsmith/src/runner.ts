@@ -561,15 +561,21 @@ async function runSuiteContext(
   if (ctx.beforeAll.length > 0 && opts.device) {
     const traceConfig = resolveTraceConfig(opts.config.trace);
     if (shouldRecord(traceConfig.mode, 0)) {
-      // Pick the test to tag beforeAll trace events with. When running a
-      // single test (testFilter), use that test so we don't mark an
-      // unrelated test as 'running' in the UI.
-      const targetTest = opts.testFilter
-        ? ctx.tests.find((t) => {
-            const fn = parentPrefix ? `${parentPrefix} > ${t.name}` : t.name;
-            return fn === opts.testFilter;
-          })
-        : ctx.tests.find((t) => !t.skip);
+      // Pick the test to tag beforeAll trace events with. The predicate
+      // must match the loop's actual shouldSkip (line ~698) — otherwise we
+      // could fire onTestStart for a test that the loop will skip, and the
+      // duplicate-test-start guard below would then swallow the real
+      // first-test test-start. Mirror: skip explicit `.skip`, honour
+      // `.only` when any are set, and respect testFilter.
+      const matchesFilter = (fn: string): boolean => !opts.testFilter
+        || fn === opts.testFilter
+        || fn.startsWith(opts.testFilter + ' > ');
+      const targetTest = ctx.tests.find((t) => {
+        if (t.skip) return false;
+        if (hasOnly && !t.only) return false;
+        const fn = parentPrefix ? `${parentPrefix} > ${t.name}` : t.name;
+        return matchesFilter(fn);
+      });
       if (targetTest && opts.onTestStart) {
         beforeAllFirstFullName = parentPrefix ? `${parentPrefix} > ${targetTest.name}` : targetTest.name;
         await opts.onTestStart(beforeAllFirstFullName);
@@ -781,7 +787,11 @@ async function runSuiteContext(
       // Notify UI mode (lightweight, no device actions) so subsequent trace
       // events can be tagged to this test. Must run before the group starts
       // so the test-start message arrives before any group-start events.
-      if (opts.onTestStart) {
+      // Skip when this is the first test and we already fired test-start
+      // before beforeAll — firing it twice makes the client wipe the
+      // beforeAll events that streamed live in the meantime, which is why
+      // the "beforeAll Hooks" section seemed to disappear in UI mode.
+      if (opts.onTestStart && fullName !== beforeAllFirstFullName) {
         await opts.onTestStart(fullName);
       }
 

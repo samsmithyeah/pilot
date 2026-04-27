@@ -13,38 +13,6 @@ const ICON_SIZE = 13;
 const STATUS_SIZE = 12;
 const TOOLBAR_ICON_SIZE = 14;
 
-// ─── Pending helpers ───
-
-/** Build a map from node ID → parent ID by walking the tree. */
-function buildParentMap(roots: TestTreeNode[]): Map<string, string> {
-  const map = new Map<string, string>();
-  const walk = (node: TestTreeNode, parentId?: string) => {
-    if (parentId) map.set(node.id, parentId);
-    node.children?.forEach((c) => walk(c, node.id));
-  };
-  roots.forEach((r) => walk(r));
-  return map;
-}
-
-/** Collect a node and all its descendants. */
-function collectSubtreeIds(node: TestTreeNode, out: string[] = []): string[] {
-  out.push(node.id);
-  node.children?.forEach((c) => collectSubtreeIds(c, out));
-  return out;
-}
-
-/** Find a node by ID in the tree. */
-function findNode(roots: TestTreeNode[], id: string): TestTreeNode | undefined {
-  for (const root of roots) {
-    if (root.id === id) return root;
-    if (root.children) {
-      const found = findNode(root.children, id);
-      if (found) return found;
-    }
-  }
-}
-
-
 interface TestExplorerProps {
   files: TestTreeNode[]
   expandedNodes: Set<string>
@@ -58,6 +26,7 @@ interface TestExplorerProps {
   isWatching: boolean
   hasProjectDeps: boolean
   runDepsFirst: boolean
+  pendingIds: Set<string>
   onToggleExpanded: (nodeId: string) => void
   onExpandAll: () => void
   onCollapseAll: () => void
@@ -67,75 +36,20 @@ interface TestExplorerProps {
   onSend: (msg: ClientMessage) => void
   onStop: () => void
   onToggleRunDeps: () => void
+  onSetPending: (nodeId: string) => void
 }
 
 export function TestExplorer(props: TestExplorerProps) {
   const {
     files, expandedNodes, selectedTestId, nameFilter, statusFilter,
     counts, connected, isRunning, isStopping, isWatching, hasProjectDeps, runDepsFirst,
-    onToggleExpanded, onExpandAll, onCollapseAll, onSelectTest,
-    onSetNameFilter, onSetStatusFilter, onSend, onStop, onToggleRunDeps,
+    pendingIds, onToggleExpanded, onExpandAll, onCollapseAll, onSelectTest,
+    onSetNameFilter, onSetStatusFilter, onSend, onStop, onToggleRunDeps, onSetPending,
   } = props;
 
-  const parentMap = useMemo(() => buildParentMap(files), [files]);
-  const [pendingIds, setPendingIds] = useState<Set<string>>(new Set());
-  /** Status snapshot per pending id, captured when play was clicked. Pending
-   * is cleared the moment the node's status moves off its snapshot — this
-   * catches the normal transition to 'running' *and* the edge case where
-   * the server jumps straight to a terminal state ('passed'/'failed'/
-   * 'skipped') without an intermediate 'running'. */
-  const pendingSnapshots = useRef<Map<string, TestTreeNode['status']>>(new Map());
-
-  useEffect(() => {
-    if (pendingIds.size === 0) return;
-    const stillPending = new Set<string>();
-    const check = (node: TestTreeNode) => {
-      if (pendingIds.has(node.id)) {
-        const snapshot = pendingSnapshots.current.get(node.id);
-        const unchanged = snapshot === undefined
-          ? node.status !== 'running'
-          : node.status === snapshot;
-        if (unchanged) stillPending.add(node.id);
-      }
-      node.children?.forEach(check);
-    };
-    files.forEach(check);
-    if (stillPending.size !== pendingIds.size) {
-      for (const id of pendingIds) {
-        if (!stillPending.has(id)) pendingSnapshots.current.delete(id);
-      }
-      setPendingIds(stillPending);
-    }
-  }, [files, pendingIds]);
-
-  // Clear all pending when a run stops
-  useEffect(() => {
-    if (!isRunning && pendingIds.size > 0) {
-      pendingSnapshots.current.clear();
-      setPendingIds(new Set());
-    }
-  }, [isRunning]);
-
-  const handleSetPending = useCallback((nodeId: string) => {
-    const node = findNode(files, nodeId);
-    if (!node) return;
-    const ids = collectSubtreeIds(node);
-    // Walk up ancestors
-    let cur = parentMap.get(nodeId);
-    while (cur) {
-      ids.push(cur);
-      cur = parentMap.get(cur);
-    }
-    for (const id of ids) {
-      const n = findNode(files, id);
-      if (n) pendingSnapshots.current.set(id, n.status);
-    }
-    setPendingIds((prev) => {
-      const next = new Set(prev);
-      ids.forEach((id) => next.add(id));
-      return next;
-    });
-  }, [files, parentMap]);
+  // Pending state and the matching set/clear effects live in useTestTree
+  // so main.tsx can read pendingIds for its own in-progress derivations.
+  const handleSetPending = useCallback((nodeId: string) => onSetPending(nodeId), [onSetPending]);
 
   return (
     <div class="test-explorer">

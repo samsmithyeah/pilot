@@ -232,6 +232,117 @@ describe('TraceCollector', () => {
     expect(ev.error).toBe('Test timed out after 10000ms');
   });
 
+  // ── Lifecycle started signals (PILOT-200) ──
+
+  it('_emitActionStarted fires the callback with lifecycle=started without recording', () => {
+    const collector = new TraceCollector(config, tempDir);
+    const seen: Array<{ event: ActionTraceEvent | AssertionTraceEvent | ConsoleTraceEvent | GroupTraceEvent; lifecycle?: 'started' | 'completed' }> = [];
+    collector.setEventCallback((event, _captures, lifecycle) => {
+      seen.push({ event: event as ActionTraceEvent, lifecycle });
+    });
+
+    collector._emitActionStarted({
+      category: 'tap',
+      action: 'tap',
+      selector: '{"text":"Submit"}',
+      hasScreenshotBefore: true,
+      hasHierarchyBefore: false,
+    });
+
+    expect(collector.events).toHaveLength(0);
+    expect(collector.currentActionIndex).toBe(0);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].lifecycle).toBe('started');
+    const ev = seen[0].event as ActionTraceEvent;
+    expect(ev.type).toBe('action');
+    expect(ev.action).toBe('tap');
+    expect(ev.actionIndex).toBe(0);
+    expect(ev.success).toBe(true);
+    expect(ev.duration).toBe(0);
+  });
+
+  it('started + completed action share the same actionIndex', () => {
+    const collector = new TraceCollector(config, tempDir);
+    const seen: Array<{ actionIndex: number; lifecycle?: 'started' | 'completed' }> = [];
+    collector.setEventCallback((event, _captures, lifecycle) => {
+      if (event.type === 'action' || event.type === 'assertion') {
+        seen.push({ actionIndex: event.actionIndex, lifecycle });
+      }
+    });
+
+    collector._emitActionStarted({
+      category: 'tap', action: 'tap',
+      hasScreenshotBefore: false, hasHierarchyBefore: false,
+    });
+    collector.addActionEvent({
+      category: 'tap', action: 'tap', duration: 42, success: true,
+      hasScreenshotBefore: false, hasScreenshotAfter: false,
+      hasHierarchyBefore: false, hasHierarchyAfter: false,
+    });
+
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).toEqual({ actionIndex: 0, lifecycle: 'started' });
+    expect(seen[1]).toEqual({ actionIndex: 0, lifecycle: 'completed' });
+    expect(collector.currentActionIndex).toBe(1);
+    expect(collector.events).toHaveLength(1);
+  });
+
+  it('_emitAssertionStarted fires the callback with lifecycle=started for assertions', () => {
+    const collector = new TraceCollector(config, tempDir);
+    const seen: Array<{ event: ActionTraceEvent | AssertionTraceEvent; lifecycle?: 'started' | 'completed' }> = [];
+    collector.setEventCallback((event, _captures, lifecycle) => {
+      if (event.type === 'action' || event.type === 'assertion') {
+        seen.push({ event: event as AssertionTraceEvent, lifecycle });
+      }
+    });
+
+    collector._emitAssertionStarted({
+      assertion: 'toBeVisible',
+      selector: '{"text":"OK"}',
+      soft: false,
+      negated: false,
+      hasScreenshotBefore: true,
+      hasScreenshotAfter: false,
+      hasHierarchyBefore: false,
+      hasHierarchyAfter: false,
+    });
+
+    expect(collector.events).toHaveLength(0);
+    expect(collector.currentActionIndex).toBe(0);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].lifecycle).toBe('started');
+    const ev = seen[0].event as AssertionTraceEvent;
+    expect(ev.type).toBe('assertion');
+    expect(ev.assertion).toBe('toBeVisible');
+    expect(ev.passed).toBe(true);
+    expect(ev.duration).toBe(0);
+  });
+
+  it('started signal is a no-op when no event callback is set', () => {
+    const collector = new TraceCollector(config, tempDir);
+    // No setEventCallback call.
+    collector._emitActionStarted({
+      category: 'tap', action: 'tap',
+      hasScreenshotBefore: false, hasHierarchyBefore: false,
+    });
+    expect(collector.events).toHaveLength(0);
+    expect(collector.currentActionIndex).toBe(0);
+  });
+
+  it('completed events pass lifecycle=completed to the callback', () => {
+    const collector = new TraceCollector(config, tempDir);
+    let seenLifecycle: 'started' | 'completed' | undefined;
+    collector.setEventCallback((_event, _captures, lifecycle) => {
+      seenLifecycle = lifecycle;
+    });
+    collector.addActionEvent({
+      category: 'tap', action: 'tap', duration: 1, success: true,
+      hasScreenshotBefore: false, hasScreenshotAfter: false,
+      hasHierarchyBefore: false, hasHierarchyAfter: false,
+    });
+    expect(seenLifecycle).toBe('completed');
+  });
+
   it('failPendingOperation is a no-op when no pending operation', () => {
     const collector = new TraceCollector(config, tempDir);
     collector.failPendingOperation('Test timed out');

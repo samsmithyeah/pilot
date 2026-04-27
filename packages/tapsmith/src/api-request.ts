@@ -196,6 +196,26 @@ export class APIRequestContext {
     }
 
     const startTime = Date.now();
+
+    // Stream a "started" lifecycle signal so UI mode shows an in-flight row
+    // for the duration of the HTTP request. The matching addActionEvent on
+    // either the success or failure path below carries the completed signal
+    // at the same actionIndex.
+    {
+      const collector = getActiveTraceCollector();
+      if (collector) {
+        collector._emitActionStarted({
+          category: 'api',
+          action: `request.${method.toLowerCase()}`,
+          selector: resolvedUrl.toString(),
+          sourceLocation,
+          log: [`${method} ${resolvedUrl.toString()}`],
+          hasScreenshotBefore: false,
+          hasHierarchyBefore: false,
+        });
+      }
+    }
+
     let response: Response;
     let responseBuffer: Buffer;
     try {

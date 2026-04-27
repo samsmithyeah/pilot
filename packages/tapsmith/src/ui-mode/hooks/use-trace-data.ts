@@ -7,6 +7,10 @@
 
 import { useState, useRef } from 'preact/hooks';
 import type { AnyTraceEvent, ActionTraceEvent, AssertionTraceEvent, NetworkEntry } from '../../trace/types.js';
+import type { InFlightAction } from '../../trace-viewer/types.js';
+
+// Re-export so existing callers (main.tsx) keep their import path.
+export type { InFlightAction };
 
 // ─── Types ───
 
@@ -24,6 +28,8 @@ export interface TestTraceData {
   filePath?: string;
   /** Path to the trace ZIP on the server (set when test completes). */
   tracePath?: string;
+  /** Currently in-flight action/assertion (UI mode live streaming only). */
+  inFlightAction?: InFlightAction | null;
 }
 
 // ─── Helpers ───
@@ -72,7 +78,7 @@ export function revokeTraceScreenshots(data: TestTraceData): void {
 }
 
 export function emptyTraceData(filePath?: string): TestTraceData {
-  return { events: [], actionEvents: [], screenshots: new Map(), hierarchies: new Map(), sources: new Map(), network: [], networkBodies: new Map(), filePath };
+  return { events: [], actionEvents: [], screenshots: new Map(), hierarchies: new Map(), sources: new Map(), network: [], networkBodies: new Map(), filePath, inFlightAction: null };
 }
 
 /** Get existing trace data or create a new entry. */
