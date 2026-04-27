@@ -93,19 +93,7 @@ function getLabel(event: ActionTraceEvent | AssertionTraceEvent): string {
 }
 
 function getSelectorDisplay(event: ActionTraceEvent | AssertionTraceEvent): string {
-  const sel = event.selector;
-  if (!sel) return '';
-  try {
-    const parsed = JSON.parse(sel);
-    if (parsed.text) return `"${parsed.text}"`;
-    if (parsed.role) return `role=${parsed.role.role}${parsed.role.name ? ` "${parsed.role.name}"` : ''}`;
-    if (parsed.contentDesc) return `desc="${parsed.contentDesc}"`;
-    if (parsed.testId) return `testId="${parsed.testId}"`;
-    if (parsed.resourceId) return `id="${parsed.resourceId}"`;
-    return sel;
-  } catch {
-    return sel;
-  }
+  return parseSelectorString(event.selector);
 }
 
 export function ActionsPanel({ events, actionEvents, selectedIndex, pinnedIndex, onHover, onPin, metadata, showMetadata, inFlightAction, preflightMessage }: Props) {
