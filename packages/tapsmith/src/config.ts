@@ -57,7 +57,7 @@ export interface TapsmithConfig {
 
   /**
    * Target a specific device serial for single-device runs or debugging.
-   * Prefer `avd` + `launchEmulators` for parallel emulator provisioning.
+   * Prefer `avd` for parallel emulator provisioning.
    */
   device?: string;
 
@@ -132,14 +132,14 @@ export interface TapsmithConfig {
    * Automatically launch emulators to fill the requested worker count.
    * When true, the dispatcher starts Android emulators for any workers that
    * don't already have a healthy connected device.
-   * Defaults to false.
+   * Defaults to true when `avd` is set, false otherwise.
    */
   launchEmulators: boolean;
 
   /**
    * Android Virtual Device (AVD) name to use when launching emulators.
-   * Strongly recommended when `launchEmulators` is true so Tapsmith can launch
-   * repeated instances of the same emulator definition for parallel runs.
+   * When set, Tapsmith automatically launches emulator instances of this AVD
+   * to fill the requested worker count. Set `launchEmulators: false` to disable.
    * Run `emulator -list-avds` to see available AVDs.
    */
   avd?: string;
@@ -286,10 +286,11 @@ const DEFAULT_CONFIG: TapsmithConfig = {
  * Define a Tapsmith configuration. Merges the provided overrides with defaults.
  */
 export function defineConfig(overrides: Partial<TapsmithConfig> = {}): TapsmithConfig {
-  return withExplicitWorkers(
-    { ...DEFAULT_CONFIG, ...overrides },
-    overrides.workers !== undefined,
-  );
+  const merged = { ...DEFAULT_CONFIG, ...overrides };
+  if (overrides.launchEmulators === undefined && merged.avd) {
+    merged.launchEmulators = true;
+  }
+  return withExplicitWorkers(merged, overrides.workers !== undefined);
 }
 
 /**
