@@ -354,28 +354,31 @@ async fn handle_connection(
 ) {
     debug!(%addr, "New proxy connection");
 
-    // Read the first chunk from the client. We need at least 3 bytes to
-    // distinguish a TLS ClientHello from an HTTP request line.
-    let mut buf = vec![0u8; 8192];
-    let n = match tokio::time::timeout(CLIENT_READ_TIMEOUT, client.read(&mut buf)).await {
-        Ok(Ok(0)) => return,
-        Ok(Ok(n)) => n,
-        Ok(Err(e)) => {
-            debug!("Read error from proxy client: {e}");
-            return;
+    // Read the first chunk from the client and ensure we have at least 3
+    // bytes — enough to distinguish a TLS ClientHello (`0x16 0x03 0x0?`)
+    // from an HTTP request line (starts with an ASCII method letter > 0x40).
+    let mut buf = Vec::new();
+    let mut tmp = vec![0u8; 8192];
+    while buf.len() < 3 {
+        match tokio::time::timeout(CLIENT_READ_TIMEOUT, client.read(&mut tmp)).await {
+            Ok(Ok(0)) => return,
+            Ok(Ok(n)) => buf.extend_from_slice(&tmp[..n]),
+            Ok(Err(e)) => {
+                debug!("Read error from proxy client: {e}");
+                return;
+            }
+            Err(_) => {
+                debug!("Proxy client header read timed out");
+                return;
+            }
         }
-        Err(_) => {
-            debug!("Proxy client header read timed out");
-            return;
-        }
-    };
-    buf.truncate(n);
+    }
 
     // Transparent TLS: the first 3 bytes of a TLS record are
     //   0x16 (Handshake) + 0x03 (SSL/TLS major) + 0x00..=0x04 (minor).
     // HTTP request lines always start with an ASCII method letter (> 0x40),
     // so this can't collide with any valid HTTP request.
-    if n >= 3 && buf[0] == 0x16 && buf[1] == 0x03 && buf[2] <= 0x04 {
+    if buf[0] == 0x16 && buf[1] == 0x03 && buf[2] <= 0x04 {
         debug!(%addr, "Detected transparent TLS connection");
         let chained = PrefixedStream::new(buf, client);
         // Port 443: the iptables rules only redirect --dport 443 to TLS.

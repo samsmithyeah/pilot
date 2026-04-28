@@ -487,7 +487,7 @@ pub async fn setup_iptables_redirect(serial: &str, proxy_port: u16) -> bool {
         format!("iptables -t nat -A {IPTABLES_CHAIN} -d 127.0.0.0/8 -j RETURN"),
         format!("iptables -t nat -A {IPTABLES_CHAIN} -p tcp --dport 80 -j REDIRECT --to-port {proxy_port}"),
         format!("iptables -t nat -A {IPTABLES_CHAIN} -p tcp --dport 443 -j REDIRECT --to-port {proxy_port}"),
-        format!("iptables -t nat -A OUTPUT -j {IPTABLES_CHAIN}"),
+        format!("iptables -t nat -I OUTPUT -j {IPTABLES_CHAIN}"),
     ];
 
     for cmd in &commands {
