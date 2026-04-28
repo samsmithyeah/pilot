@@ -105,6 +105,12 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
+      - name: Add Android SDK to PATH
+        run: |
+          echo "$ANDROID_HOME/emulator" >> $GITHUB_PATH
+          echo "$ANDROID_HOME/platform-tools" >> $GITHUB_PATH
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> $GITHUB_PATH
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -138,15 +144,16 @@ jobs:
 
       - name: Install Android system image
         if: steps.system-image-cache.outputs.cache-hit != 'true'
-        run: echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "${{ env.ANDROID_SYSTEM_IMAGE }}"
+        run: echo "y" | sdkmanager "${{ env.ANDROID_SYSTEM_IMAGE }}"
 
       - name: Create AVD
         run: |
-          echo "no" | $ANDROID_HOME/cmdline-tools/latest/bin/avdmanager create avd \
+          echo "no" | avdmanager create avd \
             -n "${{ env.AVD_NAME }}" \
             -k "${{ env.ANDROID_SYSTEM_IMAGE }}" \
             --device "pixel_6" \
             --force
+          emulator -list-avds
 
       - name: Install SDK dependencies
         working-directory: packages/tapsmith
