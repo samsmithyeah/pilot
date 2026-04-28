@@ -154,7 +154,14 @@ jobs:
             -k "${{ env.ANDROID_SYSTEM_IMAGE }}" \
             --device "pixel_6" \
             --force
+          echo "--- AVD files ---"
+          find ~/.android/avd -maxdepth 1 -name "*.ini" 2>/dev/null || echo "no AVDs in ~/.android/avd"
+          echo "--- ANDROID_AVD_HOME=$ANDROID_AVD_HOME ---"
+          echo "--- ANDROID_EMULATOR_HOME=${ANDROID_EMULATOR_HOME:-unset} ---"
+          echo "--- ANDROID_USER_HOME=${ANDROID_USER_HOME:-unset} ---"
+          echo "--- which emulator: $(which emulator) ---"
           emulator -list-avds
+          echo "--- end ---"
 
       - name: Install SDK dependencies
         working-directory: packages/tapsmith
