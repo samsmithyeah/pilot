@@ -192,30 +192,47 @@ pub async fn stop(handle: RecordingHandle) -> Result<(PathBuf, Duration)> {
     Ok((local_path, elapsed))
 }
 
-/// Look up an iOS device record by UDID, querying both simulators and physical
-/// devices. We need this to pick sim vs physical, and for physical we need
-/// the friendly name to feed into AVFoundation device matching.
+/// Look up an iOS device record by UDID, caching the result so repeated
+/// recordings within the same daemon session don't re-query simctl/devicectl.
 async fn lookup_ios_device(udid: &str) -> Result<ios::device::IosDevice> {
-    let all = ios::device::list_all_devices()
-        .await
-        .context("Failed to list iOS devices for recording")?;
-    if let Some(d) = all.into_iter().find(|d| d.udid == udid) {
-        return Ok(d);
-    }
-    bail!("iOS device with UDID '{udid}' not found in simctl/devicectl listing");
+    use tokio::sync::OnceCell;
+    static CACHED: OnceCell<ios::device::IosDevice> = OnceCell::const_new();
+
+    let device = CACHED
+        .get_or_try_init(|| async {
+            let all = ios::device::list_all_devices()
+                .await
+                .context("Failed to list iOS devices for recording")?;
+            all.into_iter().find(|d| d.udid == udid).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "iOS device with UDID '{udid}' not found in simctl/devicectl listing"
+                )
+            })
+        })
+        .await?;
+    Ok(device.clone())
 }
 
 fn send_sigint_to_child(child: &mut Child) -> Result<()> {
     if let Ok(Some(_)) = child.try_wait() {
         return Ok(());
     }
-    let Some(pid) = child.id() else {
-        bail!("recording child has no PID; cannot signal");
-    };
-    // SAFETY: child is still running (try_wait returned None) and we hold
-    // the Child handle, so the PID cannot have been recycled.
-    unsafe {
-        libc::kill(pid as i32, libc::SIGINT);
+    #[cfg(unix)]
+    {
+        let Some(pid) = child.id() else {
+            bail!("recording child has no PID; cannot signal");
+        };
+        // SAFETY: child is still running (try_wait returned None) and we hold
+        // the Child handle, so the PID cannot have been recycled.
+        unsafe {
+            libc::kill(pid as i32, libc::SIGINT);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        child
+            .start_kill()
+            .context("failed to kill recording child")?;
     }
     Ok(())
 }

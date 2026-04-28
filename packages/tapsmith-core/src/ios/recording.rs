@@ -41,7 +41,7 @@ pub async fn recordvideo_sim_spawn(udid: &str, local_path: &Path) -> Result<Chil
     .kill_on_drop(true)
     .stdin(Stdio::null())
     .stdout(Stdio::null())
-    .stderr(Stdio::piped());
+    .stderr(Stdio::null());
 
     debug!(
         udid,
@@ -215,7 +215,7 @@ pub async fn recordvideo_physical_spawn(device_name: &str, local_path: &Path) ->
     .kill_on_drop(true)
     .stdin(Stdio::piped()) // we send "q\n" to ffmpeg to stop it cleanly
     .stdout(Stdio::null())
-    .stderr(Stdio::piped());
+    .stderr(Stdio::null());
 
     info!(
         device_name,
@@ -259,13 +259,22 @@ fn send_sigint(child: &mut Child) -> Result<()> {
     if let Ok(Some(_)) = child.try_wait() {
         return Ok(());
     }
-    let Some(pid) = child.id() else {
-        bail!("child has no PID; cannot signal");
-    };
-    // SAFETY: child is still running (try_wait returned None) and we hold
-    // the Child handle, so the PID cannot have been recycled.
-    unsafe {
-        libc::kill(pid as i32, libc::SIGINT);
+    #[cfg(unix)]
+    {
+        let Some(pid) = child.id() else {
+            bail!("child has no PID; cannot signal");
+        };
+        // SAFETY: child is still running (try_wait returned None) and we hold
+        // the Child handle, so the PID cannot have been recycled.
+        unsafe {
+            libc::kill(pid as i32, libc::SIGINT);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        child
+            .start_kill()
+            .context("failed to kill recording child")?;
     }
     Ok(())
 }

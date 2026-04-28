@@ -259,7 +259,7 @@ pub async fn screenrecord_spawn(
     cmd.kill_on_drop(true);
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::null());
-    cmd.stderr(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::null());
 
     debug!(serial, remote_path, "Spawning adb shell screenrecord");
     let child = cmd.spawn().context("Failed to spawn adb screenrecord")?;
