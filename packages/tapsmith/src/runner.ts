@@ -11,6 +11,7 @@
  */
 
 import * as fs from 'node:fs';
+import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import * as zlib from 'node:zlib';
@@ -1194,8 +1195,8 @@ async function runSuiteContext(
               videoDir,
               `${safeName}-${Date.now()}.mp4`,
             );
-            fs.copyFileSync(res.videoPath, filePath);
-            fs.unlinkSync(res.videoPath);
+            await fsPromises.copyFile(res.videoPath, filePath);
+            await fsPromises.unlink(res.videoPath);
             videoPath = filePath;
           } catch (err) {
             _warnCaptureOnce(
@@ -1206,7 +1207,7 @@ async function runSuiteContext(
         } else if (res.success && res.videoPath) {
           // Not retaining — clean up the temp file.
           try {
-            fs.unlinkSync(res.videoPath);
+            await fsPromises.unlink(res.videoPath);
           } catch (unlinkErr) {
             _warnCaptureOnce('Video temp file cleanup failed', unlinkErr instanceof Error ? unlinkErr.message : String(unlinkErr));
           }

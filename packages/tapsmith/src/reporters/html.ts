@@ -64,7 +64,7 @@ export class HtmlReporter implements TapsmithReporter {
         try {
           const basename = path.basename(test.videoPath);
           const dest = path.join(outputDir, basename);
-          fs.copyFileSync(test.videoPath, dest);
+          await fs.promises.copyFile(test.videoPath, dest);
           videoMap.set(test.videoPath, basename);
         } catch (err) {
           console.warn(`[HtmlReporter] Failed to copy video ${test.videoPath}:`, err);

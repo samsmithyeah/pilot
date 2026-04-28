@@ -194,18 +194,24 @@ pub async fn stop(handle: RecordingHandle) -> Result<(PathBuf, Duration)> {
 
 /// Look up an iOS device record by UDID, caching the device list so repeated
 /// recordings within the same daemon session don't re-query simctl/devicectl.
+/// If the UDID isn't in the cached list, refreshes once in case a device was
+/// connected after the first query.
 async fn lookup_ios_device(udid: &str) -> Result<ios::device::IosDevice> {
-    use tokio::sync::OnceCell;
-    static CACHED_LIST: OnceCell<Vec<ios::device::IosDevice>> = OnceCell::const_new();
+    use tokio::sync::Mutex;
+    static CACHED_LIST: Mutex<Option<Vec<ios::device::IosDevice>>> = Mutex::const_new(None);
 
-    let all = CACHED_LIST
-        .get_or_try_init(|| async {
-            ios::device::list_all_devices()
-                .await
-                .context("Failed to list iOS devices for recording")
-        })
-        .await?;
-    all.iter().find(|d| d.udid == udid).cloned().ok_or_else(|| {
+    let mut cache = CACHED_LIST.lock().await;
+    if let Some(ref list) = *cache {
+        if let Some(d) = list.iter().find(|d| d.udid == udid) {
+            return Ok(d.clone());
+        }
+    }
+    let fresh = ios::device::list_all_devices()
+        .await
+        .context("Failed to list iOS devices for recording")?;
+    let result = fresh.iter().find(|d| d.udid == udid).cloned();
+    *cache = Some(fresh);
+    result.ok_or_else(|| {
         anyhow::anyhow!("iOS device with UDID '{udid}' not found in simctl/devicectl listing")
     })
 }
