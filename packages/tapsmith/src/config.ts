@@ -286,11 +286,18 @@ const DEFAULT_CONFIG: TapsmithConfig = {
  * Define a Tapsmith configuration. Merges the provided overrides with defaults.
  */
 export function defineConfig(overrides: Partial<TapsmithConfig> = {}): TapsmithConfig {
-  const merged = { ...DEFAULT_CONFIG, ...overrides };
-  if (overrides.launchEmulators === undefined && merged.avd) {
-    merged.launchEmulators = true;
-  }
+  const merged = applyConfigDefaults({ ...DEFAULT_CONFIG, ...overrides }, overrides);
   return withExplicitWorkers(merged, overrides.workers !== undefined);
+}
+
+function applyConfigDefaults(
+  config: TapsmithConfig,
+  raw: Partial<TapsmithConfig>,
+): TapsmithConfig {
+  if (raw.launchEmulators === undefined && config.avd) {
+    config.launchEmulators = true;
+  }
+  return config;
 }
 
 /**
@@ -365,10 +372,11 @@ export async function loadConfig(dir?: string, configFile?: string): Promise<Tap
     }
     const mod = await import(configPath);
     const raw: Partial<TapsmithConfig> = mod.default ?? mod;
-    return withExplicitWorkers(
+    const merged = applyConfigDefaults(
       { ...DEFAULT_CONFIG, ...raw, rootDir: raw.rootDir ?? root },
-      rawHasExplicitWorkers(raw),
+      raw,
     );
+    return withExplicitWorkers(merged, rawHasExplicitWorkers(raw));
   }
 
   const candidates = ['tapsmith.config.ts', 'tapsmith.config.js', 'tapsmith.config.mjs'];
@@ -380,10 +388,11 @@ export async function loadConfig(dir?: string, configFile?: string): Promise<Tap
         // For .ts files we rely on tsx / ts-node being available at runtime.
         const mod = await import(configPath);
         const raw: Partial<TapsmithConfig> = mod.default ?? mod;
-        return withExplicitWorkers(
+        const merged = applyConfigDefaults(
           { ...DEFAULT_CONFIG, ...raw, rootDir: raw.rootDir ?? root },
-          rawHasExplicitWorkers(raw),
+          raw,
         );
+        return withExplicitWorkers(merged, rawHasExplicitWorkers(raw));
       } catch (err) {
         console.warn(`Warning: failed to load ${configPath}: ${err}`);
       }
