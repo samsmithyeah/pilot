@@ -1181,7 +1181,7 @@ async function runSuiteContext(
           status === 'passed',
           attempt,
         );
-        if (res.success && res.data && res.data.length > 0 && retainVideo) {
+        if (res.success && res.videoPath && retainVideo) {
           try {
             const videoDir = path.resolve(
               opts.config.rootDir,
@@ -1194,13 +1194,21 @@ async function runSuiteContext(
               videoDir,
               `${safeName}-${Date.now()}.mp4`,
             );
-            fs.writeFileSync(filePath, res.data);
+            fs.copyFileSync(res.videoPath, filePath);
+            fs.unlinkSync(res.videoPath);
             videoPath = filePath;
           } catch (err) {
             _warnCaptureOnce(
               'Video recording failed to write',
               err instanceof Error ? err.message : String(err),
             );
+          }
+        } else if (res.success && res.videoPath) {
+          // Not retaining — clean up the temp file.
+          try {
+            fs.unlinkSync(res.videoPath);
+          } catch {
+            // best-effort cleanup
           }
         } else if (!res.success && res.errorMessage) {
           _warnCaptureOnce('Video recording stopped with error', res.errorMessage);

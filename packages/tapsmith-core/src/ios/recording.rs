@@ -106,8 +106,8 @@ pub async fn resolve_avfoundation_index(device_name: &str) -> Result<Option<usiz
     let stderr = String::from_utf8_lossy(&output.stderr);
     let needle_lower = device_name.to_lowercase();
 
-    // The catalog has two sections: "AVFoundation video devices" and
-    // "AVFoundation audio devices". We only want the video section.
+    // Parse the video-device section into (index, name) pairs.
+    let mut devices: Vec<(usize, String)> = Vec::new();
     let mut in_video_section = false;
     for line in stderr.lines() {
         if line.contains("AVFoundation video devices") {
@@ -132,16 +132,28 @@ pub async fn resolve_avfoundation_index(device_name: &str) -> Result<Option<usiz
         let Ok(idx) = idx_str.trim().parse::<usize>() else {
             continue;
         };
-        let name_lower = name.trim().to_lowercase();
-        if name_lower.contains(&needle_lower) || needle_lower.contains(&name_lower) {
-            debug!(
-                device_name,
-                avf_name = name.trim(),
-                index = idx,
-                "Resolved AVFoundation device index"
-            );
-            return Ok(Some(idx));
-        }
+        devices.push((idx, name.trim().to_string()));
+    }
+
+    // Prefer exact match, then fall back to substring.
+    let found = devices
+        .iter()
+        .find(|(_, name)| name.to_lowercase() == needle_lower)
+        .or_else(|| {
+            devices.iter().find(|(_, name)| {
+                let name_lower = name.to_lowercase();
+                name_lower.contains(&needle_lower) || needle_lower.contains(&name_lower)
+            })
+        });
+
+    if let Some((idx, name)) = found {
+        debug!(
+            device_name,
+            avf_name = name.as_str(),
+            index = idx,
+            "Resolved AVFoundation device index"
+        );
+        return Ok(Some(*idx));
     }
 
     debug!(

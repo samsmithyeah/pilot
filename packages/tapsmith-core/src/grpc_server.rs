@@ -4800,11 +4800,8 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
         let req = request.into_inner();
         let request_id = Self::request_id(&req.request_id);
 
-        // Reject overlapping recordings — the SDK runner is the only caller
-        // and it's strictly serial per-device, so an existing handle here
-        // means the previous test did not stop cleanly. Returning an error
-        // (rather than silently restarting) makes that bug visible.
-        if self.video_recording.read().await.is_some() {
+        let mut video_recording = self.video_recording.write().await;
+        if video_recording.is_some() {
             return Ok(Response::new(proto::ActionResponse {
                 request_id,
                 success: false,
@@ -4826,7 +4823,7 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
 
         match crate::video::start(&serial, platform, size).await {
             Ok(handle) => {
-                *self.video_recording.write().await = Some(handle);
+                *video_recording = Some(handle);
                 Ok(Response::new(proto::ActionResponse {
                     request_id,
                     success: true,
@@ -4861,17 +4858,17 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
             return Ok(Response::new(proto::StopVideoRecordingResponse {
                 request_id,
                 success: false,
-                data: Vec::new(),
+                video_path: String::new(),
                 error_message: "No active recording — did you call StartVideoRecording?".into(),
                 duration_ms: 0,
             }));
         };
 
         match crate::video::stop(handle).await {
-            Ok((bytes, elapsed)) => Ok(Response::new(proto::StopVideoRecordingResponse {
+            Ok((video_path, elapsed)) => Ok(Response::new(proto::StopVideoRecordingResponse {
                 request_id,
                 success: true,
-                data: bytes,
+                video_path: video_path.to_string_lossy().into_owned(),
                 error_message: String::new(),
                 duration_ms: elapsed.as_millis() as u64,
             })),
@@ -4880,7 +4877,7 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                 Ok(Response::new(proto::StopVideoRecordingResponse {
                     request_id,
                     success: false,
-                    data: Vec::new(),
+                    video_path: String::new(),
                     error_message: e.to_string(),
                     duration_ms: 0,
                 }))

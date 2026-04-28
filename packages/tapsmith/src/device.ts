@@ -512,17 +512,17 @@ export class Device {
     return { success: res.success, errorMessage: res.errorMessage };
   }
 
-  /** @internal — Stop video recording and return MP4 bytes (used by the runner, PILOT-114). */
+  /** @internal — Stop video recording and return path to the MP4 (used by the runner, PILOT-114). */
   async _stopVideoRecording(): Promise<{
     success: boolean
-    data: Buffer
+    videoPath: string
     errorMessage: string
     durationMs: number
   }> {
     const res = await this._client.stopVideoRecording();
     return {
       success: res.success,
-      data: res.data,
+      videoPath: res.videoPath,
       errorMessage: res.errorMessage,
       durationMs: res.durationMs,
     };

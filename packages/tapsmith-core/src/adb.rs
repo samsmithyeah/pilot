@@ -251,10 +251,10 @@ pub async fn screenrecord_spawn(
         shell_cmd.push_str(&format!(" --size {w}x{h}"));
     }
     shell_cmd.push(' ');
-    // Quote the remote path defensively in case the user has configured
-    // a path containing spaces — screenrecord itself is fine with absolute
-    // paths under /sdcard.
-    shell_cmd.push_str(&format!("'{remote_path}'"));
+    // Shell-escape the remote path: replace ' with '\'' then wrap in
+    // single quotes so spaces and special chars are handled safely.
+    let escaped = remote_path.replace('\'', "'\\''");
+    shell_cmd.push_str(&format!("'{escaped}'"));
     cmd.arg(&shell_cmd);
     cmd.kill_on_drop(true);
     cmd.stdin(std::process::Stdio::null());

@@ -2,7 +2,7 @@
 //!
 //! Mirrors `crate::screenshot`'s platform-dispatch shape: a `start` that
 //! returns an owned `RecordingHandle`, and a `stop` that consumes the handle
-//! and returns the recorded MP4 bytes.
+//! and returns the path to the finalised MP4 on the host filesystem.
 //!
 //! Platform routing:
 //! - Android → `adb shell screenrecord` (3-min hard cap per segment; see
@@ -129,12 +129,11 @@ async fn start_ios(udid: &str, size: Option<(u32, u32)>) -> Result<RecordingHand
     }
 }
 
-/// Stop a recording, finalise the MP4, and return its bytes.
+/// Stop a recording, finalise the MP4, and return its host-local path.
 ///
-/// The handle's `local_path` is removed from disk after reading so we don't
-/// leak temp files; if reading fails it's logged but not surfaced as an
-/// additional error so the caller's stop path remains simple.
-pub async fn stop(handle: RecordingHandle) -> Result<(Vec<u8>, Duration)> {
+/// The caller owns the file at `local_path` and is responsible for
+/// moving/copying it to the final destination and cleaning up.
+pub async fn stop(handle: RecordingHandle) -> Result<(PathBuf, Duration)> {
     let elapsed = handle.started_at.elapsed();
     if elapsed >= SCREENRECORD_MAX_DURATION && matches!(handle.backend, Backend::Android { .. }) {
         warn!(
@@ -182,26 +181,15 @@ pub async fn stop(handle: RecordingHandle) -> Result<(Vec<u8>, Duration)> {
         }
     }
 
-    // Read the finalised MP4. If the file isn't there it usually means the
-    // recording was killed before it could write any frames — return an
-    // empty payload with a non-fatal warning so the caller can decide
-    // whether to retain or discard.
-    let bytes = match tokio::fs::read(&local_path).await {
-        Ok(b) => b,
-        Err(e) => {
-            warn!(
-                path = %local_path.display(),
-                error = %e,
-                "Recording file is missing after stop; returning empty payload"
-            );
-            Vec::new()
-        }
-    };
+    if !local_path.exists() {
+        bail!(
+            "Recording file {} is missing after stop — the recorder \
+             may have been killed before writing any frames",
+            local_path.display()
+        );
+    }
 
-    // Best-effort cleanup of the host-side temp file.
-    let _ = tokio::fs::remove_file(&local_path).await;
-
-    Ok((bytes, elapsed))
+    Ok((local_path, elapsed))
 }
 
 /// Look up an iOS device record by UDID, querying both simulators and physical

@@ -131,8 +131,8 @@ export interface GetColorSchemeResponse {
 export interface StopVideoRecordingResponse {
   requestId: string;
   success: boolean;
-  /** Raw MP4 bytes. Empty when success is false or recording was skipped. */
-  data: Buffer;
+  /** Host-local path to the finalised MP4. Empty when success is false. */
+  videoPath: string;
   errorMessage: string;
   /** Wall-clock duration of the recording in milliseconds. */
   durationMs: number;

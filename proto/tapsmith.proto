@@ -838,10 +838,10 @@ message StopVideoRecordingRequest {
 message StopVideoRecordingResponse {
   string request_id = 1;
   bool success = 2;
-  // Raw MP4 bytes. Empty when success == false or when recording was
-  // skipped (e.g. ffmpeg missing on a physical iOS host) — check
-  // `error_message` for the reason.
-  bytes data = 3;
+  // Host-local filesystem path to the finalised MP4. The SDK is
+  // responsible for copying/moving the file to its output directory and
+  // cleaning up. Empty when success == false.
+  string video_path = 3;
   string error_message = 4;
   // Wall-clock duration of the recording in milliseconds. Useful for
   // surfacing "exceeded screenrecord 3-min limit" warnings to the user.
