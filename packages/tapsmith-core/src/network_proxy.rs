@@ -441,13 +441,16 @@ async fn handle_connection(
         // Forward-proxy HTTP — absolute URL in the request line.
         handle_http(client, method, target, &header_buf, state).await;
     } else {
-        // Transparent HTTP — relative path from iptables redirect.
-        // Reconstruct the absolute URL from the Host header so the existing
-        // `handle_http` path can process it identically.
+        // Transparent HTTP — relative path from iptables redirect. Use
+        // `handle_mitm_http` (not `handle_http`) because it supports
+        // chunked transfer-encoding and HTTP keep-alive.
         let (headers, _) = parse_headers(&header_buf);
         if let Some(host) = get_header(&headers, "host") {
-            let absolute_url = format!("http://{host}{target}");
-            handle_http(client, method, &absolute_url, &header_buf, state).await;
+            let hostname = host.split(':').next().unwrap_or(host);
+            if let Some(upstream_tcp) = dial_upstream(hostname, 80).await {
+                let chained = PrefixedStream::new(header_buf, client);
+                handle_mitm_http(chained, upstream_tcp, hostname, state, false).await;
+            }
         } else {
             debug!("Transparent HTTP request missing Host header: {first_line}");
         }
@@ -2113,6 +2116,13 @@ async fn handle_transparent_tls<S>(
     // SNI hostname for the upstream connection. For iOS NE redirect, `dst_host`
     // is the already-resolved IP which avoids an extra DNS lookup.
     let upstream_host = if dst_host.is_empty() { &sni } else { &dst_host };
+    if upstream_host.is_empty() {
+        debug!(
+            dst_port,
+            "transparent TLS: no SNI and no dst_host — cannot determine upstream, dropping"
+        );
+        return;
+    }
     let Some(upstream_tcp) = dial_upstream(upstream_host, dst_port).await else {
         return;
     };
