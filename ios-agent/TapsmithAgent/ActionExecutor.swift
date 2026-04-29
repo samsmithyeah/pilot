@@ -80,7 +80,13 @@ class ActionExecutor {
         element.tap()
         // Small delay for focus
         Thread.sleep(forTimeInterval: 0.05)
-        element.typeText(text)
+        // Type character-by-character to avoid dropped keystrokes on slow
+        // simulators (CI runners). XCUITest's typeText fires key events
+        // faster than the input system can process on resource-constrained
+        // machines, causing characters to be silently lost.
+        for char in text {
+            element.typeText(String(char))
+        }
     }
 
     /// Type text without targeting a specific element (types into whatever is focused).
