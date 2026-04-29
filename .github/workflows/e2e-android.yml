@@ -234,13 +234,17 @@ jobs:
           path: all-blob-reports
           merge-multiple: true
 
-      - name: Merge reports
-        working-directory: packages/tapsmith
-        run: npx tapsmith merge-reports ../../all-blob-reports
+      - name: Install E2E dependencies
+        working-directory: e2e
+        run: npm ci
 
-      - name: Upload merged report
+      - name: Merge reports
+        working-directory: e2e
+        run: npx tapsmith merge-reports ../all-blob-reports -c tapsmith.config.android.mjs
+
+      - name: Upload HTML report
         uses: actions/upload-artifact@v4
         with:
           name: e2e-report
           retention-days: 30
-          path: all-blob-reports/
+          path: e2e/tapsmith-report/
