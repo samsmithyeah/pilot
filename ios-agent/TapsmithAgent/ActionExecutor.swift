@@ -93,9 +93,11 @@ class ActionExecutor {
     /// Type text into the currently focused element.
     /// Uses event synthesis via _XCT_sendString or XCPointerEventPath.typeText.
     func typeTextWithoutFocus(_ text: String) {
-        if !EventSynthesizer.typeText(text) {
-            NSLog("[ActionExecutor] Event synthesis typeText failed, falling back to app.typeText()")
-            app.typeText(text)
+        for char in text {
+            let s = String(char)
+            if !EventSynthesizer.typeText(s) {
+                app.typeText(s)
+            }
         }
     }
 
