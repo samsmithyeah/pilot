@@ -330,32 +330,16 @@ impl NetworkHandler for RouteInterceptHandler {
                             if let Some(q) = parsed.query() {
                                 req.path = format!("{}?{q}", req.path);
                             }
-                            // Cross-origin: detect host mismatch
-                            let new_host = parsed.host_str().unwrap_or("");
-                            if !new_host.is_empty() && new_host != hostname {
-                                let new_port = parsed
-                                    .port_or_known_default()
-                                    .unwrap_or(if parsed.scheme() == "https" { 443 } else { 80 });
-                                let new_is_https = parsed.scheme() == "https";
-                                req.override_host = Some(OverrideOrigin {
-                                    host: new_host.to_string(),
-                                    port: new_port,
-                                    is_https: new_is_https,
-                                });
-                                // Auto-update Host header to match the new origin
-                                let host_val = if (new_is_https && new_port == 443)
-                                    || (!new_is_https && new_port == 80)
-                                {
-                                    new_host.to_string()
-                                } else {
-                                    format!("{new_host}:{new_port}")
-                                };
-                                if let Some(entry) = req
-                                    .headers
-                                    .iter_mut()
-                                    .find(|(k, _)| k.eq_ignore_ascii_case("host"))
-                                {
-                                    entry.1 = host_val;
+                            if let Some(origin) = OverrideOrigin::from_parsed_url(&parsed) {
+                                if origin.host != hostname {
+                                    if let Some(entry) = req
+                                        .headers
+                                        .iter_mut()
+                                        .find(|(k, _)| k.eq_ignore_ascii_case("host"))
+                                    {
+                                        entry.1 = origin.host_header_value();
+                                    }
+                                    req.override_host = Some(origin);
                                 }
                             }
                         } else {

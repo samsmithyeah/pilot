@@ -92,6 +92,37 @@ pub(crate) struct OverrideOrigin {
     pub is_https: bool,
 }
 
+impl OverrideOrigin {
+    pub fn from_parsed_url(parsed: &url::Url) -> Option<Self> {
+        let host = parsed.host_str().unwrap_or("").to_string();
+        if host.is_empty() {
+            return None;
+        }
+        let is_https = parsed.scheme() == "https";
+        let port = parsed
+            .port_or_known_default()
+            .unwrap_or(if is_https { 443 } else { 80 });
+        Some(Self {
+            host,
+            port,
+            is_https,
+        })
+    }
+
+    pub fn url(&self, path: &str) -> String {
+        let scheme = if self.is_https { "https" } else { "http" };
+        format!("{scheme}://{}:{}{}", self.host, self.port, path)
+    }
+
+    pub fn host_header_value(&self) -> String {
+        if (self.is_https && self.port == 443) || (!self.is_https && self.port == 80) {
+            self.host.clone()
+        } else {
+            format!("{}:{}", self.host, self.port)
+        }
+    }
+}
+
 /// A decoded HTTP response, structured for transformation hooks.
 ///
 /// Same `raw_bytes` / `body` split as [`ParsedRequest`].
@@ -1505,18 +1536,13 @@ async fn handle_mitm_http<C, U>(
         }
 
         // When cross-origin, use the override values for logging/events.
-        let (effective_hostname, effective_is_https);
-        if let Some(ref origin) = req.override_host {
-            effective_hostname = origin.host.clone();
-            effective_is_https = origin.is_https;
-        } else {
-            effective_hostname = hostname.to_string();
-            effective_is_https = is_https;
-        }
+        let (effective_hostname, effective_is_https) = match req.override_host {
+            Some(ref origin) => (origin.host.clone(), origin.is_https),
+            None => (hostname.to_string(), is_https),
+        };
 
         let mut resp = if let Some(ref origin) = req.override_host {
-            let scheme = if origin.is_https { "https" } else { "http" };
-            let url = format!("{scheme}://{}:{}{}", origin.host, origin.port, req.path);
+            let url = origin.url(&req.path);
             match crate::route_handler::fetch_upstream(&url, &req.method, &req.headers, &req.body)
                 .await
             {
@@ -1755,11 +1781,7 @@ async fn handle_http(
                 if let Some(ref origin) = parsed_req.override_host {
                     // Cross-origin: use fetch_upstream which handles both
                     // HTTP and HTTPS targets correctly.
-                    let scheme = if origin.is_https { "https" } else { "http" };
-                    let url = format!(
-                        "{scheme}://{}:{}{}",
-                        origin.host, origin.port, effective_path
-                    );
+                    let url = origin.url(&effective_path);
                     let resp = match crate::route_handler::fetch_upstream(
                         &url,
                         &effective_method,
