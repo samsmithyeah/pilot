@@ -78,26 +78,29 @@ class ActionExecutor {
             throw AgentError.actionFailed("Element is not hittable — cannot type text")
         }
         element.tap()
-        // Small delay for focus
         Thread.sleep(forTimeInterval: 0.05)
-        // Type character-by-character to avoid dropped keystrokes on slow
-        // simulators (CI runners). XCUITest's typeText fires key events
-        // faster than the input system can process on resource-constrained
-        // machines, causing characters to be silently lost.
-        for char in text {
-            element.typeText(String(char))
-        }
+        pasteText(text)
     }
 
-    /// Type text without targeting a specific element (types into whatever is focused).
     /// Type text into the currently focused element.
-    /// Uses event synthesis via _XCT_sendString or XCPointerEventPath.typeText.
     func typeTextWithoutFocus(_ text: String) {
-        for char in text {
-            let s = String(char)
-            if !EventSynthesizer.typeText(s) {
-                app.typeText(s)
-            }
+        pasteText(text)
+    }
+
+    /// Insert text via the pasteboard (Cmd+V). Atomic — cannot drop
+    /// characters, unlike keystroke-based typing which silently loses
+    /// keys on slow CI simulators.
+    private func pasteText(_ text: String) {
+        let prev = UIPasteboard.general.string
+        UIPasteboard.general.string = text
+        if !EventSynthesizer.keyPress(key: "v", modifiers: .command) {
+            app.typeText(text)
+        }
+        // Restore previous clipboard content
+        if let prev = prev {
+            UIPasteboard.general.string = prev
+        } else {
+            UIPasteboard.general.items = []
         }
     }
 
