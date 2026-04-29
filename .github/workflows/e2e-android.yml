@@ -140,21 +140,30 @@ jobs:
         id: system-image-cache
         uses: actions/cache@v4
         with:
-          path: ${{ env.ANDROID_HOME }}/system-images/android-${{ env.ANDROID_API_LEVEL }}
-          key: system-image-${{ env.ANDROID_SYSTEM_IMAGE }}
+          path: ${{ env.ANDROID_HOME }}/system-images
+          key: system-image-${{ env.ANDROID_SYSTEM_IMAGE }}-v1
 
       - name: Install Android system image
         if: steps.system-image-cache.outputs.cache-hit != 'true'
-        run: echo "y" | sdkmanager "${{ env.ANDROID_SYSTEM_IMAGE }}"
+        run: echo "y" | sdkmanager --install "${{ env.ANDROID_SYSTEM_IMAGE }}"
 
-      - name: Create AVD
+      - name: Create AVD and pre-boot emulator
         run: |
           echo "no" | avdmanager create avd \
             -n "${{ env.AVD_NAME }}" \
             -k "${{ env.ANDROID_SYSTEM_IMAGE }}" \
             --device "pixel_6" \
             --force
-          avdmanager list avd -c
+          nohup emulator -avd "${{ env.AVD_NAME }}" \
+            -port 5554 \
+            -read-only \
+            -no-snapshot-load \
+            -no-snapshot-save \
+            -no-boot-anim \
+            -no-audio \
+            -gpu swiftshader_indirect \
+            -no-window &
+          echo "Emulator booting in background (PID $!)"
 
       - name: Install SDK dependencies
         working-directory: packages/tapsmith
@@ -167,6 +176,14 @@ jobs:
       - name: Install E2E dependencies
         working-directory: e2e
         run: npm ci
+
+      - name: Wait for emulator boot
+        run: |
+          adb wait-for-device
+          while [ "$(adb -s emulator-5554 shell getprop sys.boot_completed 2>/dev/null)" != "1" ]; do
+            sleep 2
+          done
+          echo "Emulator ready"
 
       - name: Run E2E tests
         working-directory: e2e
