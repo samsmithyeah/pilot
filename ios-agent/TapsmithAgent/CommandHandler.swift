@@ -303,34 +303,27 @@ class CommandHandler {
 
         case "typeText":
             let text = params["text"] as? String ?? ""
-            // No-op fast path: typing an empty string would still
-            // resolve the element, tap to focus, and burn a 0.5s
-            // keyboard-wait sleep before passing "" to the event
-            // synthesizer (which is itself a no-op). Skip everything.
             if text.isEmpty {
                 return ["success": true]
             }
+            let delayMs = params["typingDelayMs"] as? Int ?? 0
             let selectorKeys = ["role", "id", "contentDesc", "className", "testId", "hint", "textContains", "elementId"]
             let hasSelector = selectorKeys.contains { params[$0] != nil }
             if hasSelector {
-                // Remove "text" from params before resolving selector
                 var selectorParams = params
                 selectorParams.removeValue(forKey: "text")
+                selectorParams.removeValue(forKey: "typingDelayMs")
                 let element = try resolveElement(selectorParams)
-                // Tap at coordinates to focus, wait for keyboard, then type
                 if let center = snapshotCenter(for: element.elementId) {
                     actionExecutor.tapCoordinates(x: Int(center.x), y: Int(center.y))
-                    // Wait for the keyboard to appear after focus tap.
-                    // Maestro waits for app.keyboards.firstMatch.exists but that
-                    // triggers quiescence. Use a fixed delay instead.
                     Thread.sleep(forTimeInterval: 0.5)
-                    actionExecutor.typeTextWithoutFocus(text)
+                    actionExecutor.typeTextWithoutFocus(text, delayMs: delayMs)
                 } else {
                     let xcElem = try getXCUIElement(element.elementId)
-                    try actionExecutor.typeText(xcElem, text: text)
+                    try actionExecutor.typeText(xcElem, text: text, delayMs: delayMs)
                 }
             } else {
-                actionExecutor.typeTextWithoutFocus(text)
+                actionExecutor.typeTextWithoutFocus(text, delayMs: delayMs)
             }
             return ["success": true]
 

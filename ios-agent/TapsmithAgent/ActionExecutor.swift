@@ -73,27 +73,30 @@ class ActionExecutor {
     // MARK: - Text Input
 
     /// Type text into an element. Taps the element first to ensure focus.
-    func typeText(_ element: XCUIElement, text: String) throws {
+    func typeText(_ element: XCUIElement, text: String, delayMs: Int = 0) throws {
         guard element.isHittable else {
             throw AgentError.actionFailed("Element is not hittable — cannot type text")
         }
         element.tap()
         Thread.sleep(forTimeInterval: 0.05)
-        typeCharByChar(text)
+        typeCharByChar(text, delayMs: delayMs)
     }
 
     /// Type text into the currently focused element.
-    func typeTextWithoutFocus(_ text: String) {
-        typeCharByChar(text)
+    func typeTextWithoutFocus(_ text: String, delayMs: Int = 0) {
+        typeCharByChar(text, delayMs: delayMs)
     }
 
-    private func typeCharByChar(_ text: String) {
+    func typeCharByChar(_ text: String, delayMs: Int = 0) {
+        let delay = TimeInterval(delayMs) / 1000.0
         for char in text {
             let s = String(char)
             if !EventSynthesizer.typeText(s) {
                 app.typeText(s)
             }
-            Thread.sleep(forTimeInterval: 0.01)
+            if delay > 0 {
+                Thread.sleep(forTimeInterval: delay)
+            }
         }
     }
 

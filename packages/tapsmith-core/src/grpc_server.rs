@@ -1249,6 +1249,11 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
             selector: selector_to_json(selector),
             text: req.text,
             timeout_ms: opt_timeout(req.timeout_ms),
+            typing_delay_ms: if req.typing_delay_ms > 0 {
+                Some(req.typing_delay_ms)
+            } else {
+                None
+            },
         };
 
         let result = self
@@ -1320,6 +1325,11 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
             selector: sel_json,
             text: req.text,
             timeout_ms: opt_timeout(req.timeout_ms),
+            typing_delay_ms: if req.typing_delay_ms > 0 {
+                Some(req.typing_delay_ms)
+            } else {
+                None
+            },
         };
 
         let result = self
