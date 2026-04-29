@@ -81,7 +81,7 @@ jobs:
 
   build-test-app:
     name: Build Test App
-    runs-on: macos-15
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -96,10 +96,6 @@ jobs:
         if: steps.test-app-cache.outputs.cache-hit != 'true'
         with:
           node-version: 24
-
-      - name: Select Xcode 16.3
-        if: steps.test-app-cache.outputs.cache-hit != 'true'
-        run: sudo xcode-select -s /Applications/Xcode_16.3.app/Contents/Developer
 
       - name: Install dependencies and prebuild
         if: steps.test-app-cache.outputs.cache-hit != 'true'
@@ -123,6 +119,7 @@ jobs:
             -configuration Release \
             -destination 'generic/platform=iOS Simulator' \
             -derivedDataPath ../.build \
+            SWIFT_STRICT_CONCURRENCY=minimal \
             -quiet
 
       - name: Copy to fixtures path
