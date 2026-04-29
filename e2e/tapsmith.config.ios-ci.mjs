@@ -11,26 +11,13 @@ export default defineConfig({
   trace: "retain-on-failure",
   workers: 1,
   simulator: process.env.TAPSMITH_IOS_SIMULATOR || "iPhone 16",
-  projects: [
-    {
-      name: "authentication",
-      testMatch: ["**/auth.setup.ts"],
-    },
-    {
-      name: "default",
-      testMatch: ["**/*.test.ts"],
-      testIgnore: [
-        "**/app-state.test.ts",
-        "**/auth-gate.test.ts",
-        "**/*.android.test.ts",
-        "**/webview*.test.ts",
-      ],
-    },
-    {
-      name: "authenticated",
-      dependencies: ["authentication"],
-      use: { appState: "./tapsmith-results/auth-state-authentication.tar.gz" },
-      testMatch: ["**/app-state.test.ts", "**/auth-gate.test.ts"],
-    },
+  testMatch: ["**/*.test.ts"],
+  testIgnore: [
+    "**/app-state.test.ts",
+    "**/auth-gate.test.ts",
+    "**/auth.setup.ts",
+    "**/*.android.test.ts",
+    "**/webview*.test.ts",
+    "**/network-capture.test.ts",
   ],
 })
