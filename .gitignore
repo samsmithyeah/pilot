@@ -8,7 +8,6 @@ packages/tapsmith/tapsmith-*.tgz
 *.class
 *.dex
 *.apk
-!e2e/fixtures/app-release.apk
 
 # Android/Gradle
 agent/.gradle/
@@ -29,6 +28,7 @@ agent/local.properties
 Thumbs.db
 
 # Test artifacts
+e2e/fixtures/
 tapsmith-results/
 tapsmith-report/
 blob-report/

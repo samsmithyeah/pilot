@@ -83,11 +83,48 @@ jobs:
             agent/app/build/outputs/apk/debug/app-debug.apk
             agent/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
 
+  build-test-app:
+    name: Build Test App
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache test app APK
+        id: test-app-cache
+        uses: actions/cache@v4
+        with:
+          path: test-app/android/app/build/outputs/apk/release/app-release.apk
+          key: test-app-android-${{ hashFiles('test-app/app/**', 'test-app/assets/**', 'test-app/package-lock.json', 'test-app/app.json') }}
+
+      - uses: actions/setup-node@v4
+        if: steps.test-app-cache.outputs.cache-hit != 'true'
+        with:
+          node-version: 24
+
+      - uses: actions/setup-java@v4
+        if: steps.test-app-cache.outputs.cache-hit != 'true'
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install dependencies and build
+        if: steps.test-app-cache.outputs.cache-hit != 'true'
+        working-directory: test-app
+        run: |
+          npm ci --legacy-peer-deps
+          npx expo run:android --variant release --no-install
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: test-app-apk
+          retention-days: 1
+          path: test-app/android/app/build/outputs/apk/release/app-release.apk
+
   # ─── Sharded E2E execution ─────────────────────────────────────────────
 
   e2e-test:
     name: "Shard ${{ matrix.shard }}/4"
-    needs: [build-daemon, build-agent]
+    needs: [build-daemon, build-agent, build-test-app]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -96,8 +133,6 @@ jobs:
         shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
-        with:
-          lfs: true
 
       - name: Enable KVM
         run: |
@@ -132,6 +167,12 @@ jobs:
         with:
           name: agent-apks
           path: agent/app/build/outputs/apk
+
+      - name: Download test app APK
+        uses: actions/download-artifact@v4
+        with:
+          name: test-app-apk
+          path: e2e/fixtures
 
       - name: Make daemon executable
         run: chmod +x packages/tapsmith-core/target/release/tapsmith-core

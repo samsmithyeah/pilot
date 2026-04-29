@@ -79,11 +79,55 @@ jobs:
           include-hidden-files: true
           path: ios-agent/.build-sim/
 
+  build-test-app:
+    name: Build Test App
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache test app
+        id: test-app-cache
+        uses: actions/cache@v4
+        with:
+          path: e2e/fixtures/TapsmithTestApp.app
+          key: test-app-ios-${{ hashFiles('test-app/app/**', 'test-app/assets/**', 'test-app/package-lock.json', 'test-app/app.json') }}
+
+      - uses: actions/setup-node@v4
+        if: steps.test-app-cache.outputs.cache-hit != 'true'
+        with:
+          node-version: 24
+
+      - name: Select Xcode
+        if: steps.test-app-cache.outputs.cache-hit != 'true'
+        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+      - name: Install dependencies and build
+        if: steps.test-app-cache.outputs.cache-hit != 'true'
+        working-directory: test-app
+        run: |
+          npm ci --legacy-peer-deps
+          npx expo run:ios --configuration Release --no-install
+
+      - name: Copy to fixtures path
+        if: steps.test-app-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p e2e/fixtures
+          cp -R test-app/ios/build/Build/Products/Release-iphonesimulator/TapsmithTestApp.app e2e/fixtures/
+
+      - name: Package test app
+        run: tar czf test-app-ios.tar.gz -C e2e/fixtures TapsmithTestApp.app
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: test-app-ios
+          retention-days: 1
+          path: test-app-ios.tar.gz
+
   # ─── Sharded E2E execution ─────────────────────────────────────────────
 
   e2e-test:
     name: "Shard ${{ matrix.shard }}/4"
-    needs: [build-daemon, build-agent]
+    needs: [build-daemon, build-agent, build-test-app]
     runs-on: macos-latest
     timeout-minutes: 30
     strategy:
@@ -92,8 +136,6 @@ jobs:
         shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
-        with:
-          lfs: true
 
       - uses: actions/setup-node@v4
         with:
@@ -110,6 +152,12 @@ jobs:
         with:
           name: ios-agent-build
           path: ios-agent/.build-sim
+
+      - name: Download test app
+        uses: actions/download-artifact@v4
+        with:
+          name: test-app-ios
+          path: .
 
       - name: Make daemon executable
         run: |
@@ -142,8 +190,9 @@ jobs:
           ln -s "$PWD/ios-agent/.build-sim" ~/Library/Developer/Xcode/DerivedData/TapsmithAgent-ci
 
       - name: Extract test app
-        working-directory: e2e/fixtures
-        run: tar xzf TapsmithTestApp.app.tar.gz
+        run: |
+          mkdir -p e2e/fixtures
+          tar xzf test-app-ios.tar.gz -C e2e/fixtures
 
       - name: Install SDK dependencies
         working-directory: packages/tapsmith
