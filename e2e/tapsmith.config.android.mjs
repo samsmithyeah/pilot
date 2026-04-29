@@ -9,7 +9,6 @@ export default defineConfig({
   screenshot: "only-on-failure",
   workers: 2,
   trace: "retain-on-failure",
-  video: "retain-on-failure",
   avd: "Tapsmith_Generic_Phone_API_35",
   agentApk: "../agent/app/build/outputs/apk/debug/app-debug.apk",
   agentTestApk:
