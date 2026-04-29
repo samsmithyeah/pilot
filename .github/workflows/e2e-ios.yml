@@ -114,11 +114,13 @@ jobs:
       - name: Make daemon executable
         run: chmod +x packages/tapsmith-core/target/release/tapsmith-core
 
-      - name: Select Xcode and verify simulator
+      - name: Select Xcode and detect simulator
         run: |
           sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
           xcodebuild -version
-          xcrun simctl list devices available | grep "iPhone" | head -10
+          SIM=$(xcrun simctl list devices available | grep -oE "iPhone [0-9]+ " | head -1 | xargs)
+          echo "Using simulator: $SIM"
+          echo "TAPSMITH_IOS_SIMULATOR=$SIM" >> $GITHUB_ENV
 
       - name: Link agent build to DerivedData for auto-discovery
         run: |
