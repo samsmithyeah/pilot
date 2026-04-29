@@ -81,7 +81,7 @@ jobs:
 
   build-test-app:
     name: Build Test App
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
@@ -96,6 +96,10 @@ jobs:
         if: steps.test-app-cache.outputs.cache-hit != 'true'
         with:
           node-version: 24
+
+      - name: Select Xcode 16.3
+        if: steps.test-app-cache.outputs.cache-hit != 'true'
+        run: sudo xcode-select -s /Applications/Xcode_16.3.app/Contents/Developer
 
       - name: Install dependencies and prebuild
         if: steps.test-app-cache.outputs.cache-hit != 'true'
