@@ -11,7 +11,7 @@ export default defineConfig({
   trace: { mode: "retain-on-failure", network: false },
   video: "retain-on-failure",
   workers: 1,
-  simulator: process.env.TAPSMITH_IOS_SIMULATOR || "iPhone 16",
+  simulator: process.env.TAPSMITH_IOS_SIMULATOR || "iPhone 15",
   projects: [
     {
       name: "authentication",
