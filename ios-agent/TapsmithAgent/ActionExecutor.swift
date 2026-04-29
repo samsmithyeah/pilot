@@ -79,26 +79,36 @@ class ActionExecutor {
         }
         element.tap()
         Thread.sleep(forTimeInterval: 0.05)
-        typeViaEventSynthesizer(text, delayMs: delayMs)
+        if !typeViaEventSynthesizer(text, delayMs: delayMs) {
+            throw AgentError.actionFailed("typeText failed to synthesize input")
+        }
     }
 
     /// Type text into the currently focused element.
-    func typeTextWithoutFocus(_ text: String, delayMs: Int = 0) {
+    @discardableResult
+    func typeTextWithoutFocus(_ text: String, delayMs: Int = 0) -> Bool {
         typeViaEventSynthesizer(text, delayMs: delayMs)
     }
 
     /// Type text via EventSynthesizer (bypasses XCUITest quiescence).
     /// When delayMs is 0, sends the full string at once for speed.
     /// When delayMs > 0, types char-by-char with delays.
-    func typeViaEventSynthesizer(_ text: String, delayMs: Int = 0) {
+    @discardableResult
+    func typeViaEventSynthesizer(_ text: String, delayMs: Int = 0) -> Bool {
+        guard !text.isEmpty else { return true }
+
         if delayMs > 0 {
             let delay = TimeInterval(delayMs) / 1000.0
+            var succeeded = true
             for char in text {
-                let _ = EventSynthesizer.typeText(String(char))
+                if !EventSynthesizer.typeText(String(char)) {
+                    succeeded = false
+                }
                 Thread.sleep(forTimeInterval: delay)
             }
+            return succeeded
         } else {
-            let _ = EventSynthesizer.typeText(text)
+            return EventSynthesizer.typeText(text)
         }
     }
 
