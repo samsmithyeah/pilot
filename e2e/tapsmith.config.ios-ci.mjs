@@ -5,7 +5,7 @@ export default defineConfig({
   app: "./fixtures/TapsmithTestApp.app",
   package: "dev.tapsmith.testapp",
   timeout: 20_000,
-  typingDelay: 10,
+  typingDelay: 100,
   retries: 0,
   reporter: [["list"], ["github"], ["html", { open: "never" }]],
   screenshot: "only-on-failure",
