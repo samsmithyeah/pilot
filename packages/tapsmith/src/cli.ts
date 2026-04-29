@@ -2062,7 +2062,7 @@ async function main(): Promise<void> {
     }
     // Leave emulators running for reuse by the next run.
     preserveEmulatorsForReuse(launchedEmulators);
-    process.exit(sequentialExitCode);
+    process.exitCode = sequentialExitCode;
   }
 }
 
@@ -2136,5 +2136,6 @@ main().catch(async (err) => {
     if (isDispatcherShuttingDown()) return;
   } catch { /* dispatcher not loaded — fall through */ }
   console.error(red(`Fatal error: ${err}`));
+  console.error((err as Error)?.stack ?? err);
   process.exit(1);
 });

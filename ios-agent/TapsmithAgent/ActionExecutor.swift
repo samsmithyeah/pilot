@@ -79,28 +79,21 @@ class ActionExecutor {
         }
         element.tap()
         Thread.sleep(forTimeInterval: 0.05)
-        pasteText(text)
+        typeCharByChar(text)
     }
 
     /// Type text into the currently focused element.
     func typeTextWithoutFocus(_ text: String) {
-        pasteText(text)
+        typeCharByChar(text)
     }
 
-    /// Insert text via the pasteboard (Cmd+V). Atomic — cannot drop
-    /// characters, unlike keystroke-based typing which silently loses
-    /// keys on slow CI simulators.
-    private func pasteText(_ text: String) {
-        let prev = UIPasteboard.general.string
-        UIPasteboard.general.string = text
-        if !EventSynthesizer.keyPress(key: "v", modifiers: .command) {
-            app.typeText(text)
-        }
-        // Restore previous clipboard content
-        if let prev = prev {
-            UIPasteboard.general.string = prev
-        } else {
-            UIPasteboard.general.items = []
+    private func typeCharByChar(_ text: String) {
+        for char in text {
+            let s = String(char)
+            if !EventSynthesizer.typeText(s) {
+                app.typeText(s)
+            }
+            Thread.sleep(forTimeInterval: 0.01)
         }
     }
 
