@@ -94,7 +94,15 @@ class ActionExecutor {
         if delayMs > 0 {
             let delay = TimeInterval(delayMs) / 1000.0
             for char in text {
-                app.typeText(String(char))
+                let s = String(char)
+                if s == "\n" {
+                    // Newline via EventSynthesizer to avoid XCUITest
+                    // quiescence hang (Return triggers app state changes
+                    // that app.typeText waits on indefinitely).
+                    let _ = EventSynthesizer.typeText(s)
+                } else {
+                    app.typeText(s)
+                }
                 Thread.sleep(forTimeInterval: delay)
             }
         } else {
