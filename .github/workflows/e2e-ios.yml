@@ -147,7 +147,9 @@ jobs:
         working-directory: e2e
         run: |
           npx tapsmith test -c tapsmith.config.ios-ci.mjs --shard=${{ matrix.shard }}/${{ env.SHARD_TOTAL }} --workers 1 || \
-          npx tapsmith test -c tapsmith.config.ios-ci.mjs --shard=${{ matrix.shard }}/${{ env.SHARD_TOTAL }} --workers 1
+          (echo "First attempt failed — killing stale simulators before retry" && \
+           xcrun simctl shutdown all 2>/dev/null; \
+           npx tapsmith test -c tapsmith.config.ios-ci.mjs --shard=${{ matrix.shard }}/${{ env.SHARD_TOTAL }} --workers 1)
 
       - name: Upload blob report
         if: always()
