@@ -491,6 +491,9 @@ export class Device {
     errorMessage: string
   }> {
     const res = await this._client.startNetworkCapture();
+    if (res.success) {
+      this._ensureRouteManager().ensureEventsSubscribed();
+    }
     return {
       proxyPort: res.proxyPort,
       success: res.success,

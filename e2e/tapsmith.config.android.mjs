@@ -5,10 +5,11 @@ export default defineConfig({
   activity: "dev.tapsmith.testapp.MainActivity",
   package: "dev.tapsmith.testapp",
   timeout: 15_000,
-  retries: 1,
+  retries: 0,
   screenshot: "only-on-failure",
   workers: 2,
   trace: "retain-on-failure",
+  video: "retain-on-failure",
   avd: "Tapsmith_Generic_Phone_API_35",
   agentApk: "../agent/app/build/outputs/apk/debug/app-debug.apk",
   agentTestApk:
