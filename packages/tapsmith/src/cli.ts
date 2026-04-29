@@ -2062,7 +2062,10 @@ async function main(): Promise<void> {
     }
     // Leave emulators running for reuse by the next run.
     preserveEmulatorsForReuse(launchedEmulators);
-    process.exitCode = sequentialExitCode;
+    // Defer process.exit so any pending error handlers (unhandledRejection
+    // etc.) in the current microtask queue run first — process.exit() in a
+    // finally block swallows them.
+    setTimeout(() => process.exit(sequentialExitCode), 0);
   }
 }
 
