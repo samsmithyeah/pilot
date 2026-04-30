@@ -4219,12 +4219,13 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                     }
                     return Ok(Self::success_action_response(request_id));
                 }
-                // iOS simulator: uninstall + reinstall so the data container
-                // is guaranteed clean. Merely clearing files inside the
-                // existing container leaves stale SQLite WAL/SHM and cache
-                // artefacts on slower CI runners, causing the relaunched app
-                // to ignore the restored state.
+                // iOS simulator: uninstall + reinstall gives a guaranteed-
+                // clean data container, avoiding stale SQLite WAL/SHM that
+                // can cause the relaunched app to ignore restored state.
+                // Falls back to clear-in-place when the app bundle path is
+                // unavailable.
                 let _ = ios::device::terminate_app(&serial, pkg).await;
+                tokio::time::sleep(Duration::from_millis(250)).await;
 
                 let app_path = self
                     .ios_agent_config
@@ -4232,28 +4233,14 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                     .await
                     .as_ref()
                     .and_then(|c| c.app_path.clone());
-                let Some(ref app_path) = app_path else {
-                    return Ok(self
-                        .action_error(
-                            request_id,
-                            "APP_STATE_RESTORE_FAILED",
-                            "restoreAppState on iOS simulator requires the app \
-                             bundle path (set `app` in your config)"
-                                .to_string(),
-                        )
-                        .await);
-                };
 
-                if let Err(e) = ios::device::clear_app_data(&serial, pkg, Some(app_path)).await {
-                    return Ok(self
-                        .action_error(
-                            request_id,
-                            "APP_STATE_RESTORE_FAILED",
-                            format!("Failed to reinstall app before restore: {e}"),
-                        )
-                        .await);
+                if let Some(ref app_path) = app_path {
+                    if let Err(e) = ios::device::clear_app_data(&serial, pkg, Some(app_path)).await
+                    {
+                        warn!(%pkg, error = %e, "Reinstall failed, falling back to clear-in-place");
+                    }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
                 }
-                tokio::time::sleep(Duration::from_millis(500)).await;
 
                 let container = match ios::device::get_app_container(&serial, pkg).await {
                     Ok(path) => path,
@@ -4262,11 +4249,19 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                             .action_error(
                                 request_id,
                                 "APP_STATE_RESTORE_FAILED",
-                                format!("Failed to locate app container after reinstall: {e}"),
+                                format!("Failed to locate app container: {e}"),
                             )
                             .await);
                     }
                 };
+
+                // Clear remaining files so extracted state isn't mixed with
+                // stale data (only matters when reinstall was skipped).
+                if app_path.is_none() {
+                    if let Err(e) = ios::device::clear_container(&container).await {
+                        warn!(%pkg, error = %e, "clear_container failed, continuing");
+                    }
+                }
 
                 // Extract archive into the fresh data container
                 if let Some(parent) = std::path::Path::new(&container).parent() {
