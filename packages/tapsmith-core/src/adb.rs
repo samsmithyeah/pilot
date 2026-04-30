@@ -66,8 +66,13 @@ async fn run_adb(serial: Option<&str>, args: &[&str], timeout: Duration) -> Resu
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Base directory for user-installed CA certificates on Android.
-const DEVICE_CA_CERT_DIR: &str = "/data/misc/user/0/cacerts-added";
+/// System CA certificate directory. On Android API 24+ apps only trust
+/// system CAs by default — installing into the user store
+/// (`/data/misc/user/0/cacerts-added/`) is invisible to apps that lack
+/// a `<trust-anchors><certificates src="user"/></trust-anchors>` in
+/// their network security config. We install as a system CA so the
+/// MITM proxy works with any app without requiring the app to opt in.
+const DEVICE_CA_CERT_DIR: &str = "/system/etc/security/cacerts";
 
 /// Build the full on-device path for a CA cert given its filename (e.g. `a1b2c3d4.0`).
 pub fn device_ca_cert_path(filename: &str) -> String {
@@ -354,9 +359,11 @@ pub async fn install_ca_cert(serial: &str, ca_pem_path: &str, cert_filename: &st
     // Push cert to a temp location
     push_file(serial, ca_pem_path, "/data/local/tmp/tapsmith-ca.pem").await?;
 
-    // Install into user CA store with hash-based filename
+    // Remount /system read-write so we can write to the system CA store.
+    // Works on emulators (userdebug/eng builds); fails on production devices.
+    let _ = shell_lenient(serial, "mount -o rw,remount /system").await;
+
     let device_path = device_ca_cert_path(cert_filename);
-    shell(serial, &format!("mkdir -p {DEVICE_CA_CERT_DIR}")).await?;
     shell(
         serial,
         &format!("cp /data/local/tmp/tapsmith-ca.pem {device_path}"),
@@ -364,7 +371,7 @@ pub async fn install_ca_cert(serial: &str, ca_pem_path: &str, cert_filename: &st
     .await?;
     shell(serial, &format!("chmod 644 {device_path}")).await?;
 
-    info!(%serial, "CA certificate installed on device");
+    info!(%serial, cert_filename, "CA certificate installed as system cert");
     Ok(())
 }
 
