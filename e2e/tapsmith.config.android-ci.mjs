@@ -9,7 +9,7 @@ export default defineConfig({
   reporter: [["list"], ["github"], ["html", { open: "never" }]],
   screenshot: "only-on-failure",
   workers: 1,
-  trace: { mode: "retain-on-failure", network: false },
+  trace: "retain-on-failure",
   avd: "Tapsmith_Generic_Phone_API_35",
   agentApk: "../agent/app/build/outputs/apk/debug/app-debug.apk",
   agentTestApk:
@@ -22,14 +22,7 @@ export default defineConfig({
     {
       name: "default",
       testMatch: ["**/*.test.ts"],
-      testIgnore: [
-        "**/app-state.test.ts",
-        "**/auth-gate.test.ts",
-        "**/webview*.test.ts",
-        // Network capture/mocking requires iptables which is unreliable on GHA emulators
-        "**/network-capture.test.ts",
-        "**/network-mocking.test.ts",
-      ],
+      testIgnore: ["**/app-state.test.ts", "**/auth-gate.test.ts", "**/webview*.test.ts"],
     },
     {
       name: "authenticated",
