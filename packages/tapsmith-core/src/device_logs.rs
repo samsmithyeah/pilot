@@ -129,6 +129,7 @@ async fn stream_android(
     refresh_handle.abort();
 
     let _ = child.kill();
+    let _ = child.wait();
 }
 
 async fn resolve_all_pids(serial: &str, package_name: &str) -> Vec<i32> {
@@ -296,6 +297,7 @@ async fn stream_ios(
                     None => {
                         // Reader thread exited — might be ndjson unsupported
                         let _ = child.kill();
+                        let _ = child.wait();
                         stream_ios_compact(udid, predicate, tx, cancel_rx).await;
                         return;
                     }
@@ -306,6 +308,14 @@ async fn stream_ios(
     }
 
     let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn now_epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 fn parse_ios_ndjson_line(line: &str) -> Option<ParsedLogEntry> {
@@ -318,7 +328,7 @@ fn parse_ios_ndjson_line(line: &str) -> Option<ParsedLogEntry> {
         .get("subsystem")
         .and_then(|s| s.as_str())
         .unwrap_or_default();
-    let timestamp_ms = v.get("machTimestamp").and_then(|t| t.as_u64()).unwrap_or(0);
+    let timestamp_ms = now_epoch_ms();
 
     let level = match message_type {
         "Default" => "log",
@@ -401,6 +411,7 @@ async fn stream_ios_compact(
     }
 
     let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn parse_ios_compact_line(line: &str) -> Option<ParsedLogEntry> {
@@ -456,7 +467,7 @@ fn parse_ios_compact_line(line: &str) -> Option<ParsedLogEntry> {
         level,
         message: message.to_string(),
         tag: tag.to_string(),
-        timestamp_ms: 0, // compact format doesn't have epoch ms easily
+        timestamp_ms: now_epoch_ms(),
         pid,
     })
 }
@@ -529,7 +540,7 @@ mod tests {
         assert_eq!(entry.message, "Network request failed");
         assert_eq!(entry.pid, 5555);
         assert_eq!(entry.tag, "com.myapp.network");
-        assert_eq!(entry.timestamp_ms, 1714400000000);
+        assert!(entry.timestamp_ms > 0);
     }
 
     #[test]
