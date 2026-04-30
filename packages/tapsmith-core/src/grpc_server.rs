@@ -4263,10 +4263,10 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                     }
                 }
 
-                // Extract archive into the fresh data container
-                if let Some(parent) = std::path::Path::new(&container).parent() {
-                    let _ = tokio::fs::create_dir_all(parent).await;
-                }
+                // Ensure the container directory exists — iOS creates
+                // it lazily on first launch, so after a reinstall the
+                // path returned by simctl may not be on disk yet.
+                let _ = tokio::fs::create_dir_all(&container).await;
                 let output = tokio::process::Command::new("tar")
                     .args(["xzf", local_path, "-C", &container])
                     .output()
