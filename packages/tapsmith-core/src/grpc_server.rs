@@ -4219,11 +4219,14 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                     }
                     return Ok(Self::success_action_response(request_id));
                 }
-                // iOS simulator: uninstall + reinstall gives a guaranteed-
-                // clean data container, avoiding stale SQLite WAL/SHM that
-                // can cause the relaunched app to ignore restored state.
-                // Falls back to clear-in-place when the app bundle path is
-                // unavailable.
+                // iOS simulator: terminate → clear data (uninstall + reinstall
+                // the app to get a pristine container) → cold-launch once so
+                // iOS creates the full container structure with correct
+                // permissions and metadata → terminate again → overwrite with
+                // the saved archive. The cold-launch step is critical on CI
+                // runners where simctl get_app_container returns a path that
+                // may not exist or lacks the right sandbox attributes until
+                // the app has launched at least once.
                 let _ = ios::device::terminate_app(&serial, pkg).await;
                 tokio::time::sleep(Duration::from_millis(250)).await;
 
@@ -4237,10 +4240,16 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                 if let Some(ref app_path) = app_path {
                     if let Err(e) = ios::device::clear_app_data(&serial, pkg, Some(app_path)).await
                     {
-                        warn!(%pkg, error = %e, "Reinstall failed, falling back to clear-in-place");
+                        warn!(%pkg, error = %e, "Reinstall failed, continuing with existing container");
                     }
-                    tokio::time::sleep(Duration::from_millis(500)).await;
                 }
+
+                // Cold-launch the app so iOS initialises the data container,
+                // then terminate before we overwrite its contents.
+                let _ = ios::device::launch_app(&serial, pkg).await;
+                tokio::time::sleep(Duration::from_millis(1_000)).await;
+                let _ = ios::device::terminate_app(&serial, pkg).await;
+                tokio::time::sleep(Duration::from_millis(500)).await;
 
                 let container = match ios::device::get_app_container(&serial, pkg).await {
                     Ok(path) => path,
@@ -4255,18 +4264,11 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                     }
                 };
 
-                // Clear remaining files so extracted state isn't mixed with
-                // stale data (only matters when reinstall was skipped).
-                if app_path.is_none() {
-                    if let Err(e) = ios::device::clear_container(&container).await {
-                        warn!(%pkg, error = %e, "clear_container failed, continuing");
-                    }
+                // Wipe the container so extracted state isn't mixed with
+                // initialisation artefacts from the cold launch.
+                if let Err(e) = ios::device::clear_container(&container).await {
+                    warn!(%pkg, error = %e, "clear_container failed, continuing");
                 }
-
-                // Ensure the container directory exists — iOS creates
-                // it lazily on first launch, so after a reinstall the
-                // path returned by simctl may not be on disk yet.
-                let _ = tokio::fs::create_dir_all(&container).await;
                 let output = tokio::process::Command::new("tar")
                     .args(["xzf", local_path, "-C", &container])
                     .output()
