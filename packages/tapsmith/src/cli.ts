@@ -335,6 +335,7 @@ interface SequentialDeviceState {
   resolvedAgentApk?: string
   resolvedAgentTestApk?: string
   resolvedIosXctestrun?: string
+  resolvedIosAppPath?: string
   signature: string
 }
 
@@ -614,10 +615,7 @@ async function setupSequentialDevice(
       resolvedAgentApk,
       resolvedAgentTestApk,
       resolvedIosXctestrun,
-      // Only cache the app path on physical iOS — the daemon uses it for
-      // reinstall-based clearAppData. Simulators keep the host-filesystem
-      // app-container clearing path instead.
-      cfg.platform === 'ios' && targetIsPhysical ? resolvedIosAppPath : undefined,
+      cfg.platform === 'ios' ? resolvedIosAppPath : undefined,
       networkTracingEnabled,
     );
     if (cfg.platform !== 'ios') {
@@ -665,6 +663,7 @@ async function setupSequentialDevice(
     resolvedAgentApk,
     resolvedAgentTestApk,
     resolvedIosXctestrun,
+    resolvedIosAppPath,
     signature,
   };
 }
@@ -1756,6 +1755,7 @@ async function main(): Promise<void> {
   let resolvedAgentApk: string | undefined;
   let resolvedAgentTestApk: string | undefined;
   let resolvedIosXctestrun: string | undefined;
+  let resolvedIosAppPath: string | undefined;
   let sequentialExitCode = 1;
   const sequentialStart = Date.now();
 
@@ -1807,6 +1807,7 @@ async function main(): Promise<void> {
     resolvedAgentApk = currentSequentialState.resolvedAgentApk;
     resolvedAgentTestApk = currentSequentialState.resolvedAgentTestApk;
     resolvedIosXctestrun = currentSequentialState.resolvedIosXctestrun;
+    resolvedIosAppPath = currentSequentialState.resolvedIosAppPath;
     // Mirror the chosen device serial onto the root config so any code path
     // still reading from `config.device` (UI/watch handoff) sees it.
     config.device = currentSequentialState.deviceSerial;
@@ -2001,6 +2002,7 @@ async function main(): Promise<void> {
           resolvedAgentApk = currentSequentialState.resolvedAgentApk;
           resolvedAgentTestApk = currentSequentialState.resolvedAgentTestApk;
           resolvedIosXctestrun = currentSequentialState.resolvedIosXctestrun;
+          resolvedIosAppPath = currentSequentialState.resolvedIosAppPath;
           // After switching, the launchConfiguredApp on first file is not
           // needed because setupSequentialDevice already launched the app.
           fileIndex = 0;
@@ -2024,6 +2026,8 @@ async function main(): Promise<void> {
                 client: client!,
                 agentApkPath: resolvedAgentApk,
                 agentTestApkPath: resolvedAgentTestApk,
+                iosXctestrunPath: resolvedIosXctestrun,
+                iosAppPath: resolvedIosAppPath,
                 deviceSerial: projectConfig.device,
               }, `reset before ${path.basename(file)}`);
 
@@ -2062,6 +2066,7 @@ async function main(): Promise<void> {
               agentApkPath: resolvedAgentApk,
               agentTestApkPath: resolvedAgentTestApk,
               iosXctestrunPath: resolvedIosXctestrun,
+              iosAppPath: resolvedIosAppPath,
               deviceSerial: projectConfig.device,
             },
           });
