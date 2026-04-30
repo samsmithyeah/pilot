@@ -540,6 +540,10 @@ export class Device {
    * Intercept network requests matching a URL pattern. The handler receives a
    * `Route` object that can `abort()`, `continue()`, `fulfill()`, or `fetch()`
    * the request.
+   *
+   * Requires network tracing to be enabled (`trace` mode is not `'off'` and
+   * `network` is `true`, which is the default). Without it, the MITM proxy
+   * is not active and route handlers will never fire.
    */
   async route(
     url: string | RegExp | ((url: URL) => boolean),
@@ -576,7 +580,11 @@ export class Device {
     this._emitNetworkAction('unrouteAll', undefined, start, true, undefined, source);
   }
 
-  /** Wait for a request matching the pattern. */
+  /**
+   * Wait for a request matching the pattern.
+   *
+   * Requires network tracing to be enabled (same prerequisite as `route()`).
+   */
   waitForRequest(
     urlOrPredicate: string | RegExp | ((request: TapsmithRequest) => boolean),
     options?: { timeout?: number },
@@ -604,7 +612,11 @@ export class Device {
     });
   }
 
-  /** Wait for a response matching the pattern. */
+  /**
+   * Wait for a response matching the pattern.
+   *
+   * Requires network tracing to be enabled (same prerequisite as `route()`).
+   */
   waitForResponse(
     urlOrPredicate: string | RegExp | ((response: NetworkResponseEventData) => boolean),
     options?: { timeout?: number },

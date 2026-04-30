@@ -427,7 +427,9 @@ Tapsmith supports Playwright-style network interception. Route handlers let you 
 
 #### `device.route(url, handler, options?): Promise<void>`
 
-Intercept network requests matching a URL pattern.
+Intercept network requests matching a URL pattern. Requires network tracing to be enabled (set `trace` to any mode other than `'off'` with `network: true`, which is the default). Without it, the MITM proxy that intercepts traffic is not active and route handlers will never fire.
+
+See also: [`device.unroute()`](#deviceunrouteurl-handler-promisevoid), [`device.unrouteAll()`](#deviceunrouteall-promisevoid).
 
 - `url`: `string | RegExp | ((url: URL) => boolean)` — URL pattern (glob), regex, or predicate
 - `handler`: `(route: Route) => Promise<void> | void` — handler that decides how to handle the request
@@ -449,14 +451,14 @@ Remove all registered route handlers.
 
 #### `device.waitForRequest(urlOrPredicate, options?): Promise<TapsmithRequest>`
 
-Wait for a network request matching the pattern.
+Wait for a network request matching the pattern. Requires network tracing to be enabled (same prerequisite as `device.route()`).
 
 - `urlOrPredicate`: `string | RegExp | ((request: TapsmithRequest) => boolean)`
 - `options.timeout?`: `number` — timeout in ms (default: device timeout)
 
 #### `device.waitForResponse(urlOrPredicate, options?): Promise<NetworkResponseEventData>`
 
-Wait for a network response matching the pattern.
+Wait for a network response matching the pattern. Requires network tracing to be enabled (same prerequisite as `device.route()`).
 
 #### `device.on(event, handler): void`
 
