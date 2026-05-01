@@ -4277,6 +4277,22 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                 match output {
                     Ok(out) if out.status.success() => {
                         info!(%pkg, %local_path, container, "iOS simulator app state restored");
+                        // The uninstall+reinstall invalidated the running
+                        // XCUITest agent's app bindings. Restart the agent
+                        // so the next test session has fresh references —
+                        // same pattern as the physical device path above.
+                        if let Err(e) = self
+                            .restart_ios_agent_for_app(&serial, pkg, false, 10_000)
+                            .await
+                        {
+                            return Ok(self
+                                .action_error(
+                                    request_id,
+                                    "APP_STATE_RESTORE_FAILED",
+                                    format!("Agent restart after restore failed: {e}"),
+                                )
+                                .await);
+                        }
                         Ok(Self::success_action_response(request_id))
                     }
                     Ok(out) => {
