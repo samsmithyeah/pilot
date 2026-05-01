@@ -333,7 +333,11 @@ fn parse_ios_ndjson_line(line: &str) -> Option<ParsedLogEntry> {
         .get("subsystem")
         .and_then(|s| s.as_str())
         .unwrap_or_default();
-    let timestamp_ms = now_epoch_ms();
+    let timestamp_ms = v
+        .get("timestamp")
+        .and_then(|t| t.as_str())
+        .and_then(parse_ios_timestamp)
+        .unwrap_or_else(now_epoch_ms);
 
     let level = match message_type {
         "Default" => "log",
@@ -419,15 +423,17 @@ async fn stream_ios_compact(
     let _ = child.wait();
 }
 
-fn parse_compact_timestamp(s: &str) -> u64 {
+/// Parse the ISO 8601 timestamp from ndjson log entries (includes timezone offset).
+/// Example: "2026-04-30 13:34:27.289636+0100"
+fn parse_ios_timestamp(s: &str) -> Option<u64> {
     use time::macros::format_description;
-    use time::PrimitiveDateTime;
-    const FMT: &[time::format_description::BorrowedFormatItem<'_>] =
-        format_description!("[year]-[month]-[day] [hour]:[minute]:[second].[subsecond digits:3]");
-    s.get(..23)
-        .and_then(|ts| PrimitiveDateTime::parse(ts, FMT).ok())
-        .map(|dt| (dt.assume_utc().unix_timestamp_nanos() / 1_000_000) as u64)
-        .unwrap_or_else(now_epoch_ms)
+    use time::OffsetDateTime;
+    const FMT: &[time::format_description::BorrowedFormatItem<'_>] = format_description!(
+        "[year]-[month]-[day] [hour]:[minute]:[second].[subsecond][offset_hour sign:mandatory][offset_minute]"
+    );
+    OffsetDateTime::parse(s, FMT)
+        .ok()
+        .map(|dt| (dt.unix_timestamp_nanos() / 1_000_000) as u64)
 }
 
 fn parse_ios_compact_line(line: &str) -> Option<ParsedLogEntry> {
@@ -442,7 +448,10 @@ fn parse_ios_compact_line(line: &str) -> Option<ParsedLogEntry> {
         return None;
     }
 
-    let timestamp_ms = parse_compact_timestamp(line);
+    // Compact timestamps are local time with no timezone offset, so we
+    // can't reliably convert to epoch. Use current wall-clock time instead
+    // — this is a fallback format and log lines arrive in real-time.
+    let timestamp_ms = now_epoch_ms();
 
     // Find the level code after the timestamp (position ~24)
     let after_ts = line.get(24..)?.trim_start();
@@ -553,13 +562,22 @@ mod tests {
 
     #[test]
     fn test_parse_ios_ndjson_line() {
-        let line = r#"{"messageType":"Error","eventMessage":"Network request failed","processID":5555,"subsystem":"com.myapp.network","machTimestamp":1714400000000}"#;
+        let line = r#"{"messageType":"Error","eventMessage":"Network request failed","processID":5555,"subsystem":"com.myapp.network","timestamp":"2026-04-30 12:00:00.000000+0000"}"#;
         let entry = parse_ios_ndjson_line(line).unwrap();
         assert_eq!(entry.level, "error");
         assert_eq!(entry.message, "Network request failed");
         assert_eq!(entry.pid, 5555);
         assert_eq!(entry.tag, "com.myapp.network");
-        assert!(entry.timestamp_ms > 0);
+        // 2026-04-30 12:00:00 UTC = 1777550400000 ms
+        assert_eq!(entry.timestamp_ms, 1777550400000);
+    }
+
+    #[test]
+    fn test_parse_ios_ndjson_line_with_timezone() {
+        let line = r#"{"messageType":"Info","eventMessage":"Hello","processID":1,"subsystem":"","timestamp":"2026-04-30 13:00:00.000000+0100"}"#;
+        let entry = parse_ios_ndjson_line(line).unwrap();
+        // 13:00 +0100 = 12:00 UTC
+        assert_eq!(entry.timestamp_ms, 1777550400000);
     }
 
     #[test]
