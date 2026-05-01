@@ -2160,6 +2160,15 @@ async function runTestFileWithRecovery(
         (r) => r.status === 'failed' && r.error && isRecoverableInfrastructureError(r.error),
       );
       if (!infraFailure) {
+        // If this is a retry that produced fewer results than the first
+        // attempt (e.g. crashed before running any tests), prefer the
+        // first attempt's results so the original failure is visible.
+        if (attempt === 2 && firstAttemptSuite) {
+          const firstResults = collectResults(firstAttemptSuite);
+          if (fileResults.length < firstResults.length) {
+            return firstAttemptSuite;
+          }
+        }
         return suite;
       }
       if (attempt === 2) {
