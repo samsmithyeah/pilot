@@ -4238,12 +4238,14 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                     }
                 };
 
-                // Nuke and recreate the container directory. Using rm -rf
-                // is more thorough than iterating entries — it catches
-                // hidden files, extended attributes, and SQLite WAL/SHM
-                // that the selective clear_container might miss.
-                let _ = tokio::fs::remove_dir_all(&container).await;
-                let _ = tokio::fs::create_dir_all(&container).await;
+                // Clear the container in-place rather than rm -rf. Deleting
+                // the container directory entirely can cause iOS to lose
+                // its internal bundle-id → container UUID mapping, making
+                // the app launch into a fresh container instead of the one
+                // we extracted into.
+                if let Err(e) = ios::device::clear_container(&container).await {
+                    warn!(%pkg, error = %e, "clear_container failed, continuing");
+                }
 
                 let output = tokio::process::Command::new("tar")
                     .args(["xzf", local_path, "-C", &container])
@@ -4274,6 +4276,28 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                             .await
                         {
                             diag.push_str(&String::from_utf8_lossy(&find.stdout));
+                        }
+                        // Also dump the AsyncStorage manifest content
+                        let manifest = std::path::Path::new(&container)
+                            .join("Library/Application Support/dev.tapsmith.testapp/RCTAsyncLocalStorage_V1/manifest.json");
+                        diag.push_str("\n--- manifest.json ---\n");
+                        if let Ok(content) = tokio::fs::read_to_string(&manifest).await {
+                            diag.push_str(&content);
+                        } else {
+                            diag.push_str("(not found or unreadable)");
+                        }
+                        // Also check NSUserDefaults plist
+                        let plist = std::path::Path::new(&container)
+                            .join("Library/Preferences/dev.tapsmith.testapp.plist");
+                        diag.push_str("\n--- NSUserDefaults plist ---\n");
+                        if let Ok(plutil) = tokio::process::Command::new("plutil")
+                            .args(["-p", &plist.to_string_lossy()])
+                            .output()
+                            .await
+                        {
+                            diag.push_str(&String::from_utf8_lossy(&plutil.stdout));
+                        } else {
+                            diag.push_str("(not found)");
                         }
                         let _ = tokio::fs::write(&diag_path, &diag).await;
                         info!(%pkg, %local_path, container, "iOS simulator app state restored");
