@@ -727,12 +727,19 @@ export class Device {
         throw new Error(`Failed to forward WebView port: ${fwd.errorMessage}`);
       }
 
-      const handle = new WebViewHandle(this._client, fwd.localPort, this._defaultTimeoutMs);
-      this._applyTraceCtx(handle);
-      await handle._connect();
+      try {
+        const handle = new WebViewHandle(this._client, fwd.localPort, this._defaultTimeoutMs);
+        this._applyTraceCtx(handle);
+        await handle._connect();
 
-      this._activeWebView = handle;
-      return handle;
+        this._activeWebView = handle;
+        return handle;
+      } catch (e) {
+        lastError = e instanceof Error ? e.message : String(e);
+        await this._client.closeWebViewPort(fwd.localPort);
+        await new Promise(r => setTimeout(r, 500));
+        continue;
+      }
     }
 
     throw new Error(
