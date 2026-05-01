@@ -2295,62 +2295,30 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
         let platform = self.require_platform().await?;
         match platform {
             Platform::Ios => {
-                let serial = self.active_serial().await?;
-                if self.is_active_ios_physical().await {
-                    // Physical: route through the agent's XCUIApplication.open(url:)
-                    let bundle_id = self
-                        .ios_agent_config
-                        .read()
-                        .await
-                        .as_ref()
-                        .map(|c| c.target_package.clone())
-                        .filter(|p| !p.is_empty())
-                        .ok_or_else(|| {
-                            Status::failed_precondition(
-                                "device.openDeepLink requires an active agent session \
-                                 with a target package. Call startAgent first.",
-                            )
-                        })?;
-                    let command = AgentCommand::OpenDeepLink {
-                        url: req.uri.clone(),
-                        package: bundle_id,
-                    };
-                    let result = self.send_agent_command(&command).await;
-                    return self.make_action_response(request_id, result).await;
-                }
-                // Simulator: terminate the app first, then simctl openurl.
-                // When the app is NOT running, openurl launches it fresh
-                // with the URL — no "Open in <App>?" dialog and the URL
-                // is delivered via application(_:open:options:) on launch.
-                // When delivered to an already-running app, the URL often
-                // isn't processed (the scene handler misses it).
-                let target_pkg = self
+                // Route through the XCUITest agent on both physical devices
+                // and simulators. The agent calls `XCUIApplication.open(url:)`
+                // which delivers the URL directly without triggering the
+                // "Open in <App>?" system dialog that `simctl openurl` shows
+                // on fresh simulators.
+                let bundle_id = self
                     .ios_agent_config
                     .read()
                     .await
                     .as_ref()
                     .map(|c| c.target_package.clone())
-                    .unwrap_or_default();
-                if !target_pkg.is_empty() {
-                    let _ = ios::device::terminate_app(&serial, &target_pkg).await;
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                }
-                match ios::device::open_url(&serial, &req.uri).await {
-                    Ok(()) => {
-                        // Give the app time to launch and process the URL
-                        tokio::time::sleep(Duration::from_millis(500)).await;
-                        Ok(Response::new(proto::ActionResponse {
-                            request_id,
-                            success: true,
-                            error_type: String::new(),
-                            error_message: String::new(),
-                            screenshot: Vec::new(),
-                        }))
-                    }
-                    Err(e) => Ok(self
-                        .action_error(request_id, "ACTION_FAILED", e.to_string())
-                        .await),
-                }
+                    .filter(|p| !p.is_empty())
+                    .ok_or_else(|| {
+                        Status::failed_precondition(
+                            "device.openDeepLink requires an active agent session \
+                             with a target package. Call startAgent first.",
+                        )
+                    })?;
+                let command = AgentCommand::OpenDeepLink {
+                    url: req.uri.clone(),
+                    package: bundle_id,
+                };
+                let result = self.send_agent_command(&command).await;
+                self.make_action_response(request_id, result).await
             }
             Platform::Android => {
                 if req.uri.contains('\'') {
