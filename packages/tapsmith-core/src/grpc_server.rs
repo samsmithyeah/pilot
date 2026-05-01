@@ -40,6 +40,11 @@ pub struct TapsmithServiceImpl {
     /// iOS Network Extension redirector session (for cleanup, iOS simulators only).
     #[cfg(target_os = "macos")]
     ios_redirect: Arc<RwLock<Option<crate::ios_redirect::IosRedirect>>>,
+    /// macOS network service name whose system proxy was set as a fallback
+    /// when the Network Extension is unavailable (e.g. on CI). `None` when
+    /// using the NE redirector or when network capture is off.
+    #[cfg(target_os = "macos")]
+    ios_system_proxy_service: Arc<RwLock<Option<String>>>,
     /// iOS agent launch config (stored for restart on launchApp).
     ios_agent_config: Arc<RwLock<Option<IosAgentConfig>>>,
     /// iproxy USB tunnel for the physical iOS device, if any. Held for the
@@ -98,6 +103,8 @@ impl TapsmithServiceImpl {
             proxy_uses_iptables: Arc::new(RwLock::new(false)),
             #[cfg(target_os = "macos")]
             ios_redirect: Arc::new(RwLock::new(None)),
+            #[cfg(target_os = "macos")]
+            ios_system_proxy_service: Arc::new(RwLock::new(None)),
             ios_agent_config: Arc::new(RwLock::new(None)),
             ios_iproxy: Arc::new(RwLock::new(None)),
             network_tracing_enabled: Arc::new(RwLock::new(false)),
@@ -599,12 +606,20 @@ impl TapsmithServiceImpl {
         // to get the right ordering.
         #[cfg(target_os = "macos")]
         let ios_redirect = self.ios_redirect.write().await.take();
+        #[cfg(target_os = "macos")]
+        let system_proxy_service = self.ios_system_proxy_service.write().await.take();
         let proxy = self.network_proxy.write().await.take();
         let serial = self.proxy_device_serial.write().await.take();
         let platform = self.proxy_platform.write().await.take();
         let reverse_port = self.proxy_reverse_port.write().await.take();
         let ca_cert_path = self.proxy_ca_cert_path.write().await.take();
         let used_iptables = std::mem::replace(&mut *self.proxy_uses_iptables.write().await, false);
+
+        // Reset macOS system proxy if we set it as a fallback.
+        #[cfg(target_os = "macos")]
+        if let Some(service) = &system_proxy_service {
+            ios::system_proxy::reset_system_proxy(service).await;
+        }
 
         if let Some(serial) = &serial {
             match platform {
@@ -3405,15 +3420,35 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                             );
                         }
                         Err(e) => {
-                            let msg =
-                                format!("Failed to start iOS Network Extension redirector: {e}");
-                            error!("{msg}");
-                            return Ok(Response::new(proto::StartNetworkCaptureResponse {
-                                request_id,
-                                success: false,
-                                proxy_port: 0,
-                                error_message: msg,
-                            }));
+                            warn!(
+                                "Network Extension redirector unavailable: {e} — \
+                                 falling back to macOS system proxy"
+                            );
+                            match ios::system_proxy::set_system_proxy(host_port).await {
+                                Ok(service) => {
+                                    *self.ios_system_proxy_service.write().await = Some(service);
+                                    if warning.is_none() {
+                                        warning = Some(
+                                            "Using macOS system proxy fallback — \
+                                             not PID-isolated (affects all host traffic)"
+                                                .to_string(),
+                                        );
+                                    }
+                                }
+                                Err(proxy_err) => {
+                                    let msg = format!(
+                                        "iOS network capture unavailable: Network Extension \
+                                         failed ({e}), system proxy fallback also failed ({proxy_err})"
+                                    );
+                                    error!("{msg}");
+                                    return Ok(Response::new(proto::StartNetworkCaptureResponse {
+                                        request_id,
+                                        success: false,
+                                        proxy_port: 0,
+                                        error_message: msg,
+                                    }));
+                                }
+                            }
                         }
                     }
                 }
@@ -3545,6 +3580,9 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                         if let Some(redirect) = self.ios_redirect.write().await.take() {
                             drop(redirect);
                             debug!(%serial, "iOS redirector session torn down");
+                        }
+                        if let Some(service) = self.ios_system_proxy_service.write().await.take() {
+                            ios::system_proxy::reset_system_proxy(&service).await;
                         }
                     }
                     info!(%serial, "iOS proxy stopped");

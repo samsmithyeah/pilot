@@ -9,7 +9,10 @@ export default defineConfig({
   retries: 1,
   reporter: [["list"], ["github"], ["html", { open: "never" }]],
   screenshot: "only-on-failure",
-  trace: { mode: "retain-on-failure", network: false },
+  trace: {
+    mode: "retain-on-failure",
+    networkHosts: ["jsonplaceholder.typicode.com", "httpbin.org"],
+  },
   video: "retain-on-failure",
   workers: 1,
   simulator: process.env.TAPSMITH_IOS_SIMULATOR || "iPhone 16",
@@ -25,10 +28,6 @@ export default defineConfig({
         "**/app-state.test.ts",
         "**/auth-gate.test.ts",
         "**/*.android.test.ts",
-        "**/webview*.test.ts",
-        // PILOT-TODO: network capture on iOS requires mitmproxy (not available on GHA runners)
-        "**/network-capture.test.ts",
-        "**/network-mocking.test.ts",
       ],
     },
     {
