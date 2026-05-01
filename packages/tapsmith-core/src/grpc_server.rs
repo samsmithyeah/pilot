@@ -4219,35 +4219,9 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                     }
                     return Ok(Self::success_action_response(request_id));
                 }
-                // iOS simulator: terminate → clear data (uninstall + reinstall
-                // the app to get a pristine container) → cold-launch once so
-                // iOS creates the full container structure with correct
-                // permissions and metadata → terminate again → overwrite with
-                // the saved archive. The cold-launch step is critical on CI
-                // runners where simctl get_app_container returns a path that
-                // may not exist or lacks the right sandbox attributes until
-                // the app has launched at least once.
-                let _ = ios::device::terminate_app(&serial, pkg).await;
-                tokio::time::sleep(Duration::from_millis(250)).await;
-
-                let app_path = self
-                    .ios_agent_config
-                    .read()
-                    .await
-                    .as_ref()
-                    .and_then(|c| c.app_path.clone());
-
-                if let Some(ref app_path) = app_path {
-                    if let Err(e) = ios::device::clear_app_data(&serial, pkg, Some(app_path)).await
-                    {
-                        warn!(%pkg, error = %e, "Reinstall failed, continuing with existing container");
-                    }
-                }
-
-                // Cold-launch the app so iOS initialises the data container,
-                // then terminate before we overwrite its contents.
-                let _ = ios::device::launch_app(&serial, pkg).await;
-                tokio::time::sleep(Duration::from_millis(1_000)).await;
+                // iOS simulator: terminate the app, nuke the data container
+                // via rm -rf + mkdir (more thorough than selective clearing),
+                // then extract the saved archive.
                 let _ = ios::device::terminate_app(&serial, pkg).await;
                 tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -4264,11 +4238,13 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                     }
                 };
 
-                // Wipe the container so extracted state isn't mixed with
-                // initialisation artefacts from the cold launch.
-                if let Err(e) = ios::device::clear_container(&container).await {
-                    warn!(%pkg, error = %e, "clear_container failed, continuing");
-                }
+                // Nuke and recreate the container directory. Using rm -rf
+                // is more thorough than iterating entries — it catches
+                // hidden files, extended attributes, and SQLite WAL/SHM
+                // that the selective clear_container might miss.
+                let _ = tokio::fs::remove_dir_all(&container).await;
+                let _ = tokio::fs::create_dir_all(&container).await;
+
                 let output = tokio::process::Command::new("tar")
                     .args(["xzf", local_path, "-C", &container])
                     .output()
@@ -4277,22 +4253,6 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                 match output {
                     Ok(out) if out.status.success() => {
                         info!(%pkg, %local_path, container, "iOS simulator app state restored");
-                        // The uninstall+reinstall invalidated the running
-                        // XCUITest agent's app bindings. Restart the agent
-                        // so the next test session has fresh references —
-                        // same pattern as the physical device path above.
-                        if let Err(e) = self
-                            .restart_ios_agent_for_app(&serial, pkg, false, 10_000)
-                            .await
-                        {
-                            return Ok(self
-                                .action_error(
-                                    request_id,
-                                    "APP_STATE_RESTORE_FAILED",
-                                    format!("Agent restart after restore failed: {e}"),
-                                )
-                                .await);
-                        }
                         Ok(Self::success_action_response(request_id))
                     }
                     Ok(out) => {
