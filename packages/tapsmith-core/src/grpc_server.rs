@@ -2295,48 +2295,30 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
         let platform = self.require_platform().await?;
         match platform {
             Platform::Ios => {
-                let serial = self.active_serial().await?;
-                if self.is_active_ios_physical().await {
-                    // Route through the XCUITest agent, which calls
-                    // `XCUIApplication.open(url:)` on the target app.
-                    // This triggers the app's scene URL handler the same
-                    // way `simctl openurl` does on simulators — unlike
-                    // `devicectl process launch --payload-url`, which
-                    // launches the app but doesn't actually deliver the
-                    // URL to the app's UIApplicationDelegate.
-                    let bundle_id = self
-                        .ios_agent_config
-                        .read()
-                        .await
-                        .as_ref()
-                        .map(|c| c.target_package.clone())
-                        .filter(|p| !p.is_empty())
-                        .ok_or_else(|| {
-                            Status::failed_precondition(
-                                "device.openDeepLink on a physical iOS device requires an \
-                                 active agent session with a target package. Call \
-                                 startAgent first.",
-                            )
-                        })?;
-                    let command = AgentCommand::OpenDeepLink {
-                        url: req.uri.clone(),
-                        package: bundle_id,
-                    };
-                    let result = self.send_agent_command(&command).await;
-                    return self.make_action_response(request_id, result).await;
-                }
-                match ios::device::open_url(&serial, &req.uri).await {
-                    Ok(()) => Ok(Response::new(proto::ActionResponse {
-                        request_id,
-                        success: true,
-                        error_type: String::new(),
-                        error_message: String::new(),
-                        screenshot: Vec::new(),
-                    })),
-                    Err(e) => Ok(self
-                        .action_error(request_id, "ACTION_FAILED", e.to_string())
-                        .await),
-                }
+                // Route through the XCUITest agent on both physical devices
+                // and simulators. The agent calls `XCUIApplication.open(url:)`
+                // which delivers the URL directly without triggering the
+                // "Open in <App>?" system dialog that `simctl openurl` shows
+                // on fresh simulators.
+                let bundle_id = self
+                    .ios_agent_config
+                    .read()
+                    .await
+                    .as_ref()
+                    .map(|c| c.target_package.clone())
+                    .filter(|p| !p.is_empty())
+                    .ok_or_else(|| {
+                        Status::failed_precondition(
+                            "device.openDeepLink requires an active agent session \
+                             with a target package. Call startAgent first.",
+                        )
+                    })?;
+                let command = AgentCommand::OpenDeepLink {
+                    url: req.uri.clone(),
+                    package: bundle_id,
+                };
+                let result = self.send_agent_command(&command).await;
+                self.make_action_response(request_id, result).await
             }
             Platform::Android => {
                 if req.uri.contains('\'') {
@@ -4254,52 +4236,6 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
 
                 match output {
                     Ok(out) if out.status.success() => {
-                        // Write diagnostic to a file next to the archive
-                        // so it's captured as a CI artifact.
-                        let diag_path = format!(
-                            "{}.restore-diag.txt",
-                            local_path.trim_end_matches(".tar.gz")
-                        );
-                        let mut diag =
-                            format!("container={container}\n\n--- archive contents ---\n");
-                        if let Ok(list) = tokio::process::Command::new("tar")
-                            .args(["tzf", local_path])
-                            .output()
-                            .await
-                        {
-                            diag.push_str(&String::from_utf8_lossy(&list.stdout));
-                        }
-                        diag.push_str("\n--- extracted files ---\n");
-                        if let Ok(find) = tokio::process::Command::new("find")
-                            .args([&container, "-type", "f"])
-                            .output()
-                            .await
-                        {
-                            diag.push_str(&String::from_utf8_lossy(&find.stdout));
-                        }
-                        // Also dump the AsyncStorage manifest content
-                        let manifest = std::path::Path::new(&container)
-                            .join("Library/Application Support/dev.tapsmith.testapp/RCTAsyncLocalStorage_V1/manifest.json");
-                        diag.push_str("\n--- manifest.json ---\n");
-                        if let Ok(content) = tokio::fs::read_to_string(&manifest).await {
-                            diag.push_str(&content);
-                        } else {
-                            diag.push_str("(not found or unreadable)");
-                        }
-                        // Also check NSUserDefaults plist
-                        let plist = std::path::Path::new(&container)
-                            .join("Library/Preferences/dev.tapsmith.testapp.plist");
-                        diag.push_str("\n--- NSUserDefaults plist ---\n");
-                        if let Ok(plutil) = tokio::process::Command::new("plutil")
-                            .args(["-p", &plist.to_string_lossy()])
-                            .output()
-                            .await
-                        {
-                            diag.push_str(&String::from_utf8_lossy(&plutil.stdout));
-                        } else {
-                            diag.push_str("(not found)");
-                        }
-                        let _ = tokio::fs::write(&diag_path, &diag).await;
                         info!(%pkg, %local_path, container, "iOS simulator app state restored");
                         Ok(Self::success_action_response(request_id))
                     }

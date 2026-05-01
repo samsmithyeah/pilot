@@ -601,7 +601,6 @@ async function runSuiteContext(
         ? scopeAppState
         : path.resolve(opts.config.rootDir, scopeAppState);
       await opts.device.restoreAppState(opts.config.package, resolvedPath);
-      process.stderr.write(`[tapsmith] appState restored from ${resolvedPath}\n`);
     } else {
       await opts.device.clearAppData(opts.config.package);
     }
