@@ -4261,7 +4261,10 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                             .await
                         {
                             let files = String::from_utf8_lossy(&list.stdout);
-                            diag.push_str(&format!("Archive files ({} entries):\n{files}", files.lines().count()));
+                            diag.push_str(&format!(
+                                "Archive files ({} entries):\n{files}",
+                                files.lines().count()
+                            ));
                         }
                         if let Ok(find) = tokio::process::Command::new("find")
                             .args([&container, "-type", "f"])
@@ -4269,7 +4272,10 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                             .await
                         {
                             let files = String::from_utf8_lossy(&find.stdout);
-                            diag.push_str(&format!("Extracted files ({} entries):\n{files}", files.lines().count()));
+                            diag.push_str(&format!(
+                                "Extracted files ({} entries):\n{files}",
+                                files.lines().count()
+                            ));
                         }
                         eprintln!("{diag}");
                         info!(%pkg, %local_path, container, "iOS simulator app state restored");
