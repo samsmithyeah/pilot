@@ -564,11 +564,12 @@ class CommandHandler {
             // forward-delete (data loss past the cursor) or no-op
             // depending on the IME, hence the safer backspace.
             if EventSynthesizer.keyPress(key: "a", modifiers: .command) {
-                Thread.sleep(forTimeInterval: 0.05)
+                Thread.sleep(forTimeInterval: 0.1)
                 actionExecutor.typeTextWithoutFocus("\u{8}")
-                Thread.sleep(forTimeInterval: 0.05)
+                Thread.sleep(forTimeInterval: 0.15)
                 let afterSelectAll = (try? resolveElement(params)) ?? element
                 if (afterSelectAll.text ?? "").isEmpty {
+                    try? focusElementForTyping(afterSelectAll, settleTime: 0.1)
                     return ["success": true]
                 }
                 // Cmd+A didn't take (or deleted only one char). Fall
@@ -610,6 +611,15 @@ class CommandHandler {
                 // but length still drops between batches; comparing length
                 // tolerates that as progress.
                 if displayed.count >= lastLength {
+                    try? focusElementForTyping(refreshed, settleTime: 0.2)
+                    let settled = (try? resolveElement(params)) ?? refreshed
+                    let settledText = settled.text ?? ""
+                    finalLength = settledText.count
+                    if settledText.isEmpty { break }
+                    if settledText.count < lastLength {
+                        lastLength = settledText.count
+                        continue
+                    }
                     stalled = true
                     break
                 }
@@ -618,6 +628,11 @@ class CommandHandler {
                 // backspace granularity for ASCII and composed emoji.
                 let count = min(displayed.count, perIterationCap)
                 actionExecutor.typeTextWithoutFocus(String(repeating: "\u{8}", count: count))
+                // EventSynthesizer returns when events are queued, not when
+                // RN has committed the resulting text update. Without a short
+                // settle, CI can read the pre-backspace snapshot and report a
+                // false stall while the field is already clearing.
+                Thread.sleep(forTimeInterval: 0.15)
             }
             // If we didn't fully clear, surface the failure rather than
             // silently returning success with residual text in the field.
@@ -639,6 +654,7 @@ class CommandHandler {
                         "\(iterationsRun) iteration\(iterationsRun == 1 ? "" : "s") — \(reason)"
                 )
             }
+            try? focusElementForTyping(element, settleTime: 0.1)
             return ["success": true]
 
         // ─── Swipe / Scroll ───
