@@ -83,7 +83,9 @@ async fn stream_android(
         for line in reader.lines() {
             let Ok(line) = line else { break };
             if let Some(entry) = parse_logcat_line(&line) {
-                let pids_guard = pids_reader.read().unwrap();
+                let Ok(pids_guard) = pids_reader.read() else {
+                    break;
+                };
                 if pids_guard.contains(&entry.pid) {
                     drop(pids_guard);
                     if line_tx.blocking_send(entry).is_err() {
@@ -104,7 +106,10 @@ async fn stream_android(
         loop {
             interval.tick().await;
             let new_pids = resolve_all_pids(&serial_for_refresh, &package_for_refresh).await;
-            *pids_for_refresh.write().unwrap() = new_pids;
+            let Ok(mut guard) = pids_for_refresh.write() else {
+                break;
+            };
+            *guard = new_pids;
         }
     });
 
@@ -414,6 +419,17 @@ async fn stream_ios_compact(
     let _ = child.wait();
 }
 
+fn parse_compact_timestamp(s: &str) -> u64 {
+    use time::macros::format_description;
+    use time::PrimitiveDateTime;
+    const FMT: &[time::format_description::BorrowedFormatItem<'_>] =
+        format_description!("[year]-[month]-[day] [hour]:[minute]:[second].[subsecond digits:3]");
+    s.get(..23)
+        .and_then(|ts| PrimitiveDateTime::parse(ts, FMT).ok())
+        .map(|dt| (dt.assume_utc().unix_timestamp_nanos() / 1_000_000) as u64)
+        .unwrap_or_else(now_epoch_ms)
+}
+
 fn parse_ios_compact_line(line: &str) -> Option<ParsedLogEntry> {
     // Compact format: "2026-04-29 12:00:00.000 Df AppName[pid:tid] subsystem: message"
     // The level is a two-char code: Df=Default, If=Info, Db=Debug, Ef=Error, Ft=Fault
@@ -425,6 +441,8 @@ fn parse_ios_compact_line(line: &str) -> Option<ParsedLogEntry> {
     if line.starts_with("Filtering") || line.starts_with("Timestamp") {
         return None;
     }
+
+    let timestamp_ms = parse_compact_timestamp(line);
 
     // Find the level code after the timestamp (position ~24)
     let after_ts = line.get(24..)?.trim_start();
@@ -467,7 +485,7 @@ fn parse_ios_compact_line(line: &str) -> Option<ParsedLogEntry> {
         level,
         message: message.to_string(),
         tag: tag.to_string(),
-        timestamp_ms: now_epoch_ms(),
+        timestamp_ms,
         pid,
     })
 }
@@ -484,6 +502,7 @@ mod tests {
         assert_eq!(entry.pid, 67429);
         assert_eq!(entry.tag, "com.apple.UIKit");
         assert_eq!(entry.message, "Background task created");
+        assert!(entry.timestamp_ms > 1_700_000_000_000);
     }
 
     #[test]
