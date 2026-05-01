@@ -4252,6 +4252,26 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
 
                 match output {
                     Ok(out) if out.status.success() => {
+                        // Log archive contents and extracted files for CI debugging.
+                        // These go to stderr (visible in GHA logs via the runner).
+                        let mut diag = format!("restoreAppState: container={container}\n");
+                        if let Ok(list) = tokio::process::Command::new("tar")
+                            .args(["tzf", local_path])
+                            .output()
+                            .await
+                        {
+                            let files = String::from_utf8_lossy(&list.stdout);
+                            diag.push_str(&format!("Archive files ({} entries):\n{files}", files.lines().count()));
+                        }
+                        if let Ok(find) = tokio::process::Command::new("find")
+                            .args([&container, "-type", "f"])
+                            .output()
+                            .await
+                        {
+                            let files = String::from_utf8_lossy(&find.stdout);
+                            diag.push_str(&format!("Extracted files ({} entries):\n{files}", files.lines().count()));
+                        }
+                        eprintln!("{diag}");
                         info!(%pkg, %local_path, container, "iOS simulator app state restored");
                         Ok(Self::success_action_response(request_id))
                     }
