@@ -42,7 +42,8 @@
     },
     "plugins": [
       "expo-router",
-      "./plugins/with-network-security-config"
+      "./plugins/with-network-security-config",
+      "./plugins/with-webview-debugging"
     ],
     "experiments": {
       "typedRoutes": true
