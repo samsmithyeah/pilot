@@ -4252,44 +4252,32 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
 
                 match output {
                     Ok(out) if out.status.success() => {
-                        // Build diagnostic string for CI debugging — returned
-                        // in the response so the TS runner can log it.
-                        let mut diag_parts = vec![format!("container={container}")];
+                        // Write diagnostic to a file next to the archive
+                        // so it's captured as a CI artifact.
+                        let diag_path = format!(
+                            "{}.restore-diag.txt",
+                            local_path.trim_end_matches(".tar.gz")
+                        );
+                        let mut diag =
+                            format!("container={container}\n\n--- archive contents ---\n");
                         if let Ok(list) = tokio::process::Command::new("tar")
                             .args(["tzf", local_path])
                             .output()
                             .await
                         {
-                            let files = String::from_utf8_lossy(&list.stdout);
-                            diag_parts.push(format!(
-                                "archive({} files): {}",
-                                files.lines().count(),
-                                files.lines().take(30).collect::<Vec<_>>().join(", ")
-                            ));
+                            diag.push_str(&String::from_utf8_lossy(&list.stdout));
                         }
+                        diag.push_str("\n--- extracted files ---\n");
                         if let Ok(find) = tokio::process::Command::new("find")
                             .args([&container, "-type", "f"])
                             .output()
                             .await
                         {
-                            let files = String::from_utf8_lossy(&find.stdout);
-                            diag_parts.push(format!(
-                                "extracted({} files): {}",
-                                files.lines().count(),
-                                files.lines().take(30).collect::<Vec<_>>().join(", ")
-                            ));
+                            diag.push_str(&String::from_utf8_lossy(&find.stdout));
                         }
-                        let diag = diag_parts.join(" | ");
-                        info!(%pkg, %local_path, %diag, "iOS simulator app state restored");
-                        // Return diagnostic info in error_message even on success
-                        // so the TS runner logs it for CI debugging.
-                        Ok(Response::new(proto::ActionResponse {
-                            request_id,
-                            success: true,
-                            error_type: String::new(),
-                            error_message: format!("[diag] {diag}"),
-                            screenshot: Vec::new(),
-                        }))
+                        let _ = tokio::fs::write(&diag_path, &diag).await;
+                        info!(%pkg, %local_path, container, "iOS simulator app state restored");
+                        Ok(Self::success_action_response(request_id))
                     }
                     Ok(out) => {
                         let stderr = String::from_utf8_lossy(&out.stderr);
