@@ -2295,11 +2295,6 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
         let platform = self.require_platform().await?;
         match platform {
             Platform::Ios => {
-                // Route through the XCUITest agent on both physical devices
-                // and simulators. The agent calls `XCUIApplication.open(url:)`
-                // which delivers the URL directly without triggering the
-                // "Open in <App>?" system dialog that `simctl openurl` shows
-                // on fresh simulators.
                 let bundle_id = self
                     .ios_agent_config
                     .read()
@@ -2313,12 +2308,56 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                              with a target package. Call startAgent first.",
                         )
                     })?;
-                let command = AgentCommand::OpenDeepLink {
-                    url: req.uri.clone(),
-                    package: bundle_id,
-                };
-                let result = self.send_agent_command(&command).await;
-                self.make_action_response(request_id, result).await
+                let serial = self.active_serial().await?;
+
+                if self.is_active_ios_physical().await {
+                    // Physical: use the agent's XCUIApplication.open(url:).
+                    let command = AgentCommand::OpenDeepLink {
+                        url: req.uri.clone(),
+                        package: bundle_id,
+                    };
+                    let result = self.send_agent_command(&command).await;
+                    return self.make_action_response(request_id, result).await;
+                }
+
+                // Simulator: terminate → simctl openurl → rebind agent.
+                //
+                // XCUIApplication.open(url:) hangs on quiescence on slow CI
+                // runners, so we avoid it entirely. simctl openurl to a
+                // running app doesn't trigger navigation (the React Native
+                // scene handler misses it), so we terminate first — making
+                // openurl cold-launch the app with the URL. No "Open in
+                // App?" dialog appears on cold launch. Finally, rebind the
+                // agent to the newly launched process.
+                let _ = self
+                    .send_agent_command_with_timeout(
+                        &AgentCommand::TerminateApp {
+                            package: bundle_id.clone(),
+                        },
+                        4_000,
+                    )
+                    .await;
+                tokio::time::sleep(Duration::from_millis(200)).await;
+
+                if let Err(e) = ios::device::open_url(&serial, &req.uri).await {
+                    return Ok(self
+                        .action_error(request_id, "ACTION_FAILED", e.to_string())
+                        .await);
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+
+                // Rebind agent to the cold-launched process and dismiss
+                // any system dialogs. LaunchApp calls activate() which
+                // connects to the running process without navigating away
+                // from the deep link destination.
+                let _ = self
+                    .send_agent_command_with_timeout(
+                        &AgentCommand::LaunchApp { package: bundle_id },
+                        8_000,
+                    )
+                    .await;
+
+                Ok(Self::success_action_response(request_id))
             }
             Platform::Android => {
                 if req.uri.contains('\'') {
