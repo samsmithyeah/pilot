@@ -192,6 +192,7 @@ pub enum AgentCommand {
     GetAppState {
         package: String,
     },
+    DismissSystemDialog,
 }
 
 impl AgentCommand {
@@ -439,6 +440,7 @@ impl AgentCommand {
             AgentCommand::GetAppState { package } => {
                 ("getAppState", json!({ "bundleId": package }))
             }
+            AgentCommand::DismissSystemDialog => ("dismissSystemDialogs", json!({})),
         };
 
         json!({

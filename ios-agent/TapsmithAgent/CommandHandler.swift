@@ -907,6 +907,17 @@ class CommandHandler {
                 )
             }
 
+        case "dismissSystemDialogs":
+            let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+            for label in ["Open", "Allow", "OK", "Not Now", "Allow While Using App"] {
+                let btn = springboard.buttons[label]
+                if btn.waitForExistence(timeout: 0.3) {
+                    btn.tap()
+                    Thread.sleep(forTimeInterval: 0.1)
+                }
+            }
+            return ["success": true]
+
         // ─── Orientation ───
 
         case "setOrientation":

@@ -651,7 +651,6 @@ pub async fn terminate_app(udid: &str, bundle_id: &str) -> Result<()> {
 }
 
 /// Open a URL on a simulator (deep link).
-#[allow(dead_code)]
 #[instrument]
 pub async fn open_url(udid: &str, url: &str) -> Result<()> {
     let output = Command::new("xcrun")
