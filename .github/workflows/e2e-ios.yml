@@ -142,7 +142,7 @@ jobs:
     name: "Shard ${{ matrix.shard }}/4"
     needs: [build-daemon, build-agent, build-test-app]
     runs-on: macos-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:

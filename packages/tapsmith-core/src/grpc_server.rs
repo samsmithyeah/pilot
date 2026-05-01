@@ -45,6 +45,12 @@ pub struct TapsmithServiceImpl {
     /// using the NE redirector or when network capture is off.
     #[cfg(target_os = "macos")]
     ios_system_proxy_service: Arc<RwLock<Option<String>>>,
+    /// Sticky flag: once the Network Extension fails, skip the 10s
+    /// `IosRedirect::start` timeout on subsequent `start_network_capture`
+    /// calls and go straight to the system proxy fallback. Without this,
+    /// every per-test start/stop cycle pays the NE timeout (~10s × N tests).
+    #[cfg(target_os = "macos")]
+    ios_ne_unavailable: Arc<RwLock<bool>>,
     /// iOS agent launch config (stored for restart on launchApp).
     ios_agent_config: Arc<RwLock<Option<IosAgentConfig>>>,
     /// iproxy USB tunnel for the physical iOS device, if any. Held for the
@@ -105,6 +111,8 @@ impl TapsmithServiceImpl {
             ios_redirect: Arc::new(RwLock::new(None)),
             #[cfg(target_os = "macos")]
             ios_system_proxy_service: Arc::new(RwLock::new(None)),
+            #[cfg(target_os = "macos")]
+            ios_ne_unavailable: Arc::new(RwLock::new(false)),
             ios_agent_config: Arc::new(RwLock::new(None)),
             ios_iproxy: Arc::new(RwLock::new(None)),
             network_tracing_enabled: Arc::new(RwLock::new(false)),
@@ -3405,13 +3413,19 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                 // end of scope, releasing the TCP listener.
                 #[cfg(target_os = "macos")]
                 {
-                    match crate::ios_redirect::IosRedirect::start(
-                        serial.clone(),
-                        proxy.state_handle(),
-                        Arc::clone(&mitm_ca),
-                    )
-                    .await
-                    {
+                    let ne_known_bad = *self.ios_ne_unavailable.read().await;
+                    let ne_result = if ne_known_bad {
+                        debug!("Skipping NE attempt (previously failed) — using system proxy");
+                        Err(anyhow::anyhow!("cached: NE previously unavailable"))
+                    } else {
+                        crate::ios_redirect::IosRedirect::start(
+                            serial.clone(),
+                            proxy.state_handle(),
+                            Arc::clone(&mitm_ca),
+                        )
+                        .await
+                    };
+                    match ne_result {
                         Ok(redirect) => {
                             *self.ios_redirect.write().await = Some(redirect);
                             info!(
@@ -3420,10 +3434,13 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                             );
                         }
                         Err(e) => {
-                            warn!(
-                                "Network Extension redirector unavailable: {e} — \
-                                 falling back to macOS system proxy"
-                            );
+                            if !ne_known_bad {
+                                *self.ios_ne_unavailable.write().await = true;
+                                warn!(
+                                    "Network Extension redirector unavailable: {e} — \
+                                     falling back to macOS system proxy"
+                                );
+                            }
                             match ios::system_proxy::set_system_proxy(host_port).await {
                                 Ok(service) => {
                                     *self.ios_system_proxy_service.write().await = Some(service);
