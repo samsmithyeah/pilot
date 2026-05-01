@@ -133,8 +133,12 @@ async fn stream_android(
 
     refresh_handle.abort();
 
-    let _ = child.kill();
-    let _ = child.wait();
+    tokio::task::spawn_blocking(move || {
+        let _ = child.kill();
+        let _ = child.wait();
+    })
+    .await
+    .ok();
 }
 
 async fn resolve_all_pids(serial: &str, package_name: &str) -> Vec<i32> {
@@ -301,8 +305,12 @@ async fn stream_ios(
                     }
                     None => {
                         // Reader thread exited — might be ndjson unsupported
-                        let _ = child.kill();
-                        let _ = child.wait();
+                        tokio::task::spawn_blocking(move || {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                        })
+                        .await
+                        .ok();
                         stream_ios_compact(udid, predicate, tx, cancel_rx).await;
                         return;
                     }
@@ -312,8 +320,12 @@ async fn stream_ios(
         }
     }
 
-    let _ = child.kill();
-    let _ = child.wait();
+    tokio::task::spawn_blocking(move || {
+        let _ = child.kill();
+        let _ = child.wait();
+    })
+    .await
+    .ok();
 }
 
 fn now_epoch_ms() -> u64 {
@@ -419,8 +431,12 @@ async fn stream_ios_compact(
         }
     }
 
-    let _ = child.kill();
-    let _ = child.wait();
+    tokio::task::spawn_blocking(move || {
+        let _ = child.kill();
+        let _ = child.wait();
+    })
+    .await
+    .ok();
 }
 
 /// Parse the ISO 8601 timestamp from ndjson log entries (includes timezone offset).
