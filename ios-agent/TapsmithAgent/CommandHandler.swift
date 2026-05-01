@@ -882,22 +882,21 @@ class CommandHandler {
             return ["package": bundleId]
 
         case "openDeepLink":
-            // On simulators the daemon handles deep links via
-            // `xcrun simctl openurl`. On physical devices there's no
-            // equivalent host-side mechanism, so the daemon routes here
-            // and we call `XCUIApplication.open(url:)` which delivers the
-            // URL via the target app's scene. This is Apple's supported
-            // XCUITest path for URL-scheme deep links.
             let urlString = params["url"] as? String ?? ""
             guard !urlString.isEmpty, let url = URL(string: urlString) else {
                 throw AgentError.actionFailed("openDeepLink: missing or invalid URL")
             }
             let bundleId = targetBundleId(fallback: params)
             let targetApp = rebindApp(bundleId: bundleId)
-            // XCUIApplication.open(_:) requires iOS 16.4+. Our deployment
-            // target is 15.0 to keep the runner compatible with older
-            // devices, so we gate the call at runtime.
             if #available(iOS 16.4, *) {
+                // Pre-warm: activate() ensures the quiescence disable is
+                // fully propagated on the freshly rebound XCUIApplication.
+                // Without this, open(url:) can block indefinitely waiting
+                // for quiescence after a full agent restart (e.g. following
+                // clearData), because the new instance's quiescence state
+                // hasn't settled yet.
+                targetApp.activate()
+                Thread.sleep(forTimeInterval: 0.15)
                 targetApp.open(url)
                 Thread.sleep(forTimeInterval: 0.3)
                 return ["success": true]
