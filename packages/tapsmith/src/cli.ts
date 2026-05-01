@@ -2139,6 +2139,7 @@ async function runTestFileWithRecovery(
 ): Promise<SuiteResult> {
   const grep = normalizeGrep(opts.config.grep);
   const grepInvert = normalizeGrep(opts.config.grepInvert);
+  let firstAttemptSuite: SuiteResult | undefined;
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
       const suite = await runTestFile(file, {
@@ -2164,12 +2165,16 @@ async function runTestFileWithRecovery(
       if (attempt === 2) {
         return suite;
       }
+      firstAttemptSuite = suite;
       process.stderr.write(
         dim(`Recovering session after infrastructure error in ${path.basename(file)}: ${infraFailure.error?.message ?? 'unknown'}\n`),
       );
       await launchConfiguredApp(opts.sessionContext, `recovery for ${path.basename(file)}`, { allowSoftReset: false });
     } catch (err) {
       if (!isRecoverableInfrastructureError(err) || attempt === 2) {
+        // If the retry itself crashed, return the first attempt's results
+        // (which contain the original failure) so it's counted in the summary.
+        if (firstAttemptSuite) return firstAttemptSuite;
         throw err;
       }
       process.stderr.write(
