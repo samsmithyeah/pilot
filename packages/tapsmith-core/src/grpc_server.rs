@@ -2318,17 +2318,27 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                     let result = self.send_agent_command(&command).await;
                     return self.make_action_response(request_id, result).await;
                 }
-                // Simulator: use simctl openurl (reliable, no agent hangs)
-                // then dismiss the "Open in <App>?" dialog via the agent.
+                // Simulator: terminate the app first, then simctl openurl.
+                // When the app is NOT running, openurl launches it fresh
+                // with the URL — no "Open in <App>?" dialog and the URL
+                // is delivered via application(_:open:options:) on launch.
+                // When delivered to an already-running app, the URL often
+                // isn't processed (the scene handler misses it).
+                let target_pkg = self
+                    .ios_agent_config
+                    .read()
+                    .await
+                    .as_ref()
+                    .map(|c| c.target_package.clone())
+                    .unwrap_or_default();
+                if !target_pkg.is_empty() {
+                    let _ = ios::device::terminate_app(&serial, &target_pkg).await;
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
                 match ios::device::open_url(&serial, &req.uri).await {
                     Ok(()) => {
-                        tokio::time::sleep(Duration::from_millis(300)).await;
-                        let _ = self
-                            .send_agent_command_with_timeout(
-                                &AgentCommand::DismissSystemDialog,
-                                3_000,
-                            )
-                            .await;
+                        // Give the app time to launch and process the URL
+                        tokio::time::sleep(Duration::from_millis(500)).await;
                         Ok(Response::new(proto::ActionResponse {
                             request_id,
                             success: true,

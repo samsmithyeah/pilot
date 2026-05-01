@@ -192,6 +192,7 @@ pub enum AgentCommand {
     GetAppState {
         package: String,
     },
+    #[allow(dead_code)]
     DismissSystemDialog,
 }
 
