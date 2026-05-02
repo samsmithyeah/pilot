@@ -107,6 +107,32 @@ pub async fn set_system_proxy(port: u16) -> Result<String> {
         bail!("networksetup -setsecurewebproxy failed with {status}");
     }
 
+    // Set proxy bypass domains so the GHA runner's own traffic to GitHub
+    // Actions infrastructure isn't routed through our MITM proxy. Without
+    // this, the runner loses its heartbeat and GHA cancels the job with
+    // "hosted runner lost communication with the server".
+    let bypass = [
+        "*.github.com",
+        "*.githubusercontent.com",
+        "*.actions.githubusercontent.com",
+        "*.blob.core.windows.net",
+        "*.azure.com",
+        "*.microsoft.com",
+        "*.apple.com",
+        "localhost",
+        "127.0.0.1",
+    ];
+    let status = Command::new("/usr/sbin/networksetup")
+        .arg("-setproxybypassdomains")
+        .arg(&service)
+        .args(bypass)
+        .status()
+        .await
+        .context("running networksetup -setproxybypassdomains")?;
+    if !status.success() {
+        warn!("networksetup -setproxybypassdomains failed with {status} — CI runner traffic may be proxied");
+    }
+
     info!(
         service = %service,
         port,
