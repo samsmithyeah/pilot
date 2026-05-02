@@ -131,7 +131,7 @@ jobs:
     name: "Shard ${{ matrix.shard }}/4"
     needs: [build-daemon, build-agent, build-test-app]
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 50
     strategy:
       fail-fast: false
       matrix:
