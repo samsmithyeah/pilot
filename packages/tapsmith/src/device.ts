@@ -71,9 +71,12 @@ export class Device {
   /** @internal — Active WebView handle, if in WebView context. */
   _activeWebView: WebViewHandle | null = null;
 
-  constructor(client: TapsmithGrpcClient, config?: Partial<Pick<TapsmithConfig, 'timeout' | 'package' | 'platform' | 'simulator'>>) {
+  private _typingDelayMs: number;
+
+  constructor(client: TapsmithGrpcClient, config?: Partial<Pick<TapsmithConfig, 'timeout' | 'package' | 'platform' | 'simulator' | 'typingDelay'>>) {
     this._client = client;
     this._defaultTimeoutMs = config?.timeout ?? 30_000;
+    this._typingDelayMs = config?.typingDelay ?? 0;
     this.defaultPackageName = config?.package;
     this._platform = config?.platform ?? 'android';
     this._simulatorUdid = config?.simulator;
@@ -215,7 +218,7 @@ export class Device {
       takeScreenshot: () => this._takeScreenshotBuffer(),
       captureHierarchy: () => this._captureHierarchy(),
     } : undefined;
-    return new ElementHandle(this._client, selector, this._defaultTimeoutMs, { traceCapture });
+    return new ElementHandle(this._client, selector, this._defaultTimeoutMs, { traceCapture, typingDelay: this._typingDelayMs });
   }
 
   // ── Device-level actions ──
@@ -491,6 +494,9 @@ export class Device {
     errorMessage: string
   }> {
     const res = await this._client.startNetworkCapture();
+    if (res.success) {
+      this._ensureRouteManager().ensureEventsSubscribed();
+    }
     return {
       proxyPort: res.proxyPort,
       success: res.success,
@@ -534,6 +540,10 @@ export class Device {
    * Intercept network requests matching a URL pattern. The handler receives a
    * `Route` object that can `abort()`, `continue()`, `fulfill()`, or `fetch()`
    * the request.
+   *
+   * Requires network tracing to be enabled (`trace` mode is not `'off'` and
+   * `network` is `true`, which is the default). Without it, the MITM proxy
+   * is not active and route handlers will never fire.
    */
   async route(
     url: string | RegExp | ((url: URL) => boolean),
@@ -570,7 +580,11 @@ export class Device {
     this._emitNetworkAction('unrouteAll', undefined, start, true, undefined, source);
   }
 
-  /** Wait for a request matching the pattern. */
+  /**
+   * Wait for a request matching the pattern.
+   *
+   * Requires network tracing to be enabled (same prerequisite as `route()`).
+   */
   waitForRequest(
     urlOrPredicate: string | RegExp | ((request: TapsmithRequest) => boolean),
     options?: { timeout?: number },
@@ -598,7 +612,11 @@ export class Device {
     });
   }
 
-  /** Wait for a response matching the pattern. */
+  /**
+   * Wait for a response matching the pattern.
+   *
+   * Requires network tracing to be enabled (same prerequisite as `route()`).
+   */
   waitForResponse(
     urlOrPredicate: string | RegExp | ((response: NetworkResponseEventData) => boolean),
     options?: { timeout?: number },
@@ -709,12 +727,19 @@ export class Device {
         throw new Error(`Failed to forward WebView port: ${fwd.errorMessage}`);
       }
 
-      const handle = new WebViewHandle(this._client, fwd.localPort, this._defaultTimeoutMs);
-      this._applyTraceCtx(handle);
-      await handle._connect();
+      try {
+        const handle = new WebViewHandle(this._client, fwd.localPort, this._defaultTimeoutMs);
+        this._applyTraceCtx(handle);
+        await handle._connect();
 
-      this._activeWebView = handle;
-      return handle;
+        this._activeWebView = handle;
+        return handle;
+      } catch (e) {
+        lastError = e instanceof Error ? e.message : String(e);
+        await this._client.closeWebViewPort(fwd.localPort);
+        await new Promise(r => setTimeout(r, 500));
+        continue;
+      }
     }
 
     throw new Error(

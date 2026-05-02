@@ -66,7 +66,10 @@ async fn run_adb(serial: Option<&str>, args: &[&str], timeout: Duration) -> Resu
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Base directory for user-installed CA certificates on Android.
+/// User-installed CA certificate directory. Apps must include
+/// `<certificates src="user"/>` in their network security config to
+/// trust these on Android API 24+. The Tapsmith test app and user apps
+/// that need MITM interception should configure this — see the docs.
 const DEVICE_CA_CERT_DIR: &str = "/data/misc/user/0/cacerts-added";
 
 /// Build the full on-device path for a CA cert given its filename (e.g. `a1b2c3d4.0`).
@@ -354,7 +357,6 @@ pub async fn install_ca_cert(serial: &str, ca_pem_path: &str, cert_filename: &st
     // Push cert to a temp location
     push_file(serial, ca_pem_path, "/data/local/tmp/tapsmith-ca.pem").await?;
 
-    // Install into user CA store with hash-based filename
     let device_path = device_ca_cert_path(cert_filename);
     shell(serial, &format!("mkdir -p {DEVICE_CA_CERT_DIR}")).await?;
     shell(
@@ -364,7 +366,7 @@ pub async fn install_ca_cert(serial: &str, ca_pem_path: &str, cert_filename: &st
     .await?;
     shell(serial, &format!("chmod 644 {device_path}")).await?;
 
-    info!(%serial, "CA certificate installed on device");
+    info!(%serial, cert_filename, "CA certificate installed on device");
     Ok(())
 }
 

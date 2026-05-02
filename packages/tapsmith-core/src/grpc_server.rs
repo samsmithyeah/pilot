@@ -40,6 +40,17 @@ pub struct TapsmithServiceImpl {
     /// iOS Network Extension redirector session (for cleanup, iOS simulators only).
     #[cfg(target_os = "macos")]
     ios_redirect: Arc<RwLock<Option<crate::ios_redirect::IosRedirect>>>,
+    /// macOS network service name whose system proxy was set as a fallback
+    /// when the Network Extension is unavailable (e.g. on CI). `None` when
+    /// using the NE redirector or when network capture is off.
+    #[cfg(target_os = "macos")]
+    ios_system_proxy_service: Arc<RwLock<Option<String>>>,
+    /// Sticky flag: once the Network Extension fails, skip the 10s
+    /// `IosRedirect::start` timeout on subsequent `start_network_capture`
+    /// calls and go straight to the system proxy fallback. Without this,
+    /// every per-test start/stop cycle pays the NE timeout (~10s × N tests).
+    #[cfg(target_os = "macos")]
+    ios_ne_unavailable: Arc<RwLock<bool>>,
     /// iOS agent launch config (stored for restart on launchApp).
     ios_agent_config: Arc<RwLock<Option<IosAgentConfig>>>,
     /// iproxy USB tunnel for the physical iOS device, if any. Held for the
@@ -76,9 +87,9 @@ pub struct TapsmithServiceImpl {
 struct IosAgentConfig {
     xctestrun_path: String,
     target_package: String,
-    /// Host path to the installed `.app` bundle. Only set when the target
-    /// device is physical — used by `clearAppData` to reinstall the app as
-    /// the only way to wipe persistent state on a real device.
+    /// Host path to the `.app` bundle. Used by `clearAppData` and
+    /// `restoreAppState` to uninstall + reinstall the app for a clean
+    /// data container.
     app_path: Option<String>,
 }
 
@@ -98,6 +109,10 @@ impl TapsmithServiceImpl {
             proxy_uses_iptables: Arc::new(RwLock::new(false)),
             #[cfg(target_os = "macos")]
             ios_redirect: Arc::new(RwLock::new(None)),
+            #[cfg(target_os = "macos")]
+            ios_system_proxy_service: Arc::new(RwLock::new(None)),
+            #[cfg(target_os = "macos")]
+            ios_ne_unavailable: Arc::new(RwLock::new(false)),
             ios_agent_config: Arc::new(RwLock::new(None)),
             ios_iproxy: Arc::new(RwLock::new(None)),
             network_tracing_enabled: Arc::new(RwLock::new(false)),
@@ -599,12 +614,20 @@ impl TapsmithServiceImpl {
         // to get the right ordering.
         #[cfg(target_os = "macos")]
         let ios_redirect = self.ios_redirect.write().await.take();
+        #[cfg(target_os = "macos")]
+        let system_proxy_service = self.ios_system_proxy_service.write().await.take();
         let proxy = self.network_proxy.write().await.take();
         let serial = self.proxy_device_serial.write().await.take();
         let platform = self.proxy_platform.write().await.take();
         let reverse_port = self.proxy_reverse_port.write().await.take();
         let ca_cert_path = self.proxy_ca_cert_path.write().await.take();
         let used_iptables = std::mem::replace(&mut *self.proxy_uses_iptables.write().await, false);
+
+        // Reset macOS system proxy if we set it as a fallback.
+        #[cfg(target_os = "macos")]
+        if let Some(service) = &system_proxy_service {
+            ios::system_proxy::reset_system_proxy(service).await;
+        }
 
         if let Some(serial) = &serial {
             match platform {
@@ -1249,6 +1272,11 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
             selector: selector_to_json(selector),
             text: req.text,
             timeout_ms: opt_timeout(req.timeout_ms),
+            typing_delay_ms: if req.typing_delay_ms > 0 {
+                Some(req.typing_delay_ms)
+            } else {
+                None
+            },
         };
 
         let result = self
@@ -1320,6 +1348,11 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
             selector: sel_json,
             text: req.text,
             timeout_ms: opt_timeout(req.timeout_ms),
+            typing_delay_ms: if req.typing_delay_ms > 0 {
+                Some(req.typing_delay_ms)
+            } else {
+                None
+            },
         };
 
         let result = self
@@ -2285,29 +2318,23 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
         let platform = self.require_platform().await?;
         match platform {
             Platform::Ios => {
+                let bundle_id = self
+                    .ios_agent_config
+                    .read()
+                    .await
+                    .as_ref()
+                    .map(|c| c.target_package.clone())
+                    .filter(|p| !p.is_empty())
+                    .ok_or_else(|| {
+                        Status::failed_precondition(
+                            "device.openDeepLink requires an active agent session \
+                             with a target package. Call startAgent first.",
+                        )
+                    })?;
                 let serial = self.active_serial().await?;
+
                 if self.is_active_ios_physical().await {
-                    // Route through the XCUITest agent, which calls
-                    // `XCUIApplication.open(url:)` on the target app.
-                    // This triggers the app's scene URL handler the same
-                    // way `simctl openurl` does on simulators — unlike
-                    // `devicectl process launch --payload-url`, which
-                    // launches the app but doesn't actually deliver the
-                    // URL to the app's UIApplicationDelegate.
-                    let bundle_id = self
-                        .ios_agent_config
-                        .read()
-                        .await
-                        .as_ref()
-                        .map(|c| c.target_package.clone())
-                        .filter(|p| !p.is_empty())
-                        .ok_or_else(|| {
-                            Status::failed_precondition(
-                                "device.openDeepLink on a physical iOS device requires an \
-                                 active agent session with a target package. Call \
-                                 startAgent first.",
-                            )
-                        })?;
+                    // Physical: use the agent's XCUIApplication.open(url:).
                     let command = AgentCommand::OpenDeepLink {
                         url: req.uri.clone(),
                         package: bundle_id,
@@ -2315,18 +2342,45 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                     let result = self.send_agent_command(&command).await;
                     return self.make_action_response(request_id, result).await;
                 }
-                match ios::device::open_url(&serial, &req.uri).await {
-                    Ok(()) => Ok(Response::new(proto::ActionResponse {
-                        request_id,
-                        success: true,
-                        error_type: String::new(),
-                        error_message: String::new(),
-                        screenshot: Vec::new(),
-                    })),
-                    Err(e) => Ok(self
+
+                // Simulator: terminate → simctl openurl → rebind agent.
+                //
+                // XCUIApplication.open(url:) hangs on quiescence on slow CI
+                // runners, so we avoid it entirely. simctl openurl to a
+                // running app doesn't trigger navigation (the React Native
+                // scene handler misses it), so we terminate first — making
+                // openurl cold-launch the app with the URL. No "Open in
+                // App?" dialog appears on cold launch. Finally, rebind the
+                // agent to the newly launched process.
+                let _ = self
+                    .send_agent_command_with_timeout(
+                        &AgentCommand::TerminateApp {
+                            package: bundle_id.clone(),
+                        },
+                        4_000,
+                    )
+                    .await;
+                tokio::time::sleep(Duration::from_millis(200)).await;
+
+                if let Err(e) = ios::device::open_url(&serial, &req.uri).await {
+                    return Ok(self
                         .action_error(request_id, "ACTION_FAILED", e.to_string())
-                        .await),
+                        .await);
                 }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+
+                // Rebind agent to the cold-launched process and dismiss
+                // any system dialogs. LaunchApp calls activate() which
+                // connects to the running process without navigating away
+                // from the deep link destination.
+                let _ = self
+                    .send_agent_command_with_timeout(
+                        &AgentCommand::LaunchApp { package: bundle_id },
+                        8_000,
+                    )
+                    .await;
+
+                Ok(Self::success_action_response(request_id))
             }
             Platform::Android => {
                 if req.uri.contains('\'') {
@@ -3359,13 +3413,19 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                 // end of scope, releasing the TCP listener.
                 #[cfg(target_os = "macos")]
                 {
-                    match crate::ios_redirect::IosRedirect::start(
-                        serial.clone(),
-                        proxy.state_handle(),
-                        Arc::clone(&mitm_ca),
-                    )
-                    .await
-                    {
+                    let ne_known_bad = *self.ios_ne_unavailable.read().await;
+                    let ne_result = if ne_known_bad {
+                        debug!("Skipping NE attempt (previously failed) — using system proxy");
+                        Err(anyhow::anyhow!("cached: NE previously unavailable"))
+                    } else {
+                        crate::ios_redirect::IosRedirect::start(
+                            serial.clone(),
+                            proxy.state_handle(),
+                            Arc::clone(&mitm_ca),
+                        )
+                        .await
+                    };
+                    match ne_result {
                         Ok(redirect) => {
                             *self.ios_redirect.write().await = Some(redirect);
                             info!(
@@ -3374,15 +3434,38 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                             );
                         }
                         Err(e) => {
-                            let msg =
-                                format!("Failed to start iOS Network Extension redirector: {e}");
-                            error!("{msg}");
-                            return Ok(Response::new(proto::StartNetworkCaptureResponse {
-                                request_id,
-                                success: false,
-                                proxy_port: 0,
-                                error_message: msg,
-                            }));
+                            if !ne_known_bad {
+                                *self.ios_ne_unavailable.write().await = true;
+                                warn!(
+                                    "Network Extension redirector unavailable: {e} — \
+                                     falling back to macOS system proxy"
+                                );
+                            }
+                            match ios::system_proxy::set_system_proxy(host_port).await {
+                                Ok(service) => {
+                                    *self.ios_system_proxy_service.write().await = Some(service);
+                                    if warning.is_none() {
+                                        warning = Some(
+                                            "Using macOS system proxy fallback — \
+                                             not PID-isolated (affects all host traffic)"
+                                                .to_string(),
+                                        );
+                                    }
+                                }
+                                Err(proxy_err) => {
+                                    let msg = format!(
+                                        "iOS network capture unavailable: Network Extension \
+                                         failed ({e}), system proxy fallback also failed ({proxy_err})"
+                                    );
+                                    error!("{msg}");
+                                    return Ok(Response::new(proto::StartNetworkCaptureResponse {
+                                        request_id,
+                                        success: false,
+                                        proxy_port: 0,
+                                        error_message: msg,
+                                    }));
+                                }
+                            }
                         }
                     }
                 }
@@ -3514,6 +3597,9 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                         if let Some(redirect) = self.ios_redirect.write().await.take() {
                             drop(redirect);
                             debug!(%serial, "iOS redirector session torn down");
+                        }
+                        if let Some(service) = self.ios_system_proxy_service.write().await.take() {
+                            ios::system_proxy::reset_system_proxy(&service).await;
                         }
                     }
                     info!(%serial, "iOS proxy stopped");
@@ -4209,7 +4295,12 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                     }
                     return Ok(Self::success_action_response(request_id));
                 }
-                // iOS simulator: extract archive directly into the app container
+                // iOS simulator: terminate the app, nuke the data container
+                // via rm -rf + mkdir (more thorough than selective clearing),
+                // then extract the saved archive.
+                let _ = ios::device::terminate_app(&serial, pkg).await;
+                tokio::time::sleep(Duration::from_millis(500)).await;
+
                 let container = match ios::device::get_app_container(&serial, pkg).await {
                     Ok(path) => path,
                     Err(e) => {
@@ -4223,10 +4314,15 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                     }
                 };
 
-                // Terminate the app before restoring
-                let _ = ios::device::terminate_app(&serial, pkg).await;
+                // Clear the container in-place rather than rm -rf. Deleting
+                // the container directory entirely can cause iOS to lose
+                // its internal bundle-id → container UUID mapping, making
+                // the app launch into a fresh container instead of the one
+                // we extracted into.
+                if let Err(e) = ios::device::clear_container(&container).await {
+                    warn!(%pkg, error = %e, "clear_container failed, continuing");
+                }
 
-                // Extract archive into the data container
                 let output = tokio::process::Command::new("tar")
                     .args(["xzf", local_path, "-C", &container])
                     .output()
@@ -4234,7 +4330,7 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
 
                 match output {
                     Ok(out) if out.status.success() => {
-                        info!(%pkg, %local_path, "iOS app state restored");
+                        info!(%pkg, %local_path, container, "iOS simulator app state restored");
                         Ok(Self::success_action_response(request_id))
                     }
                     Ok(out) => {

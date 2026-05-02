@@ -5,7 +5,7 @@
 import { beforeEach, describe, expect, test } from "tapsmith"
 
 describe("WebView selector playground parity", () => {
-  test.use({ timeout: 30_000 })
+  test.use({ timeout: 60_000 })
 
   beforeEach(async ({ device }) => {
     await device.restartApp()

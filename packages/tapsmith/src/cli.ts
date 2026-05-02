@@ -335,6 +335,7 @@ interface SequentialDeviceState {
   resolvedAgentApk?: string
   resolvedAgentTestApk?: string
   resolvedIosXctestrun?: string
+  resolvedIosAppPath?: string
   signature: string
 }
 
@@ -614,10 +615,7 @@ async function setupSequentialDevice(
       resolvedAgentApk,
       resolvedAgentTestApk,
       resolvedIosXctestrun,
-      // Only cache the app path on physical iOS — the daemon uses it for
-      // reinstall-based clearAppData. Simulators keep the host-filesystem
-      // app-container clearing path instead.
-      cfg.platform === 'ios' && targetIsPhysical ? resolvedIosAppPath : undefined,
+      cfg.platform === 'ios' ? resolvedIosAppPath : undefined,
       networkTracingEnabled,
     );
     if (cfg.platform !== 'ios') {
@@ -665,6 +663,7 @@ async function setupSequentialDevice(
     resolvedAgentApk,
     resolvedAgentTestApk,
     resolvedIosXctestrun,
+    resolvedIosAppPath,
     signature,
   };
 }
@@ -1756,6 +1755,7 @@ async function main(): Promise<void> {
   let resolvedAgentApk: string | undefined;
   let resolvedAgentTestApk: string | undefined;
   let resolvedIosXctestrun: string | undefined;
+  let resolvedIosAppPath: string | undefined;
   let sequentialExitCode = 1;
   const sequentialStart = Date.now();
 
@@ -1807,6 +1807,7 @@ async function main(): Promise<void> {
     resolvedAgentApk = currentSequentialState.resolvedAgentApk;
     resolvedAgentTestApk = currentSequentialState.resolvedAgentTestApk;
     resolvedIosXctestrun = currentSequentialState.resolvedIosXctestrun;
+    resolvedIosAppPath = currentSequentialState.resolvedIosAppPath;
     // Mirror the chosen device serial onto the root config so any code path
     // still reading from `config.device` (UI/watch handoff) sees it.
     config.device = currentSequentialState.deviceSerial;
@@ -2001,6 +2002,7 @@ async function main(): Promise<void> {
           resolvedAgentApk = currentSequentialState.resolvedAgentApk;
           resolvedAgentTestApk = currentSequentialState.resolvedAgentTestApk;
           resolvedIosXctestrun = currentSequentialState.resolvedIosXctestrun;
+          resolvedIosAppPath = currentSequentialState.resolvedIosAppPath;
           // After switching, the launchConfiguredApp on first file is not
           // needed because setupSequentialDevice already launched the app.
           fileIndex = 0;
@@ -2024,6 +2026,8 @@ async function main(): Promise<void> {
                 client: client!,
                 agentApkPath: resolvedAgentApk,
                 agentTestApkPath: resolvedAgentTestApk,
+                iosXctestrunPath: resolvedIosXctestrun,
+                iosAppPath: resolvedIosAppPath,
                 deviceSerial: projectConfig.device,
               }, `reset before ${path.basename(file)}`);
 
@@ -2062,6 +2066,7 @@ async function main(): Promise<void> {
               agentApkPath: resolvedAgentApk,
               agentTestApkPath: resolvedAgentTestApk,
               iosXctestrunPath: resolvedIosXctestrun,
+              iosAppPath: resolvedIosAppPath,
               deviceSerial: projectConfig.device,
             },
           });
@@ -2103,9 +2108,11 @@ async function main(): Promise<void> {
     }
     // Leave emulators running for reuse by the next run.
     preserveEmulatorsForReuse(launchedEmulators);
+    // Defer process.exit so any pending error handlers (unhandledRejection
+    // etc.) in the current microtask queue run first — process.exit() in a
+    // finally block swallows them.
+    setTimeout(() => process.exit(sequentialExitCode), 0);
   }
-
-  process.exit(sequentialExitCode);
 }
 
 // ─── Infrastructure error recovery for single-worker mode ───
@@ -2132,6 +2139,7 @@ async function runTestFileWithRecovery(
 ): Promise<SuiteResult> {
   const grep = normalizeGrep(opts.config.grep);
   const grepInvert = normalizeGrep(opts.config.grepInvert);
+  let firstAttemptSuite: SuiteResult | undefined;
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
       const suite = await runTestFile(file, {
@@ -2152,17 +2160,30 @@ async function runTestFileWithRecovery(
         (r) => r.status === 'failed' && r.error && isRecoverableInfrastructureError(r.error),
       );
       if (!infraFailure) {
+        // If this is a retry that produced fewer results than the first
+        // attempt (e.g. crashed before running any tests), prefer the
+        // first attempt's results so the original failure is visible.
+        if (attempt === 2 && firstAttemptSuite) {
+          const firstResults = collectResults(firstAttemptSuite);
+          if (fileResults.length < firstResults.length) {
+            return firstAttemptSuite;
+          }
+        }
         return suite;
       }
       if (attempt === 2) {
         return suite;
       }
+      firstAttemptSuite = suite;
       process.stderr.write(
         dim(`Recovering session after infrastructure error in ${path.basename(file)}: ${infraFailure.error?.message ?? 'unknown'}\n`),
       );
       await launchConfiguredApp(opts.sessionContext, `recovery for ${path.basename(file)}`, { allowSoftReset: false });
     } catch (err) {
       if (!isRecoverableInfrastructureError(err) || attempt === 2) {
+        // If the retry itself crashed, return the first attempt's results
+        // (which contain the original failure) so it's counted in the summary.
+        if (firstAttemptSuite) return firstAttemptSuite;
         throw err;
       }
       process.stderr.write(
@@ -2186,5 +2207,6 @@ main().catch(async (err) => {
     if (isDispatcherShuttingDown()) return;
   } catch { /* dispatcher not loaded — fall through */ }
   console.error(red(`Fatal error: ${err}`));
+  console.error((err as Error)?.stack ?? err);
   process.exit(1);
 });
