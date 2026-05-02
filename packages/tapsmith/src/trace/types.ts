@@ -234,6 +234,7 @@ export interface TraceConfigSnapshot {
   snapshots: boolean
   sources: boolean
   network: boolean
+  deviceLogs: boolean
 }
 
 // ─── Trace Configuration ───
@@ -310,6 +311,8 @@ export interface TraceConfig {
    * Same glob syntax as `networkHosts`.
    */
   networkIgnoreHosts?: string[]
+  /** Whether to stream device logs (Android logcat / iOS simulator syslog). Default: true. */
+  deviceLogs: boolean
 }
 
 /** Parse a string shorthand or object into a full TraceConfig. */
@@ -323,6 +326,7 @@ export function resolveTraceConfig(
     sources: true,
     attachments: true,
     network: true,
+    deviceLogs: true,
   };
 
   if (input === undefined) return defaults;
