@@ -511,7 +511,9 @@ async function handlePrepare(msg: UIWorkerPrepareMessage): Promise<void> {
       steps,
       // A device that already satisfied the policy credits the preparation
       // that did the work; the claim is only as good as its weakest member.
-      satisfiedBy: reports.every((r) => r.satisfiedBy) ? reports[0].satisfiedBy : undefined,
+      // No target at all (every device the file drives already held a
+      // satisfying claim) is a valid, instant preparation with no credit.
+      satisfiedBy: reports.length > 0 && reports.every((r) => r.satisfiedBy) ? reports[0].satisfiedBy : undefined,
     });
   } catch (err) {
     const cancelled = abort.signal.aborted || isAbortError(err);

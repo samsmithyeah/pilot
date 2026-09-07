@@ -434,6 +434,12 @@ async function installAppUnderTest(
       throw new Error(`Failed to install iOS app: ${err instanceof Error ? err.message : String(err)}`);
     },
   );
+  // The caller awaits this only after resolving the agent artifacts, which
+  // can take minutes when the simulator agent has to build. A rejection in
+  // that window must not surface as an unhandled rejection (the sequential
+  // CLI's fatal handler would tear the run down and lose the message above),
+  // so the promise is observed now; the caller's await still sees the error.
+  pending.catch(() => {});
   return { freshInstall: !wasInstalled, pending };
 }
 

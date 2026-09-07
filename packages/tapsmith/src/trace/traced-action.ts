@@ -98,6 +98,12 @@ export async function tracedAction(
   // handed in by the caller) so a concurrent action on another device cannot
   // take the same one; unset when nothing captured — the emit then claims one.
   let actionIndex: number | undefined = extra?.reservedActionIndex;
+  // A skipped capture reserves nothing, so reserve here: the runner resets
+  // every device of a group concurrently, and two started rows peeking the
+  // same index would each be completed by the other device's event.
+  if (actionIndex === undefined && extra?.skipBeforeCapture) {
+    actionIndex = ctx.collector._reserveActionIndex();
+  }
   // Treat a skipped capture like a completed batch so the fallback path
   // below does not run either.
   let batchSuccess = !!extra?.skipBeforeCapture;

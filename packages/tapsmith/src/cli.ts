@@ -869,6 +869,16 @@ async function openGroupMembersOnFreshDaemons(
       try { spec.daemonProcess.kill(); } catch { /* already gone */ }
     }
   };
+  // Every port handed out so far. A daemon port leaves circulation once its
+  // daemon binds, but an agent port is only ever forwarded (never bound by
+  // this process), so nothing else stops a later pick from repeating it.
+  const taken = new Set<number>();
+  const pickUnusedPort = async (): Promise<number> => {
+    let port = await pickFreePort();
+    while (taken.has(port)) port = await pickFreePort();
+    taken.add(port);
+    return port;
+  };
   try {
     for (const [i, entry] of members.entries()) {
       const serial = provisioned.serials[i];
@@ -876,9 +886,8 @@ async function openGroupMembersOnFreshDaemons(
         // Same as the primary: capture needs adb root on Android.
         ensureAdbRoot(serial);
       }
-      const port = await pickFreePort();
-      let agentPort = await pickFreePort();
-      while (agentPort === port) agentPort = await pickFreePort();
+      const port = await pickUnusedPort();
+      const agentPort = await pickUnusedPort();
       progress?.update('worker-devices', { state: 'running', detail: `${entry.name}: starting daemon on localhost:${port} for ${serial}` });
       const daemon = await startDaemon({
         daemonBin, port, agentPort, platform: cfg.platform,

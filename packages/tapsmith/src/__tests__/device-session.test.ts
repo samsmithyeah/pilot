@@ -321,6 +321,34 @@ describe('openDeviceSession phases (the sequential CLI\'s step rows)', () => {
     expect(device.startAgent).toHaveBeenCalledWith('com.example.app', '/agents/agent.apk', '/agents/agent-test.apk', '/derived/TapsmithAgent.xctestrun', '/proj/Build/App.app', false);
   });
 
+  it('surfaces a simulator install failure that lands while the agent is still resolving, not as an unhandled rejection', async () => {
+    mocks.simAppMatches = false;
+    const { installAppAsync } = await import('../ios-simulator.js');
+    vi.mocked(installAppAsync).mockRejectedValueOnce(new Error('simctl install: device is locked'));
+    const { ensureSimulatorAgent } = await import('../ios-simulator-build.js');
+    // The agent build outlives the install by a long way in real life; here a
+    // few ticks are enough for the rejection to land before it is awaited.
+    vi.mocked(ensureSimulatorAgent).mockImplementationOnce(async () => {
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      await new Promise((r) => setTimeout(r, 5));
+      return '/derived/TapsmithAgent.xctestrun';
+    });
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      await expect(openDeviceSession(
+        { name: 'device-1', serial: 'SIM-1', daemonAddress: 'localhost:50052' },
+        makeConfig({ platform: 'ios', apk: undefined, app: './Build/App.app' }),
+        { label: 'Device' },
+      )).rejects.toThrow('Failed to install iOS app: simctl install: device is locked');
+      await new Promise((r) => setTimeout(r, 10));
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+    expect(unhandled).toEqual([]);
+  });
+
   it('fails a physical iOS device that has no device-slice xctestrun to run', async () => {
     mocks.deviceXctestrun = undefined;
     await expect(openDeviceSession(

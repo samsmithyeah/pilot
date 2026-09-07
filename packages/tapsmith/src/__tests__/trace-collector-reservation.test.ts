@@ -3,8 +3,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { TraceCollector } from '../trace/trace-collector.js';
+import { tracedAction } from '../trace/traced-action.js';
 import { runInAttemptContext } from '../attempt-fence.js';
 import type { TraceConfig } from '../trace/types.js';
+import type { ActionResponse } from '../grpc-client.js';
 
 // Two devices acting at once (PILOT-310) each capture a before-screenshot and
 // then emit their event. The collector hands every capture its own index up
@@ -104,6 +106,39 @@ describe('TraceCollector action index reservation', () => {
       { index: 1, lifecycle: 'completed' },
       { index: 0, lifecycle: 'completed' },
     ]);
+  });
+
+  it('reserves an index for an action that skips its before-capture, so concurrent group resets do not share one', async () => {
+    const c = new TraceCollector(makeConfig(), tempDir());
+    const seen: Array<{ index: number; device?: string; lifecycle?: string }> = [];
+    c.setEventCallback((event, _captures, lifecycle) => {
+      seen.push({ index: event.actionIndex, device: event.deviceId, lifecycle });
+    });
+    const ok = { success: true } as ActionResponse;
+    const ctx = (deviceId: string) => ({
+      collector: c, deviceId,
+      takeScreenshot: async () => undefined,
+      captureHierarchy: async () => undefined,
+    });
+    // The runner's fixture reset: every device of the group resets at once
+    // and none of them captures a before-screenshot.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const run = (deviceId: string) => tracedAction(
+      ctx(deviceId), 'resetApp', 'device', undefined,
+      async () => { await gate; return ok; }, 'App reset failed', { skipBeforeCapture: true },
+    );
+    const both = Promise.all([run('alice'), run('bob')]);
+    await Promise.resolve();
+    release();
+    await both;
+    const started = seen.filter((e) => e.lifecycle === 'started');
+    const completed = seen.filter((e) => e.lifecycle === 'completed');
+    expect(started.map((e) => e.index)).toEqual([0, 1]);
+    for (const s of started) {
+      expect(completed.find((e) => e.device === s.device)?.index).toBe(s.index);
+    }
+    expect(c.currentActionIndex).toBe(2);
   });
 
   it('honours setActionIndexOffset for reservations too', async () => {
