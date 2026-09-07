@@ -295,7 +295,11 @@ export function NetworkTab({ entries, bodies, deviceNames }: Props) {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [detailTab, setDetailTab] = useState<DetailTab>('headers');
-  const [sortColumn, setSortColumn] = useState<SortColumn>('time');
+  // Chronological by default, like DevTools and Playwright's trace viewer:
+  // the waterfall reads top-to-bottom as the test unfolded, and a request's
+  // place in the list matches its place on the timeline. Duration ("Time")
+  // and size are opt-in sorts.
+  const [sortColumn, setSortColumn] = useState<SortColumn>('waterfall');
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc');
 
   const timeExtent = useMemo(() => {
@@ -361,7 +365,9 @@ export function NetworkTab({ entries, bodies, deviceNames }: Props) {
       setSortDirection(d => d === 'asc' ? 'desc' : 'asc');
     } else {
       setSortColumn(col);
-      setSortDirection(col === 'size' || col === 'time' || col === 'waterfall' ? 'desc' : 'asc');
+      // Largest / slowest first for size and duration; the waterfall
+      // returns to chronological order.
+      setSortDirection(col === 'size' || col === 'time' ? 'desc' : 'asc');
     }
   };
 
