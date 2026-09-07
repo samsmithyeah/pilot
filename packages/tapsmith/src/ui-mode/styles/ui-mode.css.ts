@@ -800,6 +800,8 @@ html, body, #app {
 
 .te-duration { font-size: 10px; color: var(--fg-muted); font-family: var(--font-mono); flex-shrink: 0; font-variant-numeric: tabular-nums; }
 .te-isolation { font-size: 9.5px; color: var(--fg-muted); border: 1px solid var(--border); border-radius: 999px; padding: 0 5px; margin-right: 6px; flex-shrink: 0; letter-spacing: 0.02em; line-height: 14px; }
+.te-devices { display: inline-flex; align-items: center; gap: 3px; font-size: 9.5px; color: var(--fg-muted); margin-right: 6px; flex-shrink: 0; letter-spacing: 0.02em; line-height: 14px; }
+.te-devices svg { flex-shrink: 0; opacity: 0.8; }
 
 .te-actions {
   position: absolute; right: 6px; top: 50%; transform: translateY(-50%);

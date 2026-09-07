@@ -25,6 +25,9 @@ import { ensureSessionReady, executeAppReset } from '../session-preflight.js';
 import type { PreparedState, ResetCapabilities } from '../app-reset.js';
 import {
   closeDeviceSession,
+  consumePrepared,
+  sessionsForRun,
+  sessionsToPrepare,
   openDeviceGroup,
   recoverDeviceSessions,
   type DeviceSession,
@@ -74,7 +77,17 @@ function sendProgress(message: string): void {
  * owns the claim across runs (see handleRunFile); this is the worker's copy
  * for the launch it performed itself.
  */
-let preparedDevice: PreparedState | undefined;
+/**
+ * The group's prepared state as one claim, for the server's per-worker
+ * readiness: the policy every session's own claim satisfies, or none. Each
+ * session keeps its own claim (`DeviceSession.prepared`) — a file that drives
+ * only the primary consumes only the primary's, and a preparation resets only
+ * the devices its file will use — so this is derived, never stored.
+ */
+function groupPreparedPolicy(): PreparedState['policy'] | undefined {
+  const group = sessions;
+  return group.length > 0 && group.every((s) => s.prepared) ? group[0].prepared?.policy : undefined;
+}
 /** The primary's runtime reset capabilities — the group runs one app build, so its hooks are the group's. */
 function sharedCapabilities(): ResetCapabilities {
   return sessions[0]?.capabilities ?? {};
@@ -98,11 +111,6 @@ function publishCapabilities(): void {
   if (!changed) return;
   publishedCapabilities = { ...current };
   send({ type: 'capabilities', workerId, capabilities: { ...current } });
-}
-function consumePreparedDevice(): PreparedState | undefined {
-  const p = preparedDevice;
-  preparedDevice = undefined;
-  return p;
 }
 
 function requireSessions(): DeviceSession[] {
@@ -193,18 +201,15 @@ async function handleInit(msg: UIWorkerInitMessage): Promise<void> {
       onProgress: (message) => sendProgress(message),
     },
   );
-  // The group's prepared state: every member's startup launch left its app
-  // fresh, or (adopted primary) the CLI's launch did — one claim covers the
-  // group because the runner resets every device together.
-  preparedDevice = sessions.every((s) => s.prepared) ? sessions[0].prepared : undefined;
-
+  // Each session carries its own prepared state: its startup launch left the
+  // app fresh, or (adopted primary) the CLI's launch did.
   finishInit();
 }
 
 function finishInit(): void {
   sendProgress('ready');
   publishedCapabilities = { ...sharedCapabilities() };
-  send({ type: 'ready', workerId, policy: preparedDevice?.policy, capabilities: { ...sharedCapabilities() } });
+  send({ type: 'ready', workerId, policy: groupPreparedPolicy(), capabilities: { ...sharedCapabilities() } });
 
   // From here on, stream slow-device-action progress (between-file preflight,
   // test.use({appState}) restore, recovery) so the UI can show "Restoring app
@@ -231,13 +236,16 @@ async function handleRunFile(
 ): Promise<void> {
   const group = requireSessions();
   const primary = group[0];
-  // The server owns the prepared-state claim: it mirrors the startup launch
-  // into its readiness state and hands it back (or a background preparation)
-  // when it still satisfies this file's policy. It omits `preparedFor` when
-  // that claim was invalidated — a mirror gesture before the first run, a
-  // stale launch — so the launch-time record here must go too, or the runner
+  // The server owns the readiness claim: it mirrors the startup launch into
+  // its readiness state and hands it back (or a background preparation) when
+  // it still satisfies this file's policy. Each session's own record says
+  // what actually happened on that device, and is what the run consumes; the
+  // server's is the gate. It omits `preparedFor` when the claim was
+  // invalidated — a mirror gesture before the first run, a stale launch — so
+  // the records of the devices this file drives must go too, or the runner
   // would skip the file reset over a device the user has already touched.
-  preparedDevice = preparedFor;
+  // Devices the file leaves alone keep theirs.
+  if (!preparedFor) for (const s of sessionsForRun(group, config!, projectUseOptions)) s.prepared = undefined;
 
   // Created BEFORE the between-files preflight so a stop that lands during
   // wake/unlock/app-reset is honored too — otherwise the abort IPC would be
@@ -342,14 +350,19 @@ function sendEmptyFileDone(filePath: string): void {
   });
 }
 
-/** The runner's view of the group. The (single) prepared claim covers every device. */
-function runDevices(prepared: PreparedState | undefined): RunDevice[] {
-  return requireSessions().map((s) => ({
+/**
+ * The runner's view of the devices one file runs on: the project's group,
+ * sliced from the worker's (which is its target's largest — see
+ * `sessionsForRun`). Each device's prepared state is consumed here, once;
+ * a device the file does not drive keeps its claim for a later group file.
+ */
+function runDevices(projectUseOptions: import('../worker-protocol.js').RunFileUseOptions | undefined): RunDevice[] {
+  return sessionsForRun(requireSessions(), config!, projectUseOptions).map((s) => ({
     name: s.name,
     device: s.device,
     serial: s.serial,
     sessionContext: s.context,
-    prepared,
+    prepared: consumePrepared(s),
   }));
 }
 
@@ -368,7 +381,7 @@ async function runFileWithRecovery(
     try {
       const suite = await runTestFile(filePath, {
         config: cfg,
-        devices: runDevices(consumePreparedDevice()),
+        devices: runDevices(projectUseOptions),
         screenshotDir,
         reporter: reporterProxy,
         bustImportCache: true,
@@ -431,9 +444,8 @@ async function recoverFileSession(filePath: string, err: unknown): Promise<void>
     `UI Worker ${workerId}: Recovering session after infrastructure error in ${path.basename(filePath)}: ${err instanceof Error ? err.message : err}\n`,
   );
   const group = requireSessions();
+  // The relaunch is a fresh `clear` on every device, recorded on each session.
   await recoverDeviceSessions(group, `recovery for ${path.basename(filePath)}`);
-  // The relaunch is a fresh `clear` on every device — one claim for the group.
-  preparedDevice = group.every((s) => s.prepared) ? group[0].prepared : undefined;
 }
 
 // ─── Shutdown ───
@@ -457,37 +469,45 @@ let currentPrepare: { prepareId: string; abort: AbortController } | undefined;
  */
 async function handlePrepare(msg: UIWorkerPrepareMessage): Promise<void> {
   const group = requireSessions();
+  // Only the devices the file being prepared for will drive, and of those
+  // only the ones not still holding a satisfying claim: a member the last
+  // run left untouched is prepared already, and a single-device project's
+  // file needs nothing from the rest of the group.
+  const targets = sessionsToPrepare(group, config!, msg.projectUseOptions, msg.policy);
   const abort = new AbortController();
   currentPrepare = { prepareId: msg.prepareId, abort };
-  for (const s of group) s.client._setAbortSignal(abort.signal);
+  for (const s of targets) s.client._setAbortSignal(abort.signal);
   const startedAt = Date.now();
   try {
-    await Promise.all(group.map(async (s) => {
+    await Promise.all(targets.map(async (s) => {
       await s.device.wake();
       await s.device.unlock();
     }));
     // The reset below mutates the device, so whatever the startup launch left
     // behind is gone the moment it starts — cancelled or failed included. Drop
-    // the local record now; a successful preparation comes back from the
-    // server with run-file, and a failed one must not let the next run
-    // consume a stale clear·file claim over a half-restored app.
-    preparedDevice = undefined;
-    for (const s of group) s.prepared = undefined;
+    // the record now; a successful preparation records itself below, and a
+    // failed one must not let the next run consume a stale clear·file claim
+    // over a half-restored app.
+    for (const s of targets) s.prepared = undefined;
     // Project-level use (appState etc.) is folded into the policy by the
     // server; the effective config is the worker's own.
-    const reports = await Promise.all(group.map((s) => executeAppReset(s.context, msg.policy, {
+    const reports = await Promise.all(targets.map((s) => executeAppReset(s.context, msg.policy, {
       phase: `background preparation${msg.forFile ? ` for ${path.basename(msg.forFile)}` : ''}`,
     })));
     if (abort.signal.aborted) throw new Error('preparation cancelled');
+    const durationMs = Date.now() - startedAt;
+    for (const s of targets) {
+      s.prepared = { policy: msg.policy, preparedAt: startedAt + durationMs, durationMs, source: 'background preparation' };
+    }
     const steps = reports.flatMap((report, i) => report.steps.map((step) =>
-      `${group.length > 1 ? `${group[i].name}: ` : ''}${step.name}: ${step.durationMs}ms${step.ok ? '' : ' (failed)'}`));
+      `${group.length > 1 ? `${targets[i].name}: ` : ''}${step.name}: ${step.durationMs}ms${step.ok ? '' : ' (failed)'}`));
     send({
       type: 'prepared',
       workerId,
       prepareId: msg.prepareId,
       policy: msg.policy,
       startedAt,
-      durationMs: Date.now() - startedAt,
+      durationMs,
       steps,
       // A device that already satisfied the policy credits the preparation
       // that did the work; the claim is only as good as its weakest member.

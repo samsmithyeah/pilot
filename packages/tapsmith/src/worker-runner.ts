@@ -27,6 +27,7 @@ import {
 import { ensureSessionReady } from './session-preflight.js';
 import {
   closeDeviceSession,
+  sessionsForRun,
   consumePrepared,
   openDeviceGroup,
   recoverDeviceSessions,
@@ -93,8 +94,9 @@ async function handleInit(msg: InitMessage): Promise<void> {
 }
 
 /** The runner's view of the group: one entry per device, prepared state consumed once. */
-function runDevices(): RunDevice[] {
-  return sessions.map((s) => ({
+/** The devices one file runs on: its project's group, sliced from the worker's (see `sessionsForRun`). */
+function runDevices(projectUseOptions: import('./worker-protocol.js').RunFileUseOptions | undefined): RunDevice[] {
+  return sessionsForRun(sessions, config!, projectUseOptions).map((s) => ({
     name: s.name,
     device: s.device,
     serial: s.serial,
@@ -218,7 +220,7 @@ async function runFileWithRecovery(
     try {
       const suite = await runTestFile(filePath, {
         config,
-        devices: runDevices(),
+        devices: runDevices(projectUseOptions),
         screenshotDir,
         reporter: reporterProxy,
         beforeEachTest: ensureGroupReady,

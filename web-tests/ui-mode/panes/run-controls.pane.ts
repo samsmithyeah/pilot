@@ -42,7 +42,7 @@ export class RunControlsPane {
     return this.page.getByRole("status", { name: "Device connection" })
   }
 
-  /** One chip per worker (a single device is one worker). */
+  /** One chip per device: a worker driving a group (`use.devices`) shows one per member. */
   get workerChips() {
     return this.page.getByTestId("worker-chip")
   }

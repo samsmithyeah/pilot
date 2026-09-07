@@ -41,7 +41,7 @@ import {
   type ResetCapabilities,
 } from './app-reset.js';
 import { executeAppReset, type ExecuteAppResetOptions, type SessionPreflightContext } from './session-preflight.js';
-import { deviceGroupSize, validateAppResetOptions, validateDevicesOption } from './config.js';
+import { deviceGroupSize, resolveDeviceGroup, validateAppResetOptions, validateDevicesOption } from './config.js';
 import { onActionProgress } from './action-progress.js';
 import { runInAttemptContext, type AttemptToken } from './attempt-fence.js';
 import { matchesTestFilter } from './test-filter.js';
@@ -1471,10 +1471,16 @@ async function runSuiteContext(
       // Trace recording — start if configured
       const recording = shouldRecord(traceConfig.mode, attempt);
       let traceCollector: TraceCollector | null = null;
-      // Devices whose network capture the daemon confirmed. Only these are
-      // drained: stopping a capture that never started would print a
-      // "not running" warning on every test for the device that failed.
+      // Devices whose network capture the daemon confirmed this attempt.
+      // Draining covers these plus any device whose proxy is still up from
+      // an earlier test (`keepRunning: true`) even though this attempt's
+      // start failed — otherwise its entries sit in the daemon until the
+      // next start discards them, and this test's trace shows no network.
+      // A device whose proxy never came up is skipped: stopping a capture
+      // that never started prints a "not running" warning on every test.
       const networkCapturingDevices = new Set<Device>();
+      const networkDrainDevices = (): Device[] =>
+        devices.filter((d) => networkCapturingDevices.has(d) || d._networkProxyRunning);
 
       if (recording && primary) {
         const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tapsmith-trace-'));
@@ -1960,7 +1966,7 @@ async function runSuiteContext(
         const rawNetworkByDevice: Array<{ deviceId?: string; entries: RawEntries }> = [];
         if (traceConfig.network) {
           const { filterEntriesByHosts } = await import('./trace/filter-hosts.js');
-          for (const d of networkCapturingDevices) {
+          for (const d of networkDrainDevices()) {
             try {
               const res = await d._stopNetworkCapture({ keepRunning: true });
               if (res.success) {
@@ -2531,23 +2537,53 @@ export function markFileRetryFlakes(firstAttempt: SuiteResult, retried: SuiteRes
  * global `test` / `describe` functions), then executed sequentially.
  */
 /**
- * The devices an embedder handed the runner must be the project's declared
- * group. `use.devices` is project-level, so an embedder that resolved the
- * group from the root config provisions one device for a two-device project;
- * the tests would then destructure `devices` members that do not exist and
- * fail on the first `bob.tap()` with an error that names nothing useful.
- * Every run path shares this check, so a missed embedder fails here, loudly.
+ * The devices an embedder handed the runner must be exactly the project's
+ * group: `use.devices` when the project declares one, else the run config's
+ * `devices`, else a single device. Too few, and the tests destructure
+ * `devices` members that do not exist and fail on the first `bob.tap()` with
+ * an error that names nothing useful. Too many — a worker holding its
+ * target's largest group handed all of it to a single-device project — and
+ * the project silently drives a device it never declared, with a trace
+ * labelled by another project's names. Every run path shares this check, so
+ * an embedder that forgot to slice its sessions fails here, loudly.
  */
 function assertDeviceGroupMatches(opts: RunOptions, declared: TapsmithConfig['devices']): void {
-  if (declared === undefined || opts.devices.length === 0) return;
-  const wanted = deviceGroupSize({ devices: declared });
+  if (opts.devices.length === 0) return;
+  const effective = declared ?? opts.config.devices;
+  const wanted = deviceGroupSize({ devices: effective });
   if (opts.devices.length === wanted) return;
+  const subject = opts.projectName ? `Project "${opts.projectName}"` : 'The project';
+  const declares = effective === undefined
+    ? 'declares no device group (a single device)'
+    : `declares a device group of ${wanted} (use.devices)`;
   throw new Error(
-    `${opts.projectName ? `Project "${opts.projectName}"` : 'The project'} declares a device group of ${wanted} `
-    + `(use.devices) but the run was given ${opts.devices.length} device(s) `
+    `${subject} ${declares} but the run was given ${opts.devices.length} device(s) `
     + `(${opts.devices.map((d) => `${d.name}=${d.serial ?? '?'}`).join(', ')}). `
     + 'The embedder resolved the group from the wrong config — this is a Tapsmith bug, please report it.',
   );
+}
+
+/**
+ * Name the run's devices after the project's group, position by position, for
+ * the duration of the run. An embedder's sessions are named for its target's
+ * largest group (`alice`, `bob`); a project on that target declaring no group
+ * runs on `alice` — but its trace must not name a device it never declared,
+ * so it runs as `device-1` there with events untagged, as in any
+ * single-device run. Returns the restore for the embedder's own names.
+ */
+function applyRunDeviceNames(opts: RunOptions, declared: TapsmithConfig['devices']): () => void {
+  const group = resolveDeviceGroup({ devices: declared ?? opts.config.devices, device: opts.config.device });
+  const previous = opts.devices.map((rd) => ({ rd, name: rd.name, tag: rd.device._traceDeviceId }));
+  opts.devices.forEach((rd, i) => {
+    rd.name = group[i]?.name ?? rd.name;
+    rd.device._traceDeviceId = opts.devices.length > 1 ? rd.name : undefined;
+  });
+  return () => {
+    for (const p of previous) {
+      p.rd.name = p.name;
+      p.rd.device._traceDeviceId = p.tag;
+    }
+  };
 }
 
 export async function runTestFile(
@@ -2576,6 +2612,7 @@ export async function runTestFile(
     rootCtx.useOptions = { ...opts.projectUseOptions, ...rootCtx.useOptions };
   }
   assertDeviceGroupMatches(opts, rootCtx.useOptions?.devices);
+  const restoreDeviceNames = applyRunDeviceNames(opts, rootCtx.useOptions?.devices);
 
   // Build a merged registry from all per-test/hook registries in the file.
   // Using getFixtureRegistry() (the mutable global) would only reflect the
@@ -2631,6 +2668,7 @@ export async function runTestFile(
     return await runSuiteContext(rootCtx, '', [], [], fileOpts);
   } finally {
     for (const d of allDevices(fileOpts)) d._client._setAbortSignal(undefined);
+    restoreDeviceNames();
     try {
       if (workerTeardown) {
         await workerTeardown();

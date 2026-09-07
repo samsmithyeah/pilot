@@ -99,7 +99,7 @@ function groupBySuite(filePath: string, tests: TestSpec[], depth: number): TestT
 export function projectNode(
   name: string,
   files: TestTreeNode[],
-  options: { dependencies?: string[] } = {},
+  options: { dependencies?: string[]; use?: TestTreeNode["use"] } = {},
 ): TestTreeNode {
   const prefix = `project::${name}::`
   return {
@@ -111,6 +111,7 @@ export function projectNode(
     status: "idle",
     children: files.map((f) => withIdPrefix(f, prefix)),
     dependencies: options.dependencies?.length ? options.dependencies : undefined,
+    ...(options.use ? { use: options.use } : {}),
   }
 }
 

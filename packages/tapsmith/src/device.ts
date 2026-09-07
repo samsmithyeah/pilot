@@ -885,6 +885,15 @@ export class Device {
     };
   }
 
+  /**
+   * @internal — Whether this device's daemon holds a network proxy: a start
+   * succeeded at some point and nothing has released it since. Stays true
+   * across `_stopNetworkCapture({ keepRunning: true })` drains.
+   */
+  get _networkProxyRunning(): boolean {
+    return this._networkCaptureEverStarted;
+  }
+
   /** @internal — Stop network capture and return entries (used by the runner). */
   async _stopNetworkCapture(options?: { keepRunning?: boolean }): Promise<ReturnType<TapsmithGrpcClient['stopNetworkCapture']>> {
     try {
@@ -1759,7 +1768,7 @@ export class Device {
    * else (a session adopting the CLI's shared client): tears down everything
    * this Device started but leaves the client open for its owner.
    */
-  async _close(opts: { closeClient: boolean }): Promise<void> {
+  async _close(opts: { closeClient: boolean; releaseNetwork?: boolean }): Promise<void> {
     // Stop device log stream (synchronous)
     this._stopDeviceLogStream();
     this._stopDaemonLogStream();
@@ -1767,7 +1776,10 @@ export class Device {
     // Release the network proxy for real. The runner keeps it alive across
     // files (a stable port so a warm-reset-persisted app keeps valid
     // keep-alive sockets); the session ending is the point to tear it down.
-    if (this._networkCaptureEverStarted) {
+    // A caller that only borrowed the daemon (a watch re-run child attached
+    // to its parent's session) passes `releaseNetwork: false` so the proxy —
+    // and the app's keep-alive sockets to it — survive to the next run.
+    if (this._networkCaptureEverStarted && (opts.releaseNetwork ?? true)) {
       try {
         await this._stopNetworkCapture({ keepRunning: false });
       } catch {

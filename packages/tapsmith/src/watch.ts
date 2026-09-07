@@ -33,7 +33,7 @@ import {
   type RunFileUseOptions,
 } from './worker-protocol.js';
 import type { WatchRunMessage, WatchRunChildMessage } from './watch-run.js';
-import { resolveDeviceGroup, type DeviceGroupEntry } from './config.js';
+import { type DeviceGroupEntry } from './config.js';
 import { startDaemon } from './device-session.js';
 import type {
   UIWorkerMessage,
@@ -118,6 +118,8 @@ export interface WatchModeContext {
    * worker dispatch routes files to workers in the matching bucket.
    */
   configByDevice?: Map<string, SerializedConfig>
+  /** Each device's worker group, primary first — its bucket's largest `use.devices` group. Set alongside `configByDevice`. */
+  deviceGroupByDevice?: Map<string, DeviceGroupEntry[]>
   bucketByDevice?: Map<string, string>
   bucketByProject?: Map<string, string>
 }
@@ -180,10 +182,7 @@ export async function runWatchMode(ctx: WatchModeContext): Promise<void> {
 
   /** A worker's device group, primary first: its bucket's config, or the session's group. */
   function workerDeviceGroup(deviceSerial: string): DeviceGroupEntry[] {
-    const bucketConfig = ctx.configByDevice?.get(deviceSerial);
-    return bucketConfig
-      ? resolveDeviceGroup({ devices: bucketConfig.devices, device: deviceSerial })
-      : ctx.deviceGroup;
+    return ctx.deviceGroupByDevice?.get(deviceSerial) ?? ctx.deviceGroup;
   }
 
   // Resolve tsx binary for forking TypeScript files

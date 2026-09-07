@@ -114,7 +114,7 @@ vi.mock('../agent-resolve.js', () => ({
 
 vi.mock('../session-preflight.js', () => mocks.preflight);
 
-const { openDeviceGroup, openDeviceSession, closeDeviceSession, recoverDeviceSessions } = await import('../device-session.js');
+const { openDeviceGroup, openDeviceSession, closeDeviceSession, recoverDeviceSessions, sessionsForRun, sessionsToPrepare, runDeviceCount } = await import('../device-session.js');
 
 function makeConfig(overrides: Partial<TapsmithConfig> = {}): TapsmithConfig {
   return {
@@ -197,7 +197,7 @@ describe('openDeviceSession', () => {
       { label: 'Worker 1' },
     )).rejects.toThrow(/^Worker 1 \(emulator-5556\): Failed to start agent: Failed to connect to agent socket/);
     // A failed open leaves nothing behind.
-    expect(mocks.devices.at(-1)!._close).toHaveBeenCalledWith({ closeClient: true });
+    expect(mocks.devices.at(-1)!._close).toHaveBeenCalledWith({ closeClient: false, releaseNetwork: true });
     expect(mocks.clients.at(-1)!.close).toHaveBeenCalled();
   });
 
@@ -291,10 +291,10 @@ describe('openDeviceSession phases (the sequential CLI\'s step rows)', () => {
     );
     expect(session.client).toBe(client);
     expect(mocks.clients).toHaveLength(0);
-    closeDeviceSession(session);
+    await closeDeviceSession(session);
     expect(client.close).not.toHaveBeenCalled();
     // The Device shares that client instance, so it must not close it either.
-    expect(mocks.devices.at(-1)!._close).toHaveBeenCalledWith({ closeClient: false });
+    expect(mocks.devices.at(-1)!._close).toHaveBeenCalledWith({ closeClient: false, releaseNetwork: true });
 
     mocks.failAgentFor.add('emulator-5556');
     await expect(openDeviceSession(
@@ -353,6 +353,21 @@ describe('openDeviceGroup', () => {
     expect(sessions[0].capabilities).not.toBe(sessions[1].capabilities);
   });
 
+  it('refuses an iOS group that mixes simulators and physical devices', async () => {
+    // The agent artifacts are resolved once for the group, from the first
+    // member; a simulator xctestrun cannot drive a physical device (and vice
+    // versa), so the mismatch is named up front instead of failing in xcodebuild.
+    await expect(openDeviceGroup(
+      [
+        { name: 'alice', serial: 'SIM-1', daemonAddress: 'localhost:50052' },
+        { name: 'bob', serial: 'PHYS-1', daemonAddress: 'localhost:50053' },
+      ],
+      makeConfig({ platform: 'ios', apk: undefined, simulator: 'iPhone 16' }),
+      { label: 'Worker 0' },
+    )).rejects.toThrow(/cannot mix iOS simulators and physical devices.*bob \(PHYS-1\) is a physical device.*alice \(SIM-1\) is a simulator/);
+    expect(mocks.devices).toHaveLength(0);
+  });
+
   it('is atomic: a member that fails closes the ones that opened', async () => {
     mocks.failAgentFor.add('emulator-5556');
     await expect(openDeviceGroup(
@@ -384,6 +399,84 @@ describe('openDeviceGroup', () => {
   });
 });
 
+describe('sessionsForRun', () => {
+  // A worker holds its device target's largest group; each file runs on the
+  // first N of those sessions, N being what *its* project declares.
+  const session = (name: string) => ({ name, serial: `emulator-${name}` }) as unknown as import('../device-session.js').DeviceSession;
+  const group = [session('alice'), session('bob'), session('carol')];
+  const names = (list: unknown[]) => (list as Array<{ name: string }>).map((s) => s.name);
+
+  it('hands a project without `use.devices` the primary only', () => {
+    expect(names(sessionsForRun(group, makeConfig(), undefined))).toEqual(['alice']);
+    expect(names(sessionsForRun(group, makeConfig(), { timeout: 5 } as never))).toEqual(['alice']);
+  });
+
+  it('hands a project its declared group, primary first', () => {
+    expect(names(sessionsForRun(group, makeConfig(), { devices: 2 }))).toEqual(['alice', 'bob']);
+    expect(names(sessionsForRun(group, makeConfig(), { devices: [{ name: 'alice' }, { name: 'bob' }, { name: 'carol' }] })))
+      .toEqual(['alice', 'bob', 'carol']);
+  });
+
+  it('falls back to the run config\'s `devices` when the project declares none', () => {
+    expect(names(sessionsForRun(group, makeConfig({ devices: 2 }), undefined))).toEqual(['alice', 'bob']);
+    // The project's own declaration wins over the config's.
+    expect(names(sessionsForRun(group, makeConfig({ devices: 3 }), { devices: 2 }))).toEqual(['alice', 'bob']);
+  });
+
+  it('hands back what there is when the worker holds too few — the runner names the shortfall', () => {
+    expect(names(sessionsForRun(group.slice(0, 1), makeConfig(), { devices: 2 }))).toEqual(['alice']);
+    expect(sessionsForRun([], makeConfig(), { devices: 2 })).toEqual([]);
+  });
+
+  it('runDeviceCount is the number the slice, the runner check and the UI server all agree on', () => {
+    // The UI server reports this to the client as the run's active device
+    // count; it must be exactly what the child sliced by.
+    expect(runDeviceCount(makeConfig(), undefined)).toBe(1);
+    expect(runDeviceCount(makeConfig(), { devices: 2 })).toBe(2);
+    expect(runDeviceCount(makeConfig({ devices: 3 }), undefined)).toBe(3);
+    expect(runDeviceCount(makeConfig({ devices: 3 }), { devices: [{ name: 'a' }, { name: 'b' }] })).toBe(2);
+    for (const use of [undefined, { devices: 2 }, { devices: [{ name: 'a' }, { name: 'b' }, { name: 'c' }] }]) {
+      expect(sessionsForRun(group, makeConfig(), use)).toHaveLength(runDeviceCount(makeConfig(), use));
+    }
+  });
+});
+
+describe('sessionsToPrepare', () => {
+  // A background preparation resets the devices the next file will drive —
+  // and of those, only the ones no longer holding a satisfying claim.
+  const CLEAR = { mode: 'clear' as const, scope: 'file' as const };
+  const WARM = { mode: 'warm' as const, scope: 'file' as const };
+  const claim = (policy: typeof CLEAR | typeof WARM) => ({ policy, preparedAt: 1, durationMs: 1, source: 'test' });
+  const session = (name: string, prepared?: ReturnType<typeof claim>) =>
+    ({ name, serial: `emulator-${name}`, prepared }) as unknown as import('../device-session.js').DeviceSession;
+  const names = (list: unknown[]) => (list as Array<{ name: string }>).map((s) => s.name);
+
+  it('prepares only the primary for a single-device project, whatever the rest of the group holds', () => {
+    const group = [session('alice'), session('bob'), session('carol')];
+    expect(names(sessionsToPrepare(group, makeConfig(), undefined, CLEAR))).toEqual(['alice']);
+    expect(names(sessionsToPrepare(group, makeConfig(), { timeout: 1 } as never, CLEAR))).toEqual(['alice']);
+  });
+
+  it('after a single-device run, a group file only needs the device that run used', () => {
+    // bob still holds the claim its last preparation left; alice's was consumed.
+    const group = [session('alice'), session('bob', claim(CLEAR))];
+    expect(names(sessionsToPrepare(group, makeConfig(), { devices: 2 }, CLEAR))).toEqual(['alice']);
+    expect(names(sessionsToPrepare(group, makeConfig(), { devices: 2 }, WARM))).toEqual(['alice']);
+  });
+
+  it('re-prepares a member whose claim no longer satisfies the policy', () => {
+    const group = [session('alice'), session('bob', claim(WARM))];
+    expect(names(sessionsToPrepare(group, makeConfig(), { devices: 2 }, CLEAR))).toEqual(['alice', 'bob']);
+    // A group entirely prepared needs nothing.
+    expect(sessionsToPrepare([session('alice', claim(CLEAR)), session('bob', claim(CLEAR))], makeConfig(), { devices: 2 }, CLEAR)).toEqual([]);
+  });
+
+  it('never reaches past the file\'s group, even for an unprepared member', () => {
+    const group = [session('alice'), session('bob'), session('carol')];
+    expect(names(sessionsToPrepare(group, makeConfig(), { devices: 2 }, CLEAR))).toEqual(['alice', 'bob']);
+  });
+});
+
 describe('recovery and teardown', () => {
   it('relaunches every session and records the relaunch as prepared state', async () => {
     const sessions = await openDeviceGroup(
@@ -405,10 +498,32 @@ describe('recovery and teardown', () => {
       makeConfig({ platform: 'ios', apk: undefined }),
       { label: 'Worker 0', daemonProcess: daemon as never },
     );
-    closeDeviceSession(session);
-    closeDeviceSession(session);
-    expect(mocks.devices[0]._close).toHaveBeenCalledWith({ closeClient: true });
+    await closeDeviceSession(session);
+    await closeDeviceSession(session);
+    expect(mocks.devices[0]._close).toHaveBeenCalledWith({ closeClient: false, releaseNetwork: true });
     expect(mocks.clients[0].close).toHaveBeenCalled();
     expect(daemon.kill).toHaveBeenCalledTimes(1);
+  });
+
+  it('closing an adopted session keeps the owning daemon\'s network proxy alive', async () => {
+    // A watch re-run child attaches to its parent's daemon: the proxy port must
+    // survive the child (the app's keep-alive sockets point at it), and the
+    // client stays open until the teardown has settled.
+    let closeSettled = false;
+    const session = await openDeviceSession(
+      { name: 'device-1', serial: 'emulator-5554', daemonAddress: 'localhost:50051' },
+      makeConfig(),
+      { label: 'Run', adopt: true, adoptVerify: false },
+    );
+    const device = mocks.devices[0];
+    device._close.mockImplementation(async () => {
+      await new Promise((r) => setTimeout(r, 5));
+      expect(mocks.clients[0].close).not.toHaveBeenCalled();
+      closeSettled = true;
+    });
+    await closeDeviceSession(session);
+    expect(device._close).toHaveBeenCalledWith({ closeClient: false, releaseNetwork: false });
+    expect(closeSettled).toBe(true);
+    expect(mocks.clients[0].close).toHaveBeenCalled();
   });
 });

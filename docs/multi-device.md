@@ -65,7 +65,19 @@ devices: [
 Pinning is optional for emulators and simulators — Tapsmith provisions them
 the way it provisions extra workers — and **required for physical iOS
 devices** beyond the first, which cannot be auto-picked. A group with pinned
-members always runs as a single worker.
+members always runs as a single worker. An iOS group must be all simulators or
+all physical devices: the agent build differs between the two, so a mixed
+group is refused at startup with a message naming the odd member.
+
+Projects that target the same device shape share its devices, whatever their
+group size. A config with a single-device project and a two-device project
+provisions two devices, not three: the group's primary is the single project's
+device, and the second device sits idle while single-device files run. In UI
+and watch mode that is one worker (per `workers`) holding the larger group.
+For this to work every declared group on a target must agree — a smaller
+`use.devices` list must be the first members of the largest one, same names
+and pins in the same order — and a config that disagrees is refused at load
+with both project names.
 
 `devices` is device-shaping, like `platform` or `avd`: it can only be set on a
 project's `use`. Calling `test.use({ devices })` throws, because the worker's
@@ -157,7 +169,11 @@ story, and it needs to live in one file.
   device-log section per device.
 
 UI mode's live trace view renders the same panes, lanes and filters for a test
-that ran on a device group.
+that ran on a device group. In the test tree the group is badged once, on the
+project's row, by member name (`alice · bob`); the files and tests under it
+inherit it silently, the same way a project-level reset policy is shown only
+where it is declared. The device rail shows a chip per member, and a member
+the running file does not drive is marked idle.
 
 ## Run modes
 

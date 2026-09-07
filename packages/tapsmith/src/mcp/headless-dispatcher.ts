@@ -19,7 +19,7 @@ import type { WatchRunMessage, WatchRunChildMessage } from '../watch-run.js';
 import { RunQueue } from '../watch-queue.js';
 import { ensurePlatformTarget, platformTargetIsLive, type PlatformTarget } from './connection.js';
 import { deviceGroupNames, deviceGroupSize, resolveDeviceGroup, type TapsmithConfig } from '../config.js';
-import { deviceSignature } from '../project.js';
+import { deviceGroupSignature, deviceSignature } from '../project.js';
 import { matchesTestFilter } from '../test-filter.js';
 import type {
   TestDispatcher,
@@ -51,7 +51,7 @@ function platformKey(platform?: string): string {
  */
 function targetKeyFor(config: TapsmithConfig): string {
   const key = platformKey(config.platform);
-  return deviceGroupSize(config) > 1 ? `${key}|${deviceSignature(config)}` : key;
+  return deviceGroupSize(config) > 1 ? `${key}|${deviceSignature(config)}|${deviceGroupSignature(config)}` : key;
 }
 
 /**

@@ -142,6 +142,96 @@ describe('runner refuses a group that does not match the project', () => {
     }
   });
 
+  it('fails the file when a single-device project is handed a whole group', async () => {
+    // A worker holds its target's largest group; an embedder that forgot to
+    // slice hands a solo project both devices, and its trace would name a
+    // device the project never declared. The same check catches it.
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tapsmith-runner-group-size-solo-'));
+    const filePath = path.join(tempDir, 'solo.mjs');
+    const runnerUrl = pathToFileURL(path.resolve('src/runner.ts')).href;
+    try {
+      fs.writeFileSync(filePath, `
+        import { test } from ${JSON.stringify(runnerUrl)};
+        test('one', async () => {});
+      `);
+      const alice = makeDevice('alice');
+      const bob = makeDevice('bob');
+      await expect(runTestFile(pathToFileURL(filePath).href, makeOpts([alice, bob], makeConfig({ devices: undefined }), {
+        projectName: 'solo',
+        bustImportCache: true,
+      }))).rejects.toThrow(/Project "solo" declares no device group \(a single device\) but the run was given 2 device\(s\) \(alice=emulator-alice, bob=emulator-bob\)/);
+      // A root-level `devices` counts as the project's declaration. (A second
+      // path: two imports of one URL in the same millisecond share the module
+      // cache despite `bustImportCache`, and register nothing.)
+      const rootedPath = path.join(tempDir, 'solo-rooted.mjs');
+      fs.copyFileSync(filePath, rootedPath);
+      const rooted = await runTestFile(pathToFileURL(rootedPath).href, makeOpts([alice, bob], makeConfig({ devices: 2 }), {
+        bustImportCache: true,
+      }));
+      expect(collectResults(rooted).map((t) => t.status)).toEqual(['passed']);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('names the run\'s devices after the project\'s group, and restores the embedder\'s names afterwards', async () => {
+    // A worker holds its target's largest group (`alice`, `bob`). A project on
+    // that target declaring no group runs on `alice`, but its trace must not
+    // name a device it never declared: it runs as `device-1`, untagged, and
+    // the session goes back to `alice` for the next group file.
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tapsmith-runner-device-names-'));
+    const runnerUrl = pathToFileURL(path.resolve('src/runner.ts')).href;
+    try {
+      const soloPath = path.join(tempDir, 'solo.mjs');
+      fs.writeFileSync(soloPath, `
+        import { test } from ${JSON.stringify(runnerUrl)};
+        test('one', async ({ device, devices }) => {
+          globalThis.__tapsmithSeen = { tag: device._traceDeviceId, count: devices.length };
+        });
+      `);
+      const alice = makeDevice('alice');
+      const bob = makeDevice('bob');
+      const soloOpts = makeOpts([alice], makeConfig({ devices: undefined }), { projectName: 'solo', bustImportCache: true });
+      const solo = await runTestFile(pathToFileURL(soloPath).href, soloOpts);
+      expect(collectResults(solo).map((t) => t.status)).toEqual(['passed']);
+      const seen = (globalThis as { __tapsmithSeen?: { tag?: string; count: number } }).__tapsmithSeen;
+      expect(seen).toEqual({ tag: undefined, count: 1 });
+      // Restored once the file is done.
+      expect(alice.device._traceDeviceId).toBe('alice');
+      expect(soloOpts.devices[0].name).toBe('alice');
+
+      // A declared group names by position: `devices: 2` on sessions the
+      // embedder opened as alice/bob runs as device-1/device-2 …
+      const pairPath = path.join(tempDir, 'pair.mjs');
+      fs.writeFileSync(pairPath, `
+        import { test } from ${JSON.stringify(runnerUrl)};
+        test('two', async ({ devices }) => {
+          globalThis.__tapsmithSeen = { tags: devices.map((d) => d._traceDeviceId) };
+        });
+      `);
+      const pairOpts = makeOpts([alice, bob], makeConfig({ devices: undefined }), {
+        projectUseOptions: { devices: 2 }, bustImportCache: true,
+      });
+      const pair = await runTestFile(pathToFileURL(pairPath).href, pairOpts);
+      expect(collectResults(pair).map((t) => t.status)).toEqual(['passed']);
+      expect((globalThis as { __tapsmithSeen?: { tags: string[] } }).__tapsmithSeen).toEqual({ tags: ['device-1', 'device-2'] });
+      expect(pairOpts.devices.map((d) => d.name)).toEqual(['alice', 'bob']);
+      expect([alice.device._traceDeviceId, bob.device._traceDeviceId]).toEqual(['alice', 'bob']);
+
+      // … and a group declared with the sessions' own names leaves them as they are.
+      const namedPath = path.join(tempDir, 'named.mjs');
+      fs.copyFileSync(pairPath, namedPath);
+      const namedOpts = makeOpts([alice, bob], makeConfig({ devices: undefined }), {
+        projectUseOptions: { devices: [{ name: 'alice' }, { name: 'bob' }] }, bustImportCache: true,
+      });
+      await runTestFile(pathToFileURL(namedPath).href, namedOpts);
+      expect((globalThis as { __tapsmithSeen?: { tags: string[] } }).__tapsmithSeen).toEqual({ tags: ['alice', 'bob'] });
+    } finally {
+      delete (globalThis as { __tapsmithSeen?: unknown }).__tapsmithSeen;
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it('runs a group that matches, and a single-device project without `use.devices`', async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tapsmith-runner-group-size-ok-'));
     const filePath = path.join(tempDir, 'solo.mjs');

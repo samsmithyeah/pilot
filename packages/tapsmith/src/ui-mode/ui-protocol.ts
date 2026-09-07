@@ -99,6 +99,13 @@ export interface WorkerInfo {
   readiness?: WorkerReadiness
   /** Whether this worker prepares the device between runs. */
   speculation?: 'on' | 'off'
+  /**
+   * While running or preparing: how many of `devices` the current file (or
+   * the file being prepared for) involves, primary first. A worker holds its
+   * target's largest group, and a project declaring a smaller one leaves the
+   * rest idle. Absent when idle, or on servers that do not report it.
+   */
+  activeDeviceCount?: number
 }
 
 export type { AppResetPolicy } from '../app-reset.js';
@@ -134,6 +141,8 @@ export interface TestTreeUseOptions {
   appState?: string
   /** Devices each test of the project drives (`use.devices`); absent = one. */
   devices?: number
+  /** The group's member names (`alice`, `bob`), primary first; set with `devices`. */
+  deviceNames?: string[]
 }
 
 /**
@@ -209,6 +218,13 @@ export interface TestStartMessage {
   attributionOnly?: boolean
   /** Resolved isolation for this execution (absent on attribution-only re-tags). */
   isolation?: TestIsolation
+  /**
+   * How many devices this test's run drives (its project's group). The SPA
+   * sizes the trace's device panes from it: a single-device project running
+   * on a worker that holds a group must not show the idle members' panes.
+   * Absent = the worker's whole group (legacy servers).
+   */
+  deviceCount?: number
 }
 
 export interface TestStatusMessage {
@@ -300,6 +316,8 @@ export interface WorkerStatusMessage {
   /** Background device preparation state. */
   readiness?: import('./device-readiness.js').WorkerReadiness
   speculation?: 'on' | 'off'
+  /** See `WorkerInfo.activeDeviceCount`. */
+  activeDeviceCount?: number
 }
 
 /**

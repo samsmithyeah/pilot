@@ -61,8 +61,9 @@ import type {
   TestTreeUseOptions,
 } from './ui-protocol.js';
 import { encodeScreenFrame, mirrorKey, type TestNodeStatus, type WorkerDeviceInfo } from './ui-protocol.js';
-import { deviceGroupSize, resolveDeviceGroup, deviceGroupNames } from '../config.js';
-import { startDaemon, waitForDaemon } from '../device-session.js';
+import { deviceGroupSize, deviceGroupNames } from '../config.js';
+import { runDeviceCount, startDaemon, waitForDaemon } from '../device-session.js';
+import { projectTreeUse } from './tree-use.js';
 import { RunQueue } from '../watch-queue.js';
 import { DeviceReadiness, toWireReadiness, type Candidate, type ReadinessCommand, type ReadinessEvent, type StaleReason } from './device-readiness.js';
 import { mergeResetCapabilities, nextCandidate as pickCandidate, policyForFile, type CandidateProject } from './readiness-candidate.js';
@@ -187,6 +188,12 @@ export interface UIServerContext {
    * worker dispatch routes files to workers in the matching bucket.
    */
   configByDevice?: Map<string, SerializedConfig>
+  /**
+   * Each device's worker group, primary first — its bucket's largest
+   * `use.devices` group (the bucket's projects share the devices; a smaller
+   * project runs on the first N). Set alongside `configByDevice`.
+   */
+  deviceGroupByDevice?: Map<string, DeviceGroupEntry[]>
   bucketByDevice?: Map<string, string>
   bucketByProject?: Map<string, string>
 }
@@ -208,6 +215,16 @@ interface TaggedFile {
   projectUseOptions?: RunFileUseOptions
   projectName?: string
   testFilter?: string
+}
+
+/**
+ * How many of a worker's devices a file's run drives — the number its child
+ * slices its sessions by. A worker holds its target's largest group; a file
+ * from a project declaring a smaller one leaves the rest idle, and the
+ * client shows them so.
+ */
+function fileDeviceCount(file: TaggedFile, config: Pick<TapsmithConfig, 'devices'>): number {
+  return runDeviceCount(config, file.projectUseOptions);
 }
 
 /** The CLI-provisioned primary daemon a worker can attach to instead of spawning its own. */
@@ -266,6 +283,8 @@ interface UIWorkerHandle {
   lastRun?: { file: string; projectName?: string }
   /** Activity-feed id of the in-flight preparation. */
   prepareActivityId?: string
+  /** Devices the in-flight background preparation covers (its file's group, primary first). */
+  prepareDeviceCount?: number
   busy: boolean
   currentFile?: TaggedFile
   currentTest?: string
@@ -504,6 +523,7 @@ export async function startUIServer(
           const project = cmd.projectName ? ctx.projects?.find((p) => p.name === cmd.projectName) : undefined;
           const activityId = `prepare-${worker.id}-${cmd.prepareId}`;
           worker.prepareActivityId = activityId;
+          worker.prepareDeviceCount = runDeviceCount(ctx.config, project?.use as RunFileUseOptions | undefined);
           pushActivity({
             type: 'device-activity', id: activityId, workerId: worker.id, kind: 'prepare', status: 'started',
             label: `Prepare device (${describePolicyShort(cmd.target)})`, policy: cmd.target, forFile: cmd.forFile, timestamp: Date.now(),
@@ -1294,18 +1314,14 @@ function wireStatus(status: TestResultEntry['status']): TestNodeStatus {
 
   /** Deep-clone a discovered tree node, prefixing every id so the same file
    * appearing under multiple projects gets independent expansion / status
-   * state on the client. */
-  function cloneNodeWithIdPrefix(
-    node: TestTreeNode,
-    prefix: string,
-    projectUse?: TestTreeUseOptions,
-  ): TestTreeNode {
-    const use = mergeTreeUse(projectUse, node.use);
+   * state on the client. A node's `use` is its own declaration only: what
+   * the project declares sits on the project row (`projectTreeUse`), not on
+   * every row under it. */
+  function cloneNodeWithIdPrefix(node: TestTreeNode, prefix: string): TestTreeNode {
     return {
       ...node,
       id: `${prefix}${node.id}`,
-      children: node.children?.map((c) => cloneNodeWithIdPrefix(c, prefix, projectUse)),
-      ...(use ? { use } : {}),
+      children: node.children?.map((c) => cloneNodeWithIdPrefix(c, prefix)),
     };
   }
 
@@ -1314,37 +1330,6 @@ function wireStatus(status: TestResultEntry['status']): TestNodeStatus {
    * (mirrors runner.ts: `rootCtx.useOptions = { ...projectUse, ...fileUse }`).
    * Only the isolation-relevant keys travel to the client.
    */
-  function mergeTreeUse(
-    projectUse: TestTreeUseOptions | undefined,
-    nodeUse: TestTreeUseOptions | undefined,
-  ): TestTreeUseOptions | undefined {
-    if (!projectUse && !nodeUse) return undefined;
-    const merged: TestTreeUseOptions = {};
-    const appReset = nodeUse?.appReset ?? projectUse?.appReset;
-    const appResetScope = nodeUse?.appResetScope ?? projectUse?.appResetScope;
-    const appState = nodeUse?.appState ?? projectUse?.appState;
-    const devices = projectUse?.devices;
-    if (appReset !== undefined) merged.appReset = appReset;
-    if (appResetScope !== undefined) merged.appResetScope = appResetScope;
-    if (appState !== undefined) merged.appState = appState;
-    if (devices !== undefined) merged.devices = devices;
-    return Object.keys(merged).length > 0 ? merged : undefined;
-  }
-
-  function projectTreeUse(project: { use?: { appReset?: unknown; appResetScope?: unknown; appState?: unknown; devices?: unknown }; effectiveConfig?: TapsmithConfig }): TestTreeUseOptions | undefined {
-    const u = project.use;
-    if (!u) return undefined;
-    // A `use.devices` project: its tests drive a group — the tree badges them.
-    const groupSize = project.effectiveConfig ? deviceGroupSize(project.effectiveConfig) : 1;
-    const merged = mergeTreeUse(undefined, {
-      ...(u.appReset !== undefined ? { appReset: u.appReset as TestTreeUseOptions['appReset'] } : {}),
-      ...(u.appResetScope !== undefined ? { appResetScope: u.appResetScope as TestTreeUseOptions['appResetScope'] } : {}),
-      ...(typeof u.appState === 'string' ? { appState: u.appState } : {}),
-    });
-    if (groupSize <= 1) return merged;
-    return { ...(merged ?? {}), devices: groupSize };
-  }
-
   function rebuildTestTreeFromDiscoveredFiles(): void {
     // Group into project nodes when projects are configured
     if (hasRealProjects && ctx.projects) {
@@ -1356,10 +1341,11 @@ function wireStatus(status: TestResultEntry['status']): TestNodeStatus {
           .filter((n): n is TestTreeNode => n != null)
           // Deep-clone so each project owns its own nodes (unique ids,
           // independent expansion state, scoped status updates).
-          .map((n) => cloneNodeWithIdPrefix(n, idPrefix, projectTreeUse(project)));
+          .map((n) => cloneNodeWithIdPrefix(n, idPrefix));
 
         if (projectFiles.length === 0) continue;
 
+        const use = projectTreeUse(project);
         trees.push({
           id: `project::${project.name}`,
           type: 'project',
@@ -1369,6 +1355,7 @@ function wireStatus(status: TestResultEntry['status']): TestNodeStatus {
           status: 'idle',
           children: projectFiles,
           dependencies: project.dependencies.length > 0 ? project.dependencies : undefined,
+          ...(use ? { use } : {}),
         });
       }
       testTree = trees;
@@ -1577,10 +1564,7 @@ function wireStatus(status: TestResultEntry['status']): TestNodeStatus {
    * a multi-bucket session, the session's project group otherwise.
    */
   function workerDeviceGroup(deviceSerial: string): DeviceGroupEntry[] {
-    const bucketConfig = ctx.configByDevice?.get(deviceSerial);
-    return bucketConfig
-      ? resolveDeviceGroup({ devices: bucketConfig.devices, device: deviceSerial })
-      : ctx.deviceGroup;
+    return ctx.deviceGroupByDevice?.get(deviceSerial) ?? ctx.deviceGroup;
   }
 
   /** The `use.devices` project a worker's group belongs to — the `group` label in session info. */
@@ -1622,9 +1606,6 @@ function wireStatus(status: TestResultEntry['status']): TestNodeStatus {
     return { name: member.name, daemonPort: Number.parseInt(member.daemonAddress.split(':').pop() ?? '0', 10) };
   }
 
-  /** Listeners squatting on member daemon ports at startup (killed before spawning). */
-  let stalePidsByPortForMembers = new Map<number, number[]>();
-
   /** Initialize persistent workers. Called once during server startup. */
   async function initializeWorkers(): Promise<void> {
     if (!workersEnabled) return;
@@ -1661,7 +1642,6 @@ function wireStatus(status: TestResultEntry['status']): TestNodeStatus {
     const daemonPorts = Array.from({ length: numWorkers }, (_, i) => baseDaemonPort + 100 + i);
     const memberDaemonPorts = workerGroups.flatMap((g, i) => g.slice(1).map((_, m) => memberPorts(i, m).daemonPort));
     const stalePidsByPort = collectListeningPids([...daemonPorts, ...memberDaemonPorts]);
-    stalePidsByPortForMembers = stalePidsByPort;
 
     for (let i = 0; i < numWorkers; i++) {
       const deviceSerial = workerSerials[i];
@@ -1677,6 +1657,7 @@ function wireStatus(status: TestResultEntry['status']): TestNodeStatus {
           agentPort,
           daemonBin,
           adopt ? undefined : stalePidsByPort.get(daemonPort),
+          adopt ? undefined : stalePidsByPort,
           {
             onProgress: (message) => {
               launchProgress?.update('ui-workers', {
@@ -1803,6 +1784,13 @@ function wireStatus(status: TestResultEntry['status']): TestNodeStatus {
     agentPort: number,
     daemonBin: string,
     stalePids?: number[],
+    /**
+     * Listeners squatting on this worker's member daemon ports, keyed by port
+     * (startup only). A respawn passes none: the startup squatters were
+     * killed then, and `awaitDaemonExit` has just freed the ports, so a
+     * remembered PID could by now belong to an unrelated process.
+     */
+    staleMemberPidsByPort?: Map<number, number[]>,
     events?: {
       onProgress?: (message: string) => void
       onReady?: () => void
@@ -1905,7 +1893,7 @@ function wireStatus(status: TestResultEntry['status']): TestNodeStatus {
           return;
         }
         const ports = memberPorts(id, m);
-        for (const pid of stalePidsByPortForMembers.get(ports.daemonPort) ?? []) {
+        for (const pid of staleMemberPidsByPort?.get(ports.daemonPort) ?? []) {
           try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ }
         }
         const daemon = await startDaemon({
@@ -2073,6 +2061,9 @@ function wireStatus(status: TestResultEntry['status']): TestNodeStatus {
       skipped: worker.skipped,
       readiness: worker.readiness ? toWireReadiness(worker.readiness.state) : undefined,
       speculation: speculationAllowed() ? 'on' : 'off',
+      activeDeviceCount: status === 'running' && worker.currentFile
+        ? fileDeviceCount(worker.currentFile, ctx.config)
+        : worker.readiness?.state.kind === 'preparing' ? worker.prepareDeviceCount : undefined,
     };
   }
 
@@ -2343,6 +2334,7 @@ function wireStatus(status: TestResultEntry['status']): TestNodeStatus {
                 projectName: worker.currentFile?.projectName,
                 attributionOnly: msg.attributionOnly,
                 isolation: msg.isolation,
+                deviceCount: worker.currentFile ? fileDeviceCount(worker.currentFile, ctx.config) : undefined,
               });
               break;
             }
@@ -2840,7 +2832,7 @@ function wireStatus(status: TestResultEntry['status']): TestNodeStatus {
       const daemonPort = adopt?.daemonPort ?? baseDaemonPort + 100 + worker.id;
 
       const newWorker = await initializeOneWorker(
-        worker.id, worker.deviceSerial, daemonPort, agentPort, daemonBin, undefined, undefined, adopt,
+        worker.id, worker.deviceSerial, daemonPort, agentPort, daemonBin, undefined, undefined, undefined, adopt,
       );
       // Preserve the friendly display name from before respawn.
       newWorker.displayName = worker.displayName;

@@ -5619,7 +5619,16 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                 // end of scope, releasing the TCP listener.
                 #[cfg(target_os = "macos")]
                 {
-                    let ne_known_bad = *self.ios_ne_unavailable.read().await;
+                    // The "NE previously failed" cache exists to skip a doomed
+                    // launch when the system-proxy fallback is going to be used
+                    // anyway. Under `require_isolation` that fallback is refused,
+                    // so consulting the cache would turn one transient failure
+                    // (typically two daemons launching the redirector at once)
+                    // into "capture disabled" for every later test on this
+                    // device: always retry the redirector instead, and leave the
+                    // cache untouched for callers that can fall back.
+                    let ne_known_bad =
+                        !req.require_isolation && *self.ios_ne_unavailable.read().await;
                     let ne_result = if ne_known_bad {
                         debug!("Skipping NE attempt (previously failed) — using system proxy");
                         Err(anyhow::anyhow!("cached: NE previously unavailable"))
@@ -5640,7 +5649,7 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                             );
                         }
                         Err(e) => {
-                            if !ne_known_bad {
+                            if !ne_known_bad && !req.require_isolation {
                                 *self.ios_ne_unavailable.write().await = true;
                                 warn!(
                                     "Network Extension redirector unavailable: {e} — \

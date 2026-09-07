@@ -20,6 +20,7 @@ import { createReporters, ReporterDispatcher, type FullResult } from './reporter
 import { ensureSessionReady } from './session-preflight.js';
 import {
   closeDeviceSession,
+  sessionsForRun,
   consumePrepared,
   openDeviceGroup,
   openDeviceSession,
@@ -539,6 +540,13 @@ async function ensureDaemonRunning(
 
 interface SequentialDeviceState {
   effectiveConfig: TapsmithConfig
+  /**
+   * The group this state's sessions form, primary first — the largest
+   * `use.devices` group among the projects on this device target
+   * (`sharedDeviceGroup`), which is what `sessions` holds. A project
+   * declaring a smaller group runs on the first N of them.
+   */
+  deviceGroup: DeviceGroupEntry[]
   client: TapsmithGrpcClient
   device: Device
   deviceSerial: string
@@ -575,6 +583,8 @@ async function setupSequentialDevice(
   forceInstall: boolean,
   signature: string,
   progress?: LaunchProgressSink,
+  /** The group to open (`sharedDeviceGroup` of the target's projects); defaults to what `cfg` declares. */
+  deviceGroup?: DeviceGroupEntry[],
 ): Promise<SequentialDeviceState> {
   progress?.start('primary-device');
   const target = await ensureSequentialTargetDevice(cfg, progress);
@@ -685,7 +695,7 @@ async function setupSequentialDevice(
   // The shared session module does the rest — select, wake, install, agent,
   // launch — exactly as it does for every worker. Its phase callbacks drive
   // the step rows below; its progress lines fill in the running detail.
-  const group = resolveDeviceGroup(cfg);
+  const group = deviceGroup ?? resolveDeviceGroup(cfg);
   const deviceJustLaunched = launchedEmulators.some((e) => e.serial === deviceSerial);
   const phaseSteps: Record<'install' | 'agent' | 'launch', LaunchStepId> = {
     install: 'app-install', agent: 'agent', launch: 'app-launch',
@@ -787,6 +797,7 @@ async function setupSequentialDevice(
 
   return {
     effectiveConfig: cfg,
+    deviceGroup: group,
     client,
     device,
     deviceSerial,
@@ -1458,9 +1469,9 @@ async function provisionWorkerGroups(
   opts?: { quiet?: boolean; progress?: LaunchProgressSink },
 ): Promise<{ workerGroups: string[][] | undefined; launched: LaunchedEmulator[] }> {
   const config = state.effectiveConfig;
-  const groupSize = deviceGroupSize(config);
+  const groupSize = state.deviceGroup.length;
   const firstGroup = state.sessions.map((s) => s.serial);
-  const pinned = resolveDeviceGroup(config).slice(1).some((e) => e.device);
+  const pinned = state.deviceGroup.slice(1).some((e) => e.device);
   if (config.workers <= 1 || pinned) return { workerGroups: undefined, launched: [] };
   const provision = await provisionMultiWorkerDevices(config, modeName, {
     ...opts,
@@ -1491,7 +1502,14 @@ interface PerProjectProvisionResult {
   deviceSerials: string[]
   /** One entry per worker: its device group, primary first. */
   workerGroups: string[][]
+  /**
+   * Each device's worker config: its bucket's effective config with `devices`
+   * reset to the root's, so a child sizes a run from the *project's* group
+   * (`use.devices`, else this) rather than the bucket's largest.
+   */
   configByDevice: Map<string, import('./worker-protocol.js').SerializedConfig>
+  /** Each device's worker group, primary first — the bucket's largest, pinned to that device. */
+  deviceGroupByDevice: Map<string, DeviceGroupEntry[]>
   bucketByDevice: Map<string, string>
   bucketByProject: Map<string, string>
   launched: LaunchedEmulator[]
@@ -1649,13 +1667,14 @@ async function provisionPerProjectDevices(
     deviceSerials: [],
     workerGroups: [],
     configByDevice: new Map(),
+    deviceGroupByDevice: new Map(),
     bucketByDevice: new Map(),
     bucketByProject: new Map(),
     launched: [],
     reusedSimulatorCount: 0,
   };
 
-  const { allocateBucketWorkers, bucketizeProjects } = await import('./project.js');
+  const { allocateBucketWorkers, bucketizeProjects, sharedDeviceGroup } = await import('./project.js');
   const bucketEntries = bucketizeProjects(projects);
   for (const b of bucketEntries) {
     for (const p of b.projects) {
@@ -1674,8 +1693,9 @@ async function provisionPerProjectDevices(
     const desiredWorkers = allocation.get(signature) ?? 0;
     if (desiredWorkers === 0) return null;
 
-    const bucketEffective = bucketProjects[0].effectiveConfig;
-    // A `use.devices` bucket needs `groupSize` devices per worker.
+    // The bucket's projects share its devices: provision for the largest
+    // group any of them declares (a smaller project runs on the first N).
+    const bucketEffective = sharedDeviceGroup(bucketProjects).config;
     const groupSize = deviceGroupSize(bucketEffective);
     const pinned = resolveDeviceGroup(bucketEffective).slice(1).flatMap((e) => (e.device ? [e.device] : []));
     const workersWanted = pinned.length > 0 ? 1 : desiredWorkers;
@@ -1713,12 +1733,13 @@ async function provisionPerProjectDevices(
     const { signature, bucketEffective, provisioned, groupSize } = outcome;
     result.launched.push(...provisioned.launched);
     result.reusedSimulatorCount += provisioned.reusedSimulatorCount;
-    const bucketSerialized = serializeConfig(bucketEffective);
+    const bucketSerialized = serializeConfig({ ...bucketEffective, devices: rootConfig.devices });
     // Whole groups only: a trailing partial group has no worker to serve.
     const usable = provisioned.serials.slice(0, Math.floor(provisioned.serials.length / groupSize) * groupSize);
     for (const serial of usable) {
       result.deviceSerials.push(serial);
       result.configByDevice.set(serial, bucketSerialized);
+      result.deviceGroupByDevice.set(serial, resolveDeviceGroup({ devices: bucketEffective.devices, device: serial }));
       result.bucketByDevice.set(serial, signature);
     }
     for (let i = 0; i < usable.length; i += groupSize) {
@@ -2238,9 +2259,14 @@ async function main(): Promise<void> {
   // so reporters can correctly suppress file headings / show project tags
   // when buckets or per-project `workers:` push the actual concurrency above
   // the global `config.workers` value.
-  const { allocateBucketWorkers, bucketizeProjects } = await import('./project.js');
+  const { allocateBucketWorkers, bucketizeProjects, sharedDeviceGroup } = await import('./project.js');
   const budgetCap = isExplicitWorkers(config) ? config.workers : undefined;
   const allocation = allocateBucketWorkers(config.workers, bucketizeProjects(projects), budgetCap);
+  // The group a device target's sessions form: the largest `use.devices`
+  // among the projects sharing that signature. A single-device project on a
+  // target that also hosts a group project runs on the group's primary.
+  const bucketGroup = (signature: string): DeviceGroupEntry[] =>
+    sharedDeviceGroup(projects.filter((p) => p.deviceSignature === signature)).group;
   const totalWorkers = [...allocation.values()].reduce((s, n) => s + n, 0);
   const maxFilesInAnyWave = Math.max(...projectWaves.map((wave) =>
     wave.reduce((sum, p) => sum + p.testFiles.length, 0),
@@ -2272,6 +2298,7 @@ async function main(): Promise<void> {
   const launchProgress = shouldShowLaunchProgress
     ? new UiLaunchProgress(createUiLaunchSteps({
       config: initialEffectiveConfig,
+      deviceGroupSize: bucketGroup(initialProject.deviceSignature).length,
       testFileCount: testFiles.length,
       workerCount: args.ui ? totalWorkers : effectiveWorkers,
       mode: args.ui ? 'ui' : 'test',
@@ -2380,6 +2407,7 @@ async function main(): Promise<void> {
         args.forceInstall,
         initialProject.deviceSignature,
         launchProgress,
+        bucketGroup(initialProject.deviceSignature),
       );
     } catch (err) {
       // The setup marks the step that actually failed (primary, install,
@@ -2413,6 +2441,7 @@ async function main(): Promise<void> {
 
       let uiWorkerGroups: string[][] | undefined;
       let uiConfigByDevice: Map<string, import('./worker-protocol.js').SerializedConfig> | undefined;
+      let uiDeviceGroupByDevice: Map<string, DeviceGroupEntry[]> | undefined;
       let uiBucketByDevice: Map<string, string> | undefined;
       let uiBucketByProject: Map<string, string> | undefined;
       let uiWorkersOverride: number | undefined;
@@ -2422,6 +2451,7 @@ async function main(): Promise<void> {
         const perBucket = await provisionPerProjectDevices(config, projects, budgetCap, launchProgress);
         uiWorkerGroups = perBucket.workerGroups;
         uiConfigByDevice = perBucket.configByDevice;
+        uiDeviceGroupByDevice = perBucket.deviceGroupByDevice;
         uiBucketByDevice = perBucket.bucketByDevice;
         uiBucketByProject = perBucket.bucketByProject;
         uiWorkersOverride = perBucket.workerGroups.length;
@@ -2469,11 +2499,12 @@ async function main(): Promise<void> {
         workerGroups: uiWorkerGroups,
         // `use.devices` lives on the project; `config` is the root and never
         // declares it.
-        deviceGroup: resolveDeviceGroup(currentSequentialState.effectiveConfig),
+        deviceGroup: currentSequentialState.deviceGroup,
         primaryGroupMembers: currentSequentialState.sessions.slice(1).map((s) => ({
           name: s.name, serial: s.serial, daemonAddress: s.daemonAddress,
         })),
         configByDevice: uiConfigByDevice,
+        deviceGroupByDevice: uiDeviceGroupByDevice,
         bucketByDevice: uiBucketByDevice,
         bucketByProject: uiBucketByProject,
       }, {
@@ -2512,6 +2543,7 @@ async function main(): Promise<void> {
 
       let watchWorkerGroups: string[][] | undefined;
       let watchConfigByDevice: Map<string, import('./worker-protocol.js').SerializedConfig> | undefined;
+      let watchDeviceGroupByDevice: Map<string, DeviceGroupEntry[]> | undefined;
       let watchBucketByDevice: Map<string, string> | undefined;
       let watchBucketByProject: Map<string, string> | undefined;
       let watchWorkersOverride: number | undefined;
@@ -2520,6 +2552,7 @@ async function main(): Promise<void> {
         const perBucket = await provisionPerProjectDevices(config, projects, budgetCap);
         watchWorkerGroups = perBucket.workerGroups;
         watchConfigByDevice = perBucket.configByDevice;
+        watchDeviceGroupByDevice = perBucket.deviceGroupByDevice;
         watchBucketByDevice = perBucket.bucketByDevice;
         watchBucketByProject = perBucket.bucketByProject;
         watchWorkersOverride = perBucket.workerGroups.length;
@@ -2553,7 +2586,7 @@ async function main(): Promise<void> {
           name: s.name, deviceSerial: s.serial, daemonAddress: s.daemonAddress, resetCapabilities: s.capabilities,
           close: () => closeDeviceSession(s),
         })),
-        deviceGroup: resolveDeviceGroup(currentSequentialState.effectiveConfig),
+        deviceGroup: currentSequentialState.deviceGroup,
         closePrimaryDaemon: () => {
           if (spawnedDaemonProcess) {
             try { spawnedDaemonProcess.kill(); } catch { /* already gone */ }
@@ -2564,6 +2597,7 @@ async function main(): Promise<void> {
         workers: watchWorkersOverride,
         workerGroups: watchWorkerGroups,
         configByDevice: watchConfigByDevice,
+        deviceGroupByDevice: watchDeviceGroupByDevice,
         bucketByDevice: watchBucketByDevice,
         bucketByProject: watchBucketByProject,
       });
@@ -2636,6 +2670,8 @@ async function main(): Promise<void> {
               project.effectiveConfig,
               args.forceInstall,
               project.deviceSignature,
+              undefined,
+              bucketGroup(project.deviceSignature),
             );
           } catch (err) {
             console.error(red(`Failed to set up device for project "${project.name}": ${(err as Error).message}`));
@@ -2666,8 +2702,13 @@ async function main(): Promise<void> {
           const projectGrepRe = normalizeGrep(project.grep);
           const projectGrepInvertRe = normalizeGrep(project.grepInvert);
           const suiteResult = await runTestFileWithRecovery(file, {
-            config: projectConfig,
-            sessions: currentSequentialState!.sessions,
+            // The run's `devices` is this project's own group (`use.devices`,
+            // else the root's): the state's config carries whichever project
+            // set the device up, and its group may be larger than this one's.
+            config: { ...projectConfig, devices: project.effectiveConfig.devices },
+            // The state holds the target's largest group; this project runs
+            // on the first N of it (the runner checks the count).
+            sessions: sessionsForRun(currentSequentialState!.sessions, project.effectiveConfig),
             screenshotDir,
             reporter,
             projectUseOptions: project.use,

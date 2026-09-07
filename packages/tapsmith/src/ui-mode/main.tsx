@@ -138,6 +138,13 @@ function App() {
   /** Maps trace key → workerId that ran it. */
   const testWorkerMapRef = useRef<Map<string, number>>(new Map());
   /**
+   * Devices each test's run drove (trace key → count), from `test-start`.
+   * A worker holds its target's largest group, so a single-device project's
+   * test on a group worker must not open the idle members' panes. State, not
+   * a ref: the viewed test's panes re-derive when its run starts.
+   */
+  const [testDeviceCounts, setTestDeviceCounts] = useState<Map<string, number>>(() => new Map());
+  /**
    * Hook-event index bookkeeping, per trace key. afterAll hooks run on a
    * fresh collector whose actionIndex restarts at 0, which would collide
    * with the test's own indices — same actionIndex means clobbered
@@ -458,7 +465,9 @@ function App() {
   // would list it, so the live view gets the same side-by-side panes and
   // device filters as the standalone viewer.
   const viewedGroupDevices = useMemo<TraceDeviceInfo[] | undefined>(() => {
-    const devices = viewedTestWorker?.devices;
+    const all = viewedTestWorker?.devices;
+    const count = viewedTraceKey ? testDeviceCounts.get(viewedTraceKey) : undefined;
+    const devices = all && count !== undefined ? all.slice(0, count) : all;
     if (!devices || devices.length < 2) return undefined;
     return devices.map((d) => ({
       name: d.name,
@@ -468,7 +477,24 @@ function App() {
       devicePixelRatio: d.devicePixelRatio,
       isEmulator: d.isEmulator ?? false,
     }));
-  }, [viewedTestWorker]);
+  }, [viewedTestWorker, viewedTraceKey, testDeviceCounts]);
+  // The collector's action count — where the runner's terminal screenshots
+  // start (`actionCount + ordinal`, see device-frames.ts) — is one past the
+  // highest index the test's own steps used. The visible row count falls
+  // short of it whenever an index was spent without a row: a beforeAll
+  // offset, an attempt fenced mid-action, or the step still in flight; a
+  // group's non-acting pane would then resolve its terminal frame to
+  // another device's, or to none. Hook events re-tagged after the test
+  // (hookShiftRef) sit past the terminal frames and are left out.
+  const liveActionCount = useMemo(() => {
+    const hookOffset = viewedTraceKey ? hookShiftRef.current.get(viewedTraceKey)?.offset : undefined;
+    const own = (index: number) => hookOffset === undefined || index < hookOffset;
+    let highest = -1;
+    for (const e of actionEvents) if (own(e.actionIndex)) highest = Math.max(highest, e.actionIndex);
+    const inFlight = currentTrace?.inFlightAction;
+    if (inFlight && own(inFlight.actionIndex)) highest = Math.max(highest, inFlight.actionIndex);
+    return highest + 1;
+  }, [actionEvents, currentTrace?.inFlightAction, viewedTraceKey]);
   const metadata = useMemo<TraceMetadata>(() => ({
     version: 1,
     tapsmithVersion,
@@ -484,7 +510,7 @@ function App() {
     endTime: viewedTestNode?.duration ?? 0,
     device: { serial: testDeviceSerial, isEmulator: deviceIsEmulator },
     traceConfig: { screenshots: true, snapshots: true, sources: true, network: true, deviceLogs: false, daemonLogs: false },
-    actionCount: actionEvents.length,
+    actionCount: liveActionCount,
     screenshotCount: screenshots.size,
     error: viewedTestNode?.error,
     project: viewedTestProject,
@@ -495,7 +521,7 @@ function App() {
     appResetScope: viewedIsolation?.appResetScope,
     appState: viewedIsolation?.appState,
     devices: viewedGroupDevices,
-  }), [viewedTestName, viewedTestFile, viewedTestNode, viewedTestProject, isRunning, actionEvents.length, screenshots.size, testDeviceSerial, deviceIsEmulator, tapsmithVersion, viewedIsolation, viewedGroupDevices]);
+  }), [viewedTestName, viewedTestFile, viewedTestNode, viewedTestProject, isRunning, liveActionCount, screenshots.size, testDeviceSerial, deviceIsEmulator, tapsmithVersion, viewedIsolation, viewedGroupDevices]);
 
   // Prefer a real completed event at this index; fall back to a synthesized
   // one from the in-flight slot so ScreenshotPanel can render the before-
@@ -570,12 +596,12 @@ function App() {
     return {
       devices: viewedGroupDevices,
       actionEvents,
-      actionCount: actionEvents.length,
+      actionCount: liveActionCount,
       hierarchies,
       activeDevice: override ?? acting,
       onActiveDeviceChange: setActiveDeviceOverride,
     };
-  }, [viewedGroupDevices, actionEvents, hierarchies, selectedEvent, activeDeviceOverride]);
+  }, [viewedGroupDevices, actionEvents, liveActionCount, hierarchies, selectedEvent, activeDeviceOverride]);
 
   // Hierarchy for the current action (used by selector playground) — resolved
   // to depict the same moment as the displayed screenshot, borrowing for
@@ -799,6 +825,13 @@ function App() {
         maxActionIndexRef.current.delete(key);
         rowCountRef.current.delete(key);
         hookShiftRef.current.delete(key);
+        setTestDeviceCounts((prev) => {
+          if (prev.get(key) === msg.deviceCount) return prev;
+          const next = new Map(prev);
+          if (msg.deviceCount === undefined) next.delete(key);
+          else next.set(key, msg.deviceCount);
+          return next;
+        });
         // Mark this test (and its parent describe/file) as running — scoped
         // to the project running it so a sibling project's copy of the same
         // file doesn't pulse blue too.
@@ -1143,6 +1176,7 @@ function App() {
             skipped: msg.skipped,
             readiness: msg.readiness ?? next[idx].readiness,
             speculation: msg.speculation ?? next[idx].speculation,
+            activeDeviceCount: msg.activeDeviceCount,
           };
           return next;
         });

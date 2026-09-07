@@ -10,7 +10,7 @@ import {
   validateDevicesOption,
   type TapsmithConfig,
 } from '../config.js';
-import { deviceSignature, resolveProjects } from '../project.js';
+import { deviceGroupSignature, deviceSignature, resolveProjects, sharedDeviceGroup } from '../project.js';
 
 // `use.devices` (PILOT-310): a project whose tests drive several devices at
 // once. The declaration is validated at load time and normalised into named
@@ -144,29 +144,112 @@ describe('deviceSignature with device groups', () => {
     expect(deviceSignature(makeConfig({ devices: 1 }))).toBe(plain);
   });
 
-  it('separates a group project from a single-device project on the same device shape', () => {
-    // A worker is a device group: the two cannot share a worker pool.
+  it('puts a group project and a single-device project on the same device shape in one target', () => {
+    // The two share devices: the target is provisioned for the group and
+    // the single project runs on its primary. A separate target per group
+    // used to hand both the same first emulator (two workers on one device)
+    // and made a mixed config need one emulator more than it uses.
     const single = deviceSignature(makeConfig());
     const pair = deviceSignature(makeConfig({ devices: 2 }));
-    expect(pair).not.toBe(single);
-    expect(pair).toContain('devices=device-1,device-2');
+    const pinned = deviceSignature(makeConfig({ devices: [{ name: 'alice' }, { name: 'bob', device: 'emulator-5556' }] }));
+    expect(pair).toBe(single);
+    expect(pinned).toBe(single);
+    expect(pair).not.toContain('devices=');
   });
 
-  it('includes member names and pins, so differently pinned groups get their own buckets', () => {
-    const a = deviceSignature(makeConfig({ devices: [{ name: 'alice' }, { name: 'bob', device: 'emulator-5556' }] }));
-    const b = deviceSignature(makeConfig({ devices: [{ name: 'alice' }, { name: 'bob', device: 'emulator-5558' }] }));
-    expect(a).toContain('bob@emulator-5556');
-    expect(a).not.toBe(b);
+  it('still separates genuinely different device shapes', () => {
+    const android = deviceSignature(makeConfig({ devices: 2 }));
+    expect(deviceSignature(makeConfig({ package: 'com.other', devices: 2 }))).not.toBe(android);
+    expect(deviceSignature(makeConfig({ avd: 'Pixel_9', devices: 2 }))).not.toBe(android);
   });
 
-  it('is carried onto resolved projects', () => {
+  it('is carried onto resolved projects, which then share one target', () => {
     const projects = resolveProjects(makeConfig({
       projects: [
         { name: 'solo', testMatch: ['**/solo/**'] },
         { name: 'chat', testMatch: ['**/chat/**'], use: { devices: 2 } },
       ],
     }));
-    expect(projects[0].deviceSignature).not.toBe(projects[1].deviceSignature);
+    expect(projects[0].deviceSignature).toBe(projects[1].deviceSignature);
     expect(deviceGroupSize(projects[1].effectiveConfig)).toBe(2);
+  });
+});
+
+describe('deviceGroupSignature', () => {
+  it('is empty for a single device and names members and pins otherwise', () => {
+    expect(deviceGroupSignature(makeConfig())).toBe('');
+    expect(deviceGroupSignature(makeConfig({ devices: 1 }))).toBe('');
+    expect(deviceGroupSignature(makeConfig({ devices: 2 }))).toBe('devices=device-1,device-2');
+    expect(deviceGroupSignature(makeConfig({ devices: [{ name: 'alice' }, { name: 'bob', device: 'emulator-5556' }] })))
+      .toBe('devices=alice,bob@emulator-5556');
+  });
+
+  it('tells differently pinned groups apart, which deviceSignature deliberately does not', () => {
+    const a = makeConfig({ devices: [{ name: 'alice' }, { name: 'bob', device: 'emulator-5556' }] });
+    const b = makeConfig({ devices: [{ name: 'alice' }, { name: 'bob', device: 'emulator-5558' }] });
+    expect(deviceSignature(a)).toBe(deviceSignature(b));
+    expect(deviceGroupSignature(a)).not.toBe(deviceGroupSignature(b));
+  });
+});
+
+describe('sharedDeviceGroup', () => {
+  const project = (name: string, use?: { devices?: TapsmithConfig['devices'] }) =>
+    resolveProjects(makeConfig({ projects: [{ name, testMatch: [`**/${name}/**`], use }] }))[0];
+
+  it('is a group of one for single-device projects', () => {
+    const shared = sharedDeviceGroup([project('solo'), project('other')]);
+    expect(shared.group).toEqual([{ name: 'device-1' }]);
+    expect(shared.config.devices).toBeUndefined();
+  });
+
+  it('picks the largest declared group and its project as the authority', () => {
+    const solo = project('solo');
+    const pair = project('pair', { devices: [{ name: 'alice' }, { name: 'bob' }] });
+    const shared = sharedDeviceGroup([solo, pair]);
+    expect(shared.group).toEqual([{ name: 'alice' }, { name: 'bob' }]);
+    expect(shared.config).toBe(pair.effectiveConfig);
+    // Order does not matter, and a group of one beside it is fine.
+    expect(sharedDeviceGroup([pair, solo]).group).toEqual(shared.group);
+    expect(sharedDeviceGroup([project('one', { devices: 1 }), pair]).config).toBe(pair.effectiveConfig);
+  });
+
+  it('accepts a smaller group that is a prefix of the largest, pins included', () => {
+    const trio = project('trio', { devices: [{ name: 'alice' }, { name: 'bob', device: 'emulator-5556' }, { name: 'carol' }] });
+    const pairPinned = project('pair', { devices: [{ name: 'alice' }, { name: 'bob', device: 'emulator-5556' }] });
+    const pairLoose = project('loose', { devices: [{ name: 'alice' }, { name: 'bob' }] });
+    expect(sharedDeviceGroup([pairLoose, trio, pairPinned]).group).toHaveLength(3);
+    // A pin on the smaller group's side of an unpinned larger entry is fine too.
+    const trioLoose = project('trio-loose', { devices: [{ name: 'alice' }, { name: 'bob' }, { name: 'carol' }] });
+    expect(sharedDeviceGroup([pairPinned, trioLoose]).group).toHaveLength(3);
+    // Default names line up with an explicit list using the same names.
+    expect(sharedDeviceGroup([
+      project('two', { devices: 2 }),
+      project('three', { devices: [{ name: 'device-1' }, { name: 'device-2' }, { name: 'device-3' }] }),
+    ]).group).toHaveLength(3);
+  });
+
+  it('rejects groups that disagree on names, naming both projects', () => {
+    const pair = project('pair', { devices: [{ name: 'alice' }, { name: 'bob' }] });
+    const other = project('other', { devices: [{ name: 'alice' }, { name: 'carol' }] });
+    expect(() => sharedDeviceGroup([pair, other])).toThrow(/Projects "pair" and "other" target the same device but declare incompatible device groups \(alice, bob vs alice, carol\)/);
+    // Same size, different names: neither is a prefix of the other.
+    const counted = project('counted', { devices: 2 });
+    expect(() => sharedDeviceGroup([pair, counted])).toThrow(/incompatible device groups/);
+  });
+
+  it('rejects groups that disagree on a pin', () => {
+    const a = project('a', { devices: [{ name: 'alice' }, { name: 'bob', device: 'emulator-5556' }] });
+    const b = project('b', { devices: [{ name: 'alice' }, { name: 'bob', device: 'emulator-5558' }, { name: 'carol' }] });
+    expect(() => sharedDeviceGroup([a, b])).toThrow(/"b" and "a".*bob@emulator-5558, carol vs alice, bob@emulator-5556/);
+  });
+
+  it('rejects a smaller group that is not a prefix, even with matching names elsewhere', () => {
+    const trio = project('trio', { devices: [{ name: 'alice' }, { name: 'bob' }, { name: 'carol' }] });
+    const tail = project('tail', { devices: [{ name: 'bob' }, { name: 'carol' }] });
+    expect(() => sharedDeviceGroup([trio, tail])).toThrow(/incompatible device groups/);
+  });
+
+  it('refuses an empty project list', () => {
+    expect(() => sharedDeviceGroup([])).toThrow(/no projects/);
   });
 });

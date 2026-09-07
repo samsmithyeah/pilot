@@ -21,7 +21,7 @@ import {
   type SerializedConfig,
   type RunFileUseOptions,
 } from './worker-protocol.js';
-import { closeDeviceSession, consumePrepared, openDeviceGroup } from './device-session.js';
+import { closeDeviceSession, consumePrepared, openDeviceGroup, sessionsForRun } from './device-session.js';
 
 // ─── IPC protocol ───
 
@@ -207,7 +207,9 @@ async function handleRun(msg: WatchRunMessage): Promise<void> {
       },
     };
 
-    const devices: RunDevice[] = sessions.map((s) => ({
+    // The child attached to the target's whole group; this file's project
+    // may declare a smaller one (or none), and runs on the first N sessions.
+    const devices: RunDevice[] = sessionsForRun(sessions, config, msg.projectUseOptions).map((s) => ({
       name: s.name,
       device: s.device,
       serial: s.serial,
@@ -251,7 +253,10 @@ async function handleRun(msg: WatchRunMessage): Promise<void> {
     if (currentAbortController === abortController) currentAbortController = undefined;
   }
 
-  for (const s of sessions) closeDeviceSession(s);
+  // Attached sessions: this drops the child's streams and client, leaving
+  // the parent's daemons (and their warm network proxies) as they were.
+  // Awaited so the teardown lands before the process exits.
+  await Promise.all(sessions.map((s) => closeDeviceSession(s)));
 }
 
 // ─── IPC message handler ───

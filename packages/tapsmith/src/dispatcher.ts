@@ -13,6 +13,7 @@ import * as net from 'node:net';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { normalizeGrep, resolveDeviceStrategy, type TapsmithConfig } from './config.js';
+import { sharedDeviceGroup } from './project.js';
 import { findDaemonBin } from './daemon-bin.js';
 import { assignGroupMemberDevices, deviceGroupSize, resolveDeviceGroup } from './config.js';
 import { TapsmithGrpcClient } from './grpc-client.js';
@@ -700,11 +701,11 @@ export async function runParallel(opts: DispatcherOptions, _portOffset = 0): Pro
   // which fixes the bucket to a single worker.
   //
   // `use.devices` is project-level, so the root config never declares a
-  // group. Every project of this run shares one device signature (the group
-  // is part of it — a second signature would have gone through
-  // runMultiBucket, whose `config` already is the bucket's), so the first
-  // project's effective config is the group's authority.
-  const groupConfig = opts.projects?.[0]?.effectiveConfig ?? config;
+  // group. Every project of this run shares one device target (a second
+  // signature would have gone through its own bucket), and the target is
+  // provisioned for the largest group among them: a project declaring a
+  // smaller group runs on the first N devices of each worker.
+  const groupConfig = opts.projects && opts.projects.length > 0 ? sharedDeviceGroup(opts.projects).config : config;
   const groupSize = deviceGroupSize(groupConfig);
   const deviceGroup = resolveDeviceGroup({ devices: groupConfig.devices, device: config.device ?? groupConfig.device });
   const pinnedMemberSerials = deviceGroup.slice(1).flatMap((e) => (e.device ? [e.device] : []));

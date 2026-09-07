@@ -5,7 +5,7 @@
  * dependency constraints and shared `use` options.
  */
 
-import { deviceGroupSize, effectiveConfigForProject, resolveDeviceGroup, type TapsmithConfig, type ProjectConfig, type UseOptions } from './config.js';
+import { deviceGroupSize, effectiveConfigForProject, resolveDeviceGroup, type DeviceGroupEntry, type TapsmithConfig, type ProjectConfig, type UseOptions } from './config.js';
 import { matchesTestFile } from './test-file-discovery.js';
 
 // ─── Types ───
@@ -69,15 +69,76 @@ export function deviceSignature(config: TapsmithConfig): string {
       config.deviceStrategy ?? '',
       config.launchEmulators ? '1' : '0',
     ];
-  // A "worker" is a device group: a project driving two devices per test
-  // cannot share a worker pool with one driving a single device, even when
-  // every other device-shaping field agrees. Single-device signatures are
-  // unchanged so existing bucket keys stay stable.
-  if (deviceGroupSize(config) > 1) {
-    const group = resolveDeviceGroup(config);
-    base.push(`devices=${group.map((e) => `${e.name}${e.device ? `@${e.device}` : ''}`).join(',')}`);
-  }
+  // Deliberately not part of the signature: `use.devices`. A group project
+  // and a single-device project on the same device shape share one target —
+  // the group's primary is the single project's device — so the target is
+  // provisioned once, for the largest group any of its projects declares
+  // (`sharedDeviceGroup`), and a smaller project runs on the first N of it.
   return base.join('|');
+}
+
+/**
+ * The group half of a target's identity — what `deviceSignature` leaves out.
+ * Empty for a single-device config; names and pins otherwise
+ * (`devices=alice,bob@emulator-5556`). For callers that key something per
+ * *group* rather than per device target (the MCP dispatcher's daemon sets).
+ */
+export function deviceGroupSignature(config: Pick<TapsmithConfig, 'devices' | 'device'>): string {
+  if (deviceGroupSize(config) <= 1) return '';
+  return `devices=${resolveDeviceGroup(config).map((e) => `${e.name}${e.device ? `@${e.device}` : ''}`).join(',')}`;
+}
+
+/** The device group a set of projects sharing one device target run on. */
+export interface SharedDeviceGroup {
+  /** The effective config of the project that declares the largest group — the target's authority for provisioning. */
+  config: TapsmithConfig
+  /** That group, primary first. A group of one for single-device projects. */
+  group: DeviceGroupEntry[]
+}
+
+const describeGroup = (group: DeviceGroupEntry[]): string =>
+  group.map((e) => `${e.name}${e.device ? `@${e.device}` : ''}`).join(', ');
+
+/**
+ * Projects on one device target (same `deviceSignature`) share its devices:
+ * the target is provisioned for the largest `use.devices` group among them,
+ * and a project declaring a smaller group — or none — runs on the first N of
+ * those devices. For that to be honest, every declared group must be a
+ * prefix of the largest: the same names and the same pins, position by
+ * position. Two projects that disagree are a config error, reported here by
+ * name rather than surfacing as a wrong-device run.
+ */
+export function sharedDeviceGroup(
+  projects: ReadonlyArray<Pick<ResolvedProject, 'name' | 'effectiveConfig'>>,
+): SharedDeviceGroup {
+  if (projects.length === 0) {
+    throw new Error('sharedDeviceGroup: no projects given');
+  }
+  let largest = projects[0];
+  for (const p of projects) {
+    if (deviceGroupSize(p.effectiveConfig) > deviceGroupSize(largest.effectiveConfig)) largest = p;
+  }
+  const group = resolveDeviceGroup(largest.effectiveConfig);
+  for (const p of projects) {
+    // A group of one is a single device whatever it is called: its tests see
+    // `devices[0]` only, so it has nothing to agree with the largest about.
+    if (p === largest || deviceGroupSize(p.effectiveConfig) <= 1) continue;
+    const own = resolveDeviceGroup(p.effectiveConfig);
+    const compatible = own.every((entry, i) => {
+      const shared = group[i];
+      return shared !== undefined
+        && shared.name === entry.name
+        && (entry.device === undefined || shared.device === undefined || entry.device === shared.device);
+    });
+    if (!compatible) {
+      throw new Error(
+        `Projects "${largest.name}" and "${p.name}" target the same device but declare incompatible device groups `
+        + `(${describeGroup(group)} vs ${describeGroup(own)}). Projects on one device target share its devices, so a `
+        + 'smaller `use.devices` group must be the first members of the largest one — the same names and pins, in the same order.',
+      );
+    }
+  }
+  return { config: largest.effectiveConfig, group };
 }
 
 // ─── Worker allocation ───

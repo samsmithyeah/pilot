@@ -112,6 +112,12 @@ export interface UiLaunchPlanInput {
   mode?: "ui" | "test";
   projects?: ResolvedProject[];
   workerPlanWarning?: string;
+  /**
+   * Devices per worker on the initial device target — the largest
+   * `use.devices` group among the projects sharing it (`sharedDeviceGroup`).
+   * Defaults to the group `config` itself declares.
+   */
+  deviceGroupSize?: number;
 }
 
 export interface UiLaunchProgressOptions {
@@ -304,9 +310,9 @@ export function createUiLaunchSteps(input: UiLaunchPlanInput): LaunchStep[] {
     // UI mode reports every worker's group under its own `worker-devices`
     // step below — a second step with the same id would leave one row
     // pending forever.
-    if (deviceGroupSize(input.config) > 1 && !(mode === "ui" && input.workerCount > 1)) {
-
-      const members = deviceGroupSize(input.config) - 1;
+    const groupSize = input.deviceGroupSize ?? deviceGroupSize(input.config);
+    if (groupSize > 1 && !(mode === "ui" && input.workerCount > 1)) {
+      const members = groupSize - 1;
       steps.push({
         id: "worker-devices",
         label: "Device group",

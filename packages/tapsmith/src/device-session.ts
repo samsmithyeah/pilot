@@ -14,7 +14,7 @@ import * as path from 'node:path';
 import { spawn, execFileSync, type ChildProcess, type StdioOptions } from 'node:child_process';
 import { TapsmithGrpcClient } from './grpc-client.js';
 import { Device } from './device.js';
-import type { TapsmithConfig } from './config.js';
+import { deviceGroupSize, type TapsmithConfig } from './config.js';
 import { isNetworkTracingEnabled, networkHostsForPac, networkPassthroughHosts } from './trace/types.js';
 import { installedApkMatches, isPackageInstalled, waitForPackageIndexed } from './emulator.js';
 import { installApp, installAppAsync, installedAppMatches, isAppInstalled, probeSimulatorHealth, rebootSimulator } from './ios-simulator.js';
@@ -30,7 +30,7 @@ import {
   probeResetCapabilities,
   type SessionPreflightContext,
 } from './session-preflight.js';
-import type { PreparedState, ResetCapabilities } from './app-reset.js';
+import { satisfies, type AppResetPolicy, type PreparedState, type ResetCapabilities } from './app-reset.js';
 import { findDaemonBin } from './daemon-bin.js';
 
 // ─── Types ───
@@ -79,6 +79,12 @@ export interface DeviceSession {
   context: SessionPreflightContext
   /** Daemon process this session spawned and owns; absent when adopted. */
   daemonProcess?: ChildProcess
+  /**
+   * True when the session attached to a daemon another process owns and keeps
+   * alive (`OpenDeviceSessionOptions.adopt`): closing it must not release
+   * that daemon's network proxy, whose port the owner keeps stable across runs.
+   */
+  adopted?: boolean
   /** Agent host port the owned daemon forwards to the device (for cleanup). */
   agentPort?: number
   /**
@@ -499,6 +505,7 @@ export async function openDeviceSession(
     daemonProcess: opts.daemonProcess,
     agentPort: opts.agentPort,
     ownsClient: !opts.client,
+    adopted: !!opts.adopt,
   };
 
   try {
@@ -632,7 +639,7 @@ export async function openDeviceSession(
 
     return session;
   } catch (err) {
-    closeDeviceSession(session);
+    await closeDeviceSession(session);
     const message = err instanceof Error ? err.message : String(err);
     throw new Error(message.startsWith(label) ? message : `${label}: ${message}`);
   }
@@ -652,6 +659,23 @@ export async function openDeviceGroup(
   },
 ): Promise<DeviceSession[]> {
   if (specs.length === 0) return [];
+  // The artifacts are resolved once, from the first member, and shared: on
+  // iOS the simulator and device agents are different builds, so a group
+  // mixing the two would hand one kind the other's xctestrun and fail deep
+  // inside xcodebuild with nothing naming the mismatch. Refuse it here.
+  if (config.platform === 'ios' && specs.length > 1) {
+    const { isPhysicalDevice } = await import('./ios-devicectl.js');
+    const physical = specs.filter((spec) => isPhysicalDevice(spec.serial));
+    if (physical.length > 0 && physical.length < specs.length) {
+      const describe = (list: typeof specs) => list.map((spec) => `${spec.name} (${spec.serial})`).join(', ');
+      throw new Error(
+        'A device group cannot mix iOS simulators and physical devices: '
+        + `${describe(physical)} ${physical.length === 1 ? 'is a physical device' : 'are physical devices'} while `
+        + `${describe(specs.filter((spec) => !isPhysicalDevice(spec.serial)))} ${specs.length - physical.length === 1 ? 'is a simulator' : 'are simulators'}. `
+        + 'Pin every member of `use.devices` to the same kind of device.',
+      );
+    }
+  }
   // Same fast-fail as a single session: a physical iOS group with no
   // device xctestrun stops here with the `build-ios-agent` hint, not in
   // xcodebuild. Adopting members have a running agent and need none.
@@ -676,7 +700,7 @@ export async function openDeviceGroup(
   })));
   const failure = results.find((r): r is PromiseRejectedResult => r.status === 'rejected');
   if (failure) {
-    for (const r of results) if (r.status === 'fulfilled') closeDeviceSession(r.value);
+    await Promise.all(results.flatMap((r) => (r.status === 'fulfilled' ? [closeDeviceSession(r.value)] : [])));
     throw failure.reason;
   }
   return results.map((r) => (r as PromiseFulfilledResult<DeviceSession>).value);
@@ -719,18 +743,27 @@ export async function recoverDeviceSessions(sessions: DeviceSession[], phase: st
  * Close a session: the Device, the gRPC client, and — when this session owns
  * it — the daemon and the ADB forward it left on the device. Idempotent.
  */
-export function closeDeviceSession(session: DeviceSession): void {
+export async function closeDeviceSession(session: DeviceSession): Promise<void> {
   // The Device holds the same client instance: a plain `device.close()`
-  // would close a caller-owned one behind the guard below.
+  // would close a caller-owned one behind the guard below. The close's
+  // teardown RPCs (proxy release, route stream) need the channel open until
+  // they land, so the client is closed only once `_close` has settled —
+  // callers that cannot wait still get the synchronous parts (log streams,
+  // daemon kill, port forward) immediately.
   const ownsClient = session.ownsClient !== false;
-  session.device._close({ closeClient: ownsClient }).catch(() => { /* already closed */ });
-  if (ownsClient) {
-    try { session.client.close(); } catch { /* already closed */ }
-  }
+  const closing = session.device._close({ closeClient: false, releaseNetwork: !session.adopted }).catch(() => { /* already closed */ });
   if (session.daemonProcess) {
     try { session.daemonProcess.kill(); } catch { /* already gone */ }
     session.daemonProcess = undefined;
   }
+  removeAgentForward(session);
+  await closing;
+  if (ownsClient) {
+    try { session.client.close(); } catch { /* already closed */ }
+  }
+}
+
+function removeAgentForward(session: DeviceSession): void {
   if (session.agentPort !== undefined && session.config.platform !== 'ios') {
     try {
       execFileSync('adb', ['-s', session.serial, 'forward', '--remove', `tcp:${session.agentPort}`], {
@@ -739,6 +772,54 @@ export function closeDeviceSession(session: DeviceSession): void {
       });
     } catch { /* forward may already be gone */ }
   }
+}
+
+/**
+ * The sessions one file runs on. A worker holds the largest group any project
+ * of its device target declares; a project declaring a smaller `use.devices`
+ * — or none — runs on the first N of them, the primary always included. The
+ * group comes from the project's `use` when it declares one, else from the
+ * run's config (a root-level `devices`, or none: a single device). Short of
+ * sessions this hands back what there is, and the runner's group check names
+ * the mismatch.
+ */
+export function sessionsForRun(
+  sessions: DeviceSession[],
+  config: Pick<TapsmithConfig, 'devices'>,
+  useOptions?: { devices?: TapsmithConfig['devices'] },
+): DeviceSession[] {
+  return sessions.slice(0, runDeviceCount(config, useOptions));
+}
+
+/**
+ * How many devices a file's run drives: the project's `use.devices` when it
+ * declares one, else the run config's `devices`, else one. The same number
+ * the children slice their sessions by (`sessionsForRun`) and the runner
+ * checks (`assertDeviceGroupMatches`) — the UI server uses it to tell the
+ * client which of a worker's devices a run leaves idle.
+ */
+export function runDeviceCount(
+  config: Pick<TapsmithConfig, 'devices'>,
+  useOptions?: { devices?: TapsmithConfig['devices'] },
+): number {
+  return deviceGroupSize({ devices: useOptions?.devices ?? config.devices });
+}
+
+/**
+ * The sessions a background preparation for a file has to reset: the ones
+ * that file's run will drive (`sessionsForRun`), minus any still holding a
+ * prepared state that satisfies the policy — a member the last run left
+ * untouched keeps its claim, so a single-device project's run followed by a
+ * preparation for a group file resets only the device the run used.
+ */
+export function sessionsToPrepare(
+  sessions: DeviceSession[],
+  config: Pick<TapsmithConfig, 'devices'>,
+  useOptions: { devices?: TapsmithConfig['devices'] } | undefined,
+  policy: AppResetPolicy,
+): DeviceSession[] {
+  return sessionsForRun(sessions, config, useOptions)
+    .filter((s) => !(s.prepared && satisfies(s.prepared.policy, policy)));
 }
 
 /** Consume a session's prepared state (once): the next file's reset uses it. */
