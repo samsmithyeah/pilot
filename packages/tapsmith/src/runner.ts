@@ -2046,7 +2046,11 @@ async function runSuiteContext(
           const actionTimestamps = collector.events
             .filter((e): e is import('./trace/types.js').ActionTraceEvent | import('./trace/types.js').AssertionTraceEvent =>
               e.type === 'action' || e.type === 'assertion')
-            .map((e) => ({ timestamp: e.timestamp, actionIndex: e.actionIndex, deviceId: e.deviceId }));
+            // `timestamp` is the step's completion time; a request the step
+            // itself triggers (tap → fetch) starts before that, so anchor on
+            // when the step began. Falls back to completion for events that
+            // carry no start time.
+            .map((e) => ({ timestamp: e.startTime ?? e.timestamp, actionIndex: e.actionIndex, deviceId: e.deviceId }));
 
           // A request is anchored to the latest step that started before it
           // — on the device that made it. Group members interleave in the
