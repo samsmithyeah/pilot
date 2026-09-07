@@ -4,6 +4,7 @@ import { describe, expect, test } from "../../fixtures.js"
 import { ChatScreen } from "../../screens/chat.screen.js"
 import { HomeScreen } from "../../screens/home.screen.js"
 import { LoginScreen } from "../../screens/login.screen.js"
+import { hostAddressFor } from "../../utils/host-address.js"
 
 // Two devices driven by one test (PILOT-310). Runs only under the
 // `*-multi` configs, whose project declares `use.devices`; every other config
@@ -97,9 +98,10 @@ describe("Two users chatting", () => {
   })
 
   test("alice messages bob, bob replies", async ({ devices: [alice, bob], platform }) => {
-    // How an emulator / simulator addresses the machine running this test.
-    const host = platform === "android" ? "10.0.2.2" : "localhost"
-    const serverUrl = `http://${host}:${port}`
+    // How an emulator / simulator addresses the machine running this test —
+    // by a real interface, never `localhost`, so each device's daemon captures
+    // the conversation and the trace's Network tab shows it per device.
+    const serverUrl = `http://${hostAddressFor(platform)}:${port}`
     const link = `tapsmithtest:///chat?server=${encodeURIComponent(serverUrl)}`
 
     const aliceChat = new ChatScreen(alice)
