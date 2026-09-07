@@ -5619,7 +5619,16 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                 // end of scope, releasing the TCP listener.
                 #[cfg(target_os = "macos")]
                 {
-                    let ne_known_bad = *self.ios_ne_unavailable.read().await;
+                    // The "NE previously failed" cache exists to skip a doomed
+                    // launch when the system-proxy fallback is going to be used
+                    // anyway. Under `require_isolation` that fallback is refused,
+                    // so consulting the cache would turn one transient failure
+                    // (typically two daemons launching the redirector at once)
+                    // into "capture disabled" for every later test on this
+                    // device: always retry the redirector instead, and leave the
+                    // cache untouched for callers that can fall back.
+                    let ne_known_bad =
+                        !req.require_isolation && *self.ios_ne_unavailable.read().await;
                     let ne_result = if ne_known_bad {
                         debug!("Skipping NE attempt (previously failed) — using system proxy");
                         Err(anyhow::anyhow!("cached: NE previously unavailable"))
@@ -5640,12 +5649,41 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                             );
                         }
                         Err(e) => {
-                            if !ne_known_bad {
+                            if !ne_known_bad && !req.require_isolation {
                                 *self.ios_ne_unavailable.write().await = true;
                                 warn!(
                                     "Network Extension redirector unavailable: {e} — \
                                      falling back to macOS system proxy"
                                 );
+                            }
+                            // The system-proxy fallback is host-wide: it records
+                            // every process on the Mac (browsers, trustd, other
+                            // simulators) and nothing in the captured entries
+                            // says which. A caller that needs per-device
+                            // attribution — the runner, for a multi-device group
+                            // — asks for isolation and gets a clear refusal
+                            // rather than someone else's traffic under this
+                            // device's name. Note the most common local cause:
+                            // two daemons launching the redirector at once share
+                            // one NETransparentProxyManager, and the loser's
+                            // control channel never connects.
+                            if req.require_isolation {
+                                let msg = format!(
+                                    "iOS network capture unavailable for this device: the \
+                                     Network Extension redirector failed ({e}) and the \
+                                     macOS system-proxy fallback is not device-isolated, so \
+                                     it is refused for multi-device runs. If another \
+                                     Tapsmith daemon is capturing on this Mac, the \
+                                     redirector session may already be owned by it; see \
+                                     docs/ios-network-capture.md#multi-device-groups"
+                                );
+                                warn!("{msg}");
+                                return Ok(Response::new(proto::StartNetworkCaptureResponse {
+                                    request_id,
+                                    success: false,
+                                    proxy_port: 0,
+                                    error_message: msg,
+                                }));
                             }
                             match ios::system_proxy::set_system_proxy(host_port).await {
                                 Ok(service) => {

@@ -957,9 +957,10 @@ export class TapsmithGrpcClient {
 
   // ── Trace Support (PILOT-85) ──
 
-  async startNetworkCapture(): Promise<{ success: boolean; proxyPort: number; errorMessage: string }> {
+  async startNetworkCapture(options?: { requireIsolation?: boolean }): Promise<{ success: boolean; proxyPort: number; errorMessage: string }> {
     return this.call('startNetworkCapture', {
       requestId: requestId(),
+      requireIsolation: options?.requireIsolation ?? false,
     });
   }
 

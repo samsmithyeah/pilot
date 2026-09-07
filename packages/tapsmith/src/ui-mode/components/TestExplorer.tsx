@@ -6,7 +6,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'preact/hooks';
-import { ArrowLeft, Check, ChevronsDownUp, ChevronsUpDown, Circle, CircleSlash, Eye, Link, LoaderCircle, Play, Search, Square, X } from 'lucide-preact';
+import { ArrowLeft, Check, ChevronsDownUp, ChevronsUpDown, Circle, CircleSlash, Eye, Link, LoaderCircle, Play, Search, Smartphone, Square, X } from 'lucide-preact';
 import type { TestTreeNode, ClientMessage } from '../ui-protocol.js';
 
 const ICON_SIZE = 13;
@@ -305,6 +305,13 @@ function TreeNode({ node, depth, parentProjectName, expandedNodes, selectedTestI
         )}
 
         {(() => {
+          const group = devicesBadge(node);
+          return group
+            ? <span class="te-devices" data-testid="node-devices" title={group.title}><Smartphone size={10} /> {group.label}</span>
+            : null;
+        })()}
+
+        {(() => {
           const iso = isolationBadge(node);
           return iso
             ? <span class="te-isolation" data-testid="node-isolation" title={iso.title}>{iso.label}</span>
@@ -382,9 +389,25 @@ function StatusIcon({ status, pending }: { status: TestTreeNode['status']; pendi
 // ─── Helpers ───
 
 /**
- * The declared isolation for a node, when it declares one (project `use`
- * folded in by the server). Nothing is shown for the implicit default so the
- * tree stays quiet unless a file opts into something.
+ * The device group a project row declares (`use.devices`), named by member.
+ * Shown once, on the row that declares it — the rail and the viewer's panes
+ * already carry the group for every test under it.
+ */
+function devicesBadge(node: TestTreeNode): { label: string; title: string } | undefined {
+  const use = node.use;
+  if (!use?.devices || use.devices <= 1) return undefined;
+  const names = use.deviceNames && use.deviceNames.length === use.devices ? use.deviceNames : undefined;
+  return {
+    label: names ? names.join(' · ') : `${use.devices} devices`,
+    title: `Each test drives ${use.devices} devices${names ? `: ${names.join(', ')}` : ''} (use.devices)`,
+  };
+}
+
+/**
+ * The declared isolation for a node, when it declares one — a file or suite's
+ * `test.use()`, or the project's `use` on the project row. Nothing is shown
+ * for the implicit default, and nothing for what a row merely inherits, so
+ * the tree stays quiet unless something opts in.
  */
 function isolationBadge(node: TestTreeNode): { label: string; title: string } | undefined {
   const use = node.use;

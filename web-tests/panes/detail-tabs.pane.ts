@@ -65,13 +65,33 @@ export class DetailTabsPane {
     return this.page.getByTestId("log-time")
   }
 
+  get consoleMessages() {
+    return this.page.getByTestId("log-message")
+  }
+
   /** A sortable column header; the active one reports `aria-pressed` and `data-sort-direction`. */
-  consoleColumnHeader(name: "Time" | "Level" | "Source" | "Message") {
+  consoleColumnHeader(name: "Time" | "Level" | "Source" | "Device" | "Message") {
     return this.page.getByRole("group", { name: "Sort console output" }).getByRole("button", { name })
+  }
+
+  get consoleColumnHeaders() {
+    return this.page.getByRole("group", { name: "Sort console output" }).getByRole("button")
   }
 
   consoleTimeMode(mode: "relative" | "absolute") {
     return this.page.getByRole("group", { name: "Timestamp format" }).getByRole("button", { name: mode })
+  }
+
+  /** Per-device filter pill, shown when console lines came from more than one device. */
+  consoleDevicePill(device: string) {
+    return this.page.getByTestId("console-device-pill").filter({ hasText: device })
+  }
+
+  // ─── Hierarchy (multi-device) ───
+
+  /** Which device's tree the Hierarchy tab shows; `aria-pressed` marks the shown one. */
+  hierarchyDevicePill(device: string) {
+    return this.page.getByRole("group", { name: "Hierarchy device" }).getByRole("button", { name: device, exact: true })
   }
 
   // ─── Source ───

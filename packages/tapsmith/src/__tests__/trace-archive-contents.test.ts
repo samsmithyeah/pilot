@@ -261,7 +261,7 @@ describe('generated trace archive', () => {
   function makeOpts(device: Device, config: Partial<TapsmithConfig>, extra: Partial<RunOptions> = {}): RunOptions {
     return {
       config: makeConfig({ rootDir: tempRoot, outputDir: 'out', ...config }),
-      device,
+      devices: [{ name: 'device-1', device }],
       // Required by design (see RunOptions) — nothing here declares a reset
       // policy, so an empty capability set is the honest value.
       resetCapabilities: {},
@@ -584,6 +584,83 @@ describe('generated trace archive', () => {
     expect(secondAction.action).toBe('inputText');
     expect(search.actionIndex).toBe(secondAction.actionIndex);
     expect(ping.actionIndex).toBe(secondAction.actionIndex);
+  });
+
+  it('anchors each network entry to a step of the device that made the request', async () => {
+    // Two group members interleave in one action-index space: alice 0, bob 1,
+    // alice 2, bob 3. Bob's request starts after alice's step 2 but before his
+    // own step 3, so a device-blind "latest step before the request" walk
+    // would hang it off alice's step; the right anchor is bob's step 1.
+    const log: CaptureLog = { screenshots: [], hierarchies: [] };
+    const observed: { timestamps: number[]; chosen: number } = { timestamps: [], chosen: Number.NaN };
+    const bobStop = vi.fn(async () => {
+      const steps = (getActiveTraceCollector()?.events ?? [])
+        .filter((e): e is ActionTraceEvent => e.type === 'action');
+      observed.timestamps = steps.map((e) => e.timestamp);
+      observed.chosen = steps.length === 4
+        ? Math.floor((steps[2].timestamp + steps[3].timestamp) / 2)
+        : Number.NaN;
+      return {
+        requestId: '1',
+        success: true,
+        errorMessage: '',
+        entries: [{
+          method: 'GET',
+          url: 'https://api.example.com/bob',
+          statusCode: 200,
+          contentType: '',
+          requestSize: 0,
+          responseSize: 0,
+          startTimeMs: observed.chosen,
+          durationMs: 1,
+          requestHeadersJson: '{}',
+          responseHeadersJson: '{}',
+          requestBody: Buffer.alloc(0),
+          responseBody: Buffer.alloc(0),
+          isHttps: true,
+          routeAction: '',
+        }],
+      };
+    });
+
+    const alice = new Device(makeCapturingClient(log), { package: 'com.example.app' });
+    const bob = new Device(makeCapturingClient(log, { stopNetworkCapture: bobStop }), { package: 'com.example.app' });
+    alice._traceDeviceId = 'alice';
+    bob._traceDeviceId = 'bob';
+
+    pushContext();
+    tapsmithTest('chat', async () => {
+      await alice.tapXY(1, 2);
+      await new Promise((r) => setTimeout(r, 5));
+      await bob.tapXY(3, 4);
+      await new Promise((r) => setTimeout(r, 5));
+      await alice.inputText('hi bob');
+      await new Promise((r) => setTimeout(r, 5));
+      await bob.inputText('hi alice');
+    });
+    const ctx = popContext();
+
+    const result = await runSuiteContext(ctx, '', [], [], makeOpts(alice, {
+      trace: { mode: 'on', screenshots: false, snapshots: false, sources: false, network: true, deviceLogs: false },
+    }, { devices: [{ name: 'alice', device: alice }, { name: 'bob', device: bob }] }));
+
+    expect(result.tests[0].error?.message).toBeUndefined();
+    expect(result.tests[0].status).toBe('passed');
+    expect(observed.timestamps).toHaveLength(4);
+    expect(observed.timestamps[3]).toBeGreaterThan(observed.timestamps[2] + 1);
+    expect(Number.isFinite(observed.chosen)).toBe(true);
+
+    const archive = readArchive(result.tests[0].tracePath!);
+    expect(archive.actions.map((a) => a.deviceId)).toEqual(['alice', 'bob', 'alice', 'bob']);
+    expect(archive.network).toHaveLength(1);
+    const [entry] = archive.network;
+    expect(entry.deviceId).toBe('bob');
+    // Bob's most recent step when the request started — not alice's.
+    const bobTap = archive.actions[1];
+    expect(bobTap.deviceId).toBe('bob');
+    expect(bobTap.action).toBe('tapXY');
+    expect(entry.actionIndex).toBe(bobTap.actionIndex);
+    expect(entry.actionIndex).not.toBe(archive.actions[2].actionIndex);
   });
 
   it('omits network.json entirely when nothing was captured', async () => {

@@ -173,6 +173,16 @@ Tapsmith itself never modifies these on modern versions.
 
 Verify the fix is in place: run with debug logs and look for `tapsmith_core::ios_redirect` lines showing **different `/tmp/tapsmith-redirector-*.sock` paths per worker**. Each worker daemon should have its own session. If multiple workers share a socket path, you are running an older build — upgrade.
 
+### When the Network Extension is unavailable
+
+If the redirector cannot be started (the extension is not approved, or its control channel does not connect within 10 s), the daemon falls back to setting the **macOS system HTTP/HTTPS proxy** on the active network service and prints `Using macOS system proxy fallback — not PID-isolated (affects all host traffic)`. This is what CI runners use, where a System Extension cannot be approved. It is host-wide: the trace records whatever any process on the Mac sends, `localhost` and `127.0.0.1` are on the bypass list so requests to a server the test hosts are *not* captured, and only one daemon at a time can own the setting — a second daemon's `networksetup` call replaces the first's port, and the first daemon to exit switches the proxy off for the survivor. Once a daemon has fallen back it stays on the fallback for its lifetime.
+
+### Multi-device groups
+
+Each device of a [device group](multi-device.md) captures on its own daemon, and the runner labels every entry with the device that captured it. That label is only honest on a per-device route, so for a group the runner asks each daemon to **require isolation**: the system-proxy fallback above is refused and that device's capture is disabled with a message naming the device (`Network capture disabled: [bob] …`), instead of recording the whole Mac's traffic under one device's name. The other members keep capturing, and the disabled member retries the redirector on its next test rather than staying disabled for the run — a single-device run, which can fall back, remembers the failure and skips straight to the system proxy.
+
+The runner also starts the members' captures one at a time. The stock mitmproxy launcher reuses any `mitmproxy` extension configuration that is not yet connected, so two daemons launching within the same ~150 ms overwrite each other's socket path and the second one silently loses the extension. If a member still reports `Network Extension redirector unavailable`, check that no other Tapsmith run (for example a parallel `--workers` run) started its redirector at the same moment, and look for `System Extension control channel connected` in each daemon's debug log.
+
 ### Physical iOS device network capture
 
 See the [Physical iOS devices](#physical-ios-devices) section below — physical devices use a different setup flow (`tapsmith configure-ios-network`) because they can't share the macOS Network Extension that simulators use.
@@ -277,7 +287,7 @@ Tapsmith also detects this at test time: if the daemon notices that the host's c
 
 - The Tapsmith CA is generated once per machine and stored under `~/.tapsmith/ca.pem`. It is installed into the simulator's trust store at the start of the first capture session and **persists** there across subsequent runs. Tapsmith does not currently remove the CA at session end — to wipe it, `xcrun simctl erase <udid>` (erases the simulator) or remove the cert manually from the simulator's keychain.
 - Only traffic from the simulator's process tree (as reported by `ps`) is routed through the proxy. Host browsers, IDEs, and other apps are unaffected.
-- The macOS system proxy (`networksetup -setwebproxy`) is never modified. Tapsmith's PILOT-182 architecture removed all host-level proxy configuration.
+- The macOS system proxy (`networksetup -setwebproxy`) is only touched when the Network Extension is unavailable and Tapsmith falls back to it (see [When the Network Extension is unavailable](#when-the-network-extension-is-unavailable)). In that mode every process on the Mac is proxied, so the trace can contain host traffic (browser preconnects, `trustd` OCSP checks) alongside the simulator's. Tapsmith disables the proxy again when the daemon exits; the server/port values it wrote stay visible in `networksetup -getwebproxy` with `Enabled: No`.
 - Request and response bodies are truncated to 1 MiB each in the captured trace to prevent runaway memory usage.
 
 ## Attribution

@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useRef, useState } from 'preact/hooks';
 import { RefreshCw } from 'lucide-preact';
 import type { ClientMessage, WorkerInfo, WorkerReadiness } from '../ui-protocol.js';
+import { deviceViewsOf, type DeviceView } from './DevicePane.js';
 import { agentsLabel, agentsTooltip, type McpAgent } from '../mcp-agents.js';
 import brandMark from '../../assets/mark.png';
 import wordmarkLight from '../../assets/wordmark-light.png';
@@ -127,8 +128,25 @@ function readinessLines(r: WorkerReadiness | undefined, now: number): string[] {
   }
 }
 
-function workerTooltip(w: WorkerInfo, now: number): string {
-  const lines = [`${w.displayName} — ${w.deviceSerial}`, `Status: ${w.status}`];
+/**
+ * A member the worker's current activity leaves untouched — the running file,
+ * or the background preparation for the next one: the worker holds its
+ * target's largest group, and that file's project declares a smaller one.
+ */
+function isIdleMember(w: WorkerInfo, view: DeviceView): boolean {
+  const active = w.status === 'running' || w.readiness?.state === 'preparing';
+  return active && w.activeDeviceCount !== undefined && view.deviceIndex >= w.activeDeviceCount;
+}
+
+function workerTooltip(w: WorkerInfo, view: DeviceView, now: number): string {
+  const idle = isIdleMember(w, view);
+  const lines = [`${view.label} — ${view.deviceSerial}`, `Status: ${idle ? 'idle' : w.status}`];
+  if (idle) {
+    const devices = w.activeDeviceCount === 1 ? 'one device' : `${w.activeDeviceCount} devices`;
+    lines.push(w.status === 'running'
+      ? `Not used by the running file: its project drives ${devices}`
+      : `Not part of this preparation: the next file's project drives ${devices}`);
+  }
   lines.push(...readinessLines(w.readiness, now));
   if (w.currentFile) lines.push(`File: ${w.currentFile}`);
   if (w.currentTest) lines.push(`Test: ${w.currentTest}`);
@@ -155,12 +173,19 @@ interface ContextMenuState {
 
 interface WorkerDeviceProps {
   w: WorkerInfo
+  /**
+   * The device this chip stands for. A worker driving a device group
+   * (`use.devices`) gets one chip per member, labelled like the pane's tabs
+   * (`<worker> · <name>`); readiness and the context menu are the worker's,
+   * since it prepares and respawns the group as one.
+   */
+  view: DeviceView
   onSend: (msg: ClientMessage) => void
   prepareBetweenRuns?: boolean
   onTogglePrepareBetweenRuns?: () => void
 }
 
-function WorkerDevice({ w, onSend, prepareBetweenRuns, onTogglePrepareBetweenRuns }: WorkerDeviceProps) {
+function WorkerDevice({ w, view, onSend, prepareBetweenRuns, onTogglePrepareBetweenRuns }: WorkerDeviceProps) {
   const [menu, setMenu] = useState<ContextMenuState | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   // Tooltip ages ("12s ago") only need to be roughly right; re-render on open.
@@ -199,20 +224,24 @@ function WorkerDevice({ w, onSend, prepareBetweenRuns, onTogglePrepareBetweenRun
     };
   }, [menu]);
 
-  const word = readinessWord(w.readiness, w.status);
+  const idleMember = isIdleMember(w, view);
+  const word = idleMember ? 'idle' : readinessWord(w.readiness, w.status);
+  const dotClass = idleMember ? 'idle' : readinessDotClass(w.readiness, w.status);
   const readinessState = w.readiness?.state ?? 'none';
 
   return (
     <span
       class="rc-device rc-device-actionable"
-      title={workerTooltip(w, now)}
+      title={workerTooltip(w, view, now)}
       onContextMenu={handleContextMenu}
       data-testid="worker-chip"
       data-worker-id={w.workerId}
+      data-device-index={view.deviceIndex}
       data-readiness={readinessState}
+      data-active={idleMember ? 'false' : 'true'}
     >
-      <span class={`rc-dot ${readinessDotClass(w.readiness, w.status)}`} />
-      {w.displayName}
+      <span class={`rc-dot ${dotClass}`} />
+      {view.label}
       {word && <span class="rc-readiness" data-testid="worker-readiness">{word}</span>}
       {menu && (
         <div ref={menuRef} class="rc-context-menu" role="menu" aria-label={`Worker ${w.workerId} actions`} style={{ left: `${menu.x}px`, top: `${menu.y}px` }}>
@@ -306,9 +335,9 @@ export function RunControls({ connected, isRunning, deviceSerial, counts, theme,
               </span>
             )
             : hasWorkers
-              ? workers.map((w) => (
-                <WorkerDevice key={w.workerId} w={w} onSend={onSend} prepareBetweenRuns={prepareBetweenRuns} onTogglePrepareBetweenRuns={onTogglePrepareBetweenRuns} />
-              ))
+              ? workers.flatMap((w) => deviceViewsOf([w]).map((view) => (
+                <WorkerDevice key={`${w.workerId}:${view.deviceIndex}`} w={w} view={view} onSend={onSend} prepareBetweenRuns={prepareBetweenRuns} onTogglePrepareBetweenRuns={onTogglePrepareBetweenRuns} />
+              )))
               : (
                 <span class="rc-device" title={deviceSerial}>
                   <span class="rc-dot done" />

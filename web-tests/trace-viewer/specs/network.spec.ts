@@ -124,6 +124,27 @@ test.describe("Network tab", () => {
     await expect(row).toContainText("120 ms")
   })
 
+  test("lists requests chronologically by default", async ({ viewer, detailTabs, network }) => {
+    // Durations chosen so a duration sort (the old default) would order these
+    // second, fourth, third, first; the archive order is scrambled too, so only
+    // the start time can explain a first-to-fourth listing.
+    const first = networkEntry({ index: 0, url: "https://api.acme.dev/first", duration: 300 })
+    const second = networkEntry({ index: 1, url: "https://api.acme.dev/second", duration: 10 })
+    const third = networkEntry({ index: 2, url: "https://api.acme.dev/third", duration: 200 })
+    const fourth = networkEntry({ index: 3, url: "https://api.acme.dev/fourth", duration: 50 })
+    await viewer.open({
+      events: [actionEvent({ actionIndex: 0, action: "tap" })],
+      network: [third, first, fourth, second],
+    })
+    await detailTabs.select("Network")
+
+    // The Name cell renders the path segment followed by the domain.
+    const names = await network.rows.evaluateAll((rows) =>
+      rows.map((r) => r.querySelector("td")?.textContent ?? ""),
+    )
+    expect(names.map((n) => n.replace("api.acme.dev", ""))).toEqual(["first", "second", "third", "fourth"])
+  })
+
   test("sorts when a column header is clicked", async ({ viewer, detailTabs, network }) => {
     await openWithNetwork(viewer)
     await detailTabs.select("Network")

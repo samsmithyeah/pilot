@@ -51,7 +51,7 @@ function makeConfig(overrides: Partial<TapsmithConfig> = {}): TapsmithConfig {
 function makeOpts(overrides: Partial<RunOptions> = {}): RunOptions {
   // resetCapabilities is required by design (see RunOptions); unit tests have
   // no device to probe, so an empty object is the honest value.
-  return { config: makeConfig(), resetCapabilities: {}, ...overrides };
+  return { config: makeConfig(), devices: [], resetCapabilities: {}, ...overrides };
 }
 
 describe('collectResults()', () => {
@@ -315,7 +315,7 @@ describe('runner execution', () => {
     const result = await runSuiteContext(ctx, '', [], [], makeOpts({
       config: makeConfig({ platform: 'ios' }),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- focused runner hook fixture mock
-      device: mockDevice as any,
+      devices: [{ name: 'device-1', device: mockDevice as any }],
     }));
 
     expect(result.tests[0].status).toBe('passed');
@@ -342,7 +342,7 @@ describe('runner execution', () => {
       const result = await runSuiteContext(ctx, '', [], [], makeOpts({
         config: makeConfig({ platform: 'android' }),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- focused runner hook fixture mock
-        device: mockDevice as any,
+        devices: [{ name: 'device-1', device: mockDevice as any }],
       }));
 
       expect(result.tests[0].status).toBe('passed');
@@ -372,7 +372,7 @@ describe('runner execution', () => {
       const result = await runSuiteContext(ctx, '', [], [], makeOpts({
         config: makeConfig({ platform: 'android' }),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- focused runner hook fixture mock
-        device: mockDevice as any,
+        devices: [{ name: 'device-1', device: mockDevice as any }],
       }));
 
       expect(result.tests[0].status).toBe('passed');
@@ -397,7 +397,7 @@ describe('runner execution', () => {
     const result = await runSuiteContext(ctx, '', [], [], makeOpts({
       config: makeConfig({ platform: 'android' }),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- focused runner hook fixture mock
-      device: mockDevice as any,
+      devices: [{ name: 'device-1', device: mockDevice as any }],
       workerFixtures: { workerVal: 'from-worker' },
     }));
 
@@ -468,7 +468,7 @@ describe('runner execution', () => {
       const result = await runSuiteContext(ctx, '', [], [], makeOpts({
         config: makeConfig({ platform: 'android' }),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- focused runner hook fixture mock
-        device: mockDevice as any,
+        devices: [{ name: 'device-1', device: mockDevice as any }],
       }));
 
       expect(result.tests[0].status).toBe('passed');
@@ -492,7 +492,7 @@ describe('runner execution', () => {
     const result = await runSuiteContext(ctx, '', [], [], makeOpts({
       config: makeConfig({ platform: 'ios' }),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- focused runner hook fixture mock
-      device: mockDevice as any,
+      devices: [{ name: 'device-1', device: mockDevice as any }],
     }));
 
     expect(result.tests[0].status).toBe('passed');
@@ -528,7 +528,7 @@ describe('runner execution', () => {
       const result = await runSuiteContext(ctx, '', [], [], makeOpts({
         config: makeConfig({ platform: 'android' }),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- focused runner hook fixture mock
-        device: mockDevice as any,
+        devices: [{ name: 'device-1', device: mockDevice as any }],
       }));
 
       expect(result.tests[0].status).toBe('passed');
@@ -552,7 +552,7 @@ describe('runner execution', () => {
     const result = await runSuiteContext(ctx, '', [], [], makeOpts({
       config: makeConfig({ platform: 'android' }),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- focused runner hook fixture mock
-      device: mockDevice as any,
+      devices: [{ name: 'device-1', device: mockDevice as any }],
     }));
 
     expect(result.tests[0].status).toBe('passed');
@@ -585,7 +585,7 @@ describe('runner execution', () => {
       const result = await runSuiteContext(ctx, '', [], [], makeOpts({
         config: makeConfig({ platform: 'android' }),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- focused runner hook fixture mock
-        device: mockDevice as any,
+        devices: [{ name: 'device-1', device: mockDevice as any }],
       }));
 
       expect(result.tests[0].status).toBe('passed');
@@ -608,7 +608,7 @@ describe('runner execution', () => {
     const result = await runSuiteContext(ctx, '', [], [], makeOpts({
       config: makeConfig({ platform: 'android' }),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- focused runner hook fixture mock
-      device: mockDevice as any,
+      devices: [{ name: 'device-1', device: mockDevice as any }],
     }));
 
     expect(result.tests[0].status).toBe('passed');
@@ -647,7 +647,7 @@ describe('runner execution', () => {
           },
         }),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- focused runner lifecycle mock
-        device: mockDevice as any,
+        devices: [{ name: 'device-1', device: mockDevice as any }],
         onTestStart: async (fullName, options) => {
           startCalls.push({ fullName, attributionOnly: options?.attributionOnly ?? false });
         },
@@ -701,7 +701,7 @@ describe('runner execution', () => {
           },
         }),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- focused runner lifecycle mock
-        device: mockDevice as any,
+        devices: [{ name: 'device-1', device: mockDevice as any }],
         onTestStart: async (fullName, options) => {
           startCalls.push({ fullName, attributionOnly: options?.attributionOnly ?? false });
         },
@@ -753,7 +753,7 @@ describe('runner execution', () => {
           },
         }),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- focused runner lifecycle mock
-        device: mockDevice as any,
+        devices: [{ name: 'device-1', device: mockDevice as any }],
         onTestStart: async (fullName) => { startCalls.push(fullName); },
       }));
 
@@ -811,7 +811,7 @@ describe('runner execution', () => {
           },
         }),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- focused runner lifecycle mock
-        device: mockDevice as any,
+        devices: [{ name: 'device-1', device: mockDevice as any }],
       }));
 
       expect(result.tests.map((t) => t.status)).toEqual(['passed', 'passed']);
@@ -834,6 +834,105 @@ describe('runner execution', () => {
           .map((event) => event.message);
         expect(deviceMessages).toEqual([`device-log-${i + 1}`]);
       }
+    } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('starts group network capture one device at a time, requiring isolation, and drains only what started', async () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'tapsmith-runner-network-group-'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const order: string[] = [];
+    const makeMember = (name: string, start: () => Promise<{ success: boolean; proxyPort: number; errorMessage: string }>) => ({
+      _traceDeviceId: name,
+      tracing: new Tracing(async () => undefined, async () => undefined),
+      waitForIdle: vi.fn(async () => {}),
+      _startNetworkCapture: vi.fn(start),
+      _stopNetworkCapture: vi.fn(async () => ({ success: true, entries: [], errorMessage: '' })),
+      _stopDeviceLogStream: vi.fn(),
+      _startDaemonLogStream: vi.fn(),
+      _stopDaemonLogStream: vi.fn(),
+      _disposeRouteManager: vi.fn(async () => {}),
+      _disposeWebViewManager: vi.fn(async () => {}),
+      _resetWebViewContext: vi.fn(),
+    });
+    // alice's daemon takes a while to bring the redirector up; bob's refuses
+    // the host-wide fallback (what the daemon does when isolation is required
+    // and the Network Extension is unavailable).
+    const alice = makeMember('alice', async () => {
+      order.push('alice:start');
+      await new Promise((r) => setTimeout(r, 20));
+      order.push('alice:done');
+      return { success: true, proxyPort: 1111, errorMessage: '' };
+    });
+    const bob = makeMember('bob', async () => {
+      order.push('bob:start');
+      return { success: false, proxyPort: 0, errorMessage: 'system-proxy fallback refused' };
+    });
+
+    try {
+      pushContext();
+      tapsmithTest('traced group test', async () => {});
+      const ctx = popContext();
+
+      const result = await runSuiteContext(ctx, '', [], [], makeOpts({
+        config: makeConfig({
+          rootDir: tempRoot,
+          outputDir: 'out',
+          trace: { mode: 'on', network: true, screenshots: false, snapshots: false, sources: false, deviceLogs: false },
+        }),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- focused runner lifecycle mocks
+        devices: [{ name: 'alice', device: alice as any }, { name: 'bob', device: bob as any }],
+      }));
+
+      expect(result.tests.map((t) => t.status)).toEqual(['passed']);
+      // Sequential: bob's launcher must not race alice's redirector start.
+      expect(order).toEqual(['alice:start', 'alice:done', 'bob:start']);
+      // A group needs per-device attribution, so both ask the daemon for it.
+      expect(alice._startNetworkCapture).toHaveBeenCalledWith({ requireIsolation: true });
+      expect(bob._startNetworkCapture).toHaveBeenCalledWith({ requireIsolation: true });
+      // Only the capture that started is drained.
+      expect(alice._stopNetworkCapture).toHaveBeenCalledWith({ keepRunning: true });
+      expect(bob._stopNetworkCapture).not.toHaveBeenCalled();
+      // The refusal names the device, so the once-per-run dedup cannot hide
+      // one member's failure behind another's identical message.
+      const disabled = warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes('Network capture disabled'));
+      expect(disabled).toEqual(['[tapsmith] Network capture disabled: [bob] system-proxy fallback refused']);
+    } finally {
+      warn.mockRestore();
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('starts single-device network capture without requiring isolation', async () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'tapsmith-runner-network-single-'));
+    const mockDevice = {
+      tracing: new Tracing(async () => undefined, async () => undefined),
+      waitForIdle: vi.fn(async () => {}),
+      _startNetworkCapture: vi.fn(async () => ({ success: true, proxyPort: 12345, errorMessage: '' })),
+      _stopNetworkCapture: vi.fn(async () => ({ success: true, entries: [], errorMessage: '' })),
+      _stopDeviceLogStream: vi.fn(),
+      _startDaemonLogStream: vi.fn(),
+      _stopDaemonLogStream: vi.fn(),
+      _disposeRouteManager: vi.fn(async () => {}),
+      _disposeWebViewManager: vi.fn(async () => {}),
+      _resetWebViewContext: vi.fn(),
+    };
+    try {
+      pushContext();
+      tapsmithTest('traced test', async () => {});
+      const ctx = popContext();
+      await runSuiteContext(ctx, '', [], [], makeOpts({
+        config: makeConfig({
+          rootDir: tempRoot,
+          outputDir: 'out',
+          trace: { mode: 'on', network: true, screenshots: false, snapshots: false, sources: false, deviceLogs: false },
+        }),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- focused runner lifecycle mock
+        devices: [{ name: 'device-1', device: mockDevice as any }],
+      }));
+      // A lone device keeps the CI-friendly system-proxy fallback available.
+      expect(mockDevice._startNetworkCapture).toHaveBeenCalledWith({ requireIsolation: false });
     } finally {
       fs.rmSync(tempRoot, { recursive: true, force: true });
     }
@@ -883,7 +982,7 @@ describe('runner execution', () => {
           },
         }),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- focused runner lifecycle mock
-        device: mockDevice as any,
+        devices: [{ name: 'device-1', device: mockDevice as any }],
       }));
 
       expect(result.tests.map((t) => t.status)).toEqual(['passed', 'passed']);
@@ -1045,7 +1144,7 @@ describe('test.use()', () => {
 
     const ctx = popContext();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- mock device for testing
-    await runSuiteContext(ctx, '', [], [], makeOpts({ device: mockDevice as any }));
+    await runSuiteContext(ctx, '', [], [], makeOpts({ devices: [{ name: 'device-1', device: mockDevice as any }] }));
 
     // Should have set 5000 then restored to original
     expect(timeoutLog).toEqual([5000, 10000]);
@@ -1066,7 +1165,7 @@ describe('test.use()', () => {
 
     const ctx = popContext();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- mock device for testing
-    await runSuiteContext(ctx, '', [], [], makeOpts({ device: mockDevice as any }));
+    await runSuiteContext(ctx, '', [], [], makeOpts({ devices: [{ name: 'device-1', device: mockDevice as any }] }));
 
     // Timeout should still be restored after the failure
     expect(timeoutLog).toEqual([3000, 10000]);
@@ -1424,7 +1523,7 @@ describe('retries', () => {
     const result = await runSuiteContext(ctx, '', [], [], makeOpts({
       config: makeConfig({ retries: 1 }),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- focused runner retry mock
-      device: mockDevice as any,
+      devices: [{ name: 'device-1', device: mockDevice as any }],
     }));
     expect(result.tests.map((t) => t.status)).toEqual(['passed', 'passed']);
     // Test 1 attempt 0 → false, attempt 1 (retry) → true; test 2 attempt 0
@@ -1517,7 +1616,7 @@ describe('retries', () => {
           trace: { mode: 'on', network: false, screenshots: false, snapshots: false, sources: false },
         }),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- focused runner timeout mock
-        device: mockDevice as any,
+        devices: [{ name: 'device-1', device: mockDevice as any }],
       }));
 
       expect(result.tests[0].status).toBe('failed');
@@ -1788,7 +1887,7 @@ describe('retries', () => {
           },
         }),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- focused runner lifecycle mock
-        device: mockDevice as any,
+        devices: [{ name: 'device-1', device: mockDevice as any }],
         reporter: { onTestEnd: (t: TestResult) => { reported.push(t); } },
       }));
 
@@ -1898,7 +1997,7 @@ describe('retries', () => {
       const result = await runSuiteContext(ctx, '', [], [], makeOpts({
         config: makeConfig({ platform: 'android' }),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- focused runner hook fixture mock
-        device: mockDevice as any,
+        devices: [{ name: 'device-1', device: mockDevice as any }],
       }));
 
       expect(result.tests[0].status).toBe('passed');
@@ -1929,7 +2028,7 @@ describe('retries', () => {
       const result = await runSuiteContext(ctx, '', [], [], makeOpts({
         config: makeConfig({ platform: 'android' }),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- focused runner hook fixture mock
-        device: mockDevice as any,
+        devices: [{ name: 'device-1', device: mockDevice as any }],
       }));
 
       expect(result.tests[0].status).toBe('passed');
@@ -2053,7 +2152,7 @@ describe('beforeAll trace replay into packaged traces', () => {
           },
         }),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- focused runner tracing mock
-        device: mockDevice as any,
+        devices: [{ name: 'device-1', device: mockDevice as any }],
       }));
 
       expect(result.tests.map((t) => t.status)).toEqual(['passed', 'passed']);
@@ -2126,7 +2225,7 @@ describe('scope setup attribution across nested describes', () => {
       const result = await runSuiteContext(ctx, '', [], [], makeOpts({
         config: makeConfig({ rootDir: tempRoot, outputDir: 'out', trace: traceConfig }),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- focused runner lifecycle mock
-        device: makeDevice() as any,
+        devices: [{ name: 'device-1', device: makeDevice() as any }],
         testFilter: 'finds by label',
         onTestStart: async (fullName, options) => {
           startCalls.push({ fullName, attributionOnly: options?.attributionOnly ?? false });
@@ -2168,7 +2267,7 @@ describe('scope setup attribution across nested describes', () => {
       const result = await runSuiteContext(ctx, '', [], [], makeOpts({
         config: makeConfig({ rootDir: tempRoot, outputDir: 'out', trace: traceConfig }),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- focused runner tracing mock
-        device: makeDevice() as any,
+        devices: [{ name: 'device-1', device: makeDevice() as any }],
         onTestStart: async (fullName) => { startCalls.push(fullName); },
       }));
 
@@ -2249,7 +2348,7 @@ describe('afterAll trace amendment into packaged traces', () => {
           },
         }),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- focused runner tracing mock
-        device: mockDevice as any,
+        devices: [{ name: 'device-1', device: mockDevice as any }],
       }));
 
       expect(result.tests.map((t) => t.status)).toEqual(['passed', 'passed']);

@@ -6,7 +6,7 @@ import { withFileLockSync } from '../file-lock.js';
 import { TapsmithGrpcClient, type DeviceInfoProto } from '../grpc-client.js';
 import { findDaemonBin } from '../daemon-bin.js';
 import { pickFreePort } from '../port-utils.js';
-import type { TapsmithConfig } from '../config.js';
+import { resolveDeviceGroup, primaryDevicePin, type TapsmithConfig } from '../config.js';
 import { loadMcpConfig } from './config-loader.js';
 import { uiPortFilePath, allUiPortFiles, mcpDaemonRegistryPath } from './port-file.js';
 
@@ -83,6 +83,17 @@ let _uiMode = false;
 let _discoveredConfig: TapsmithConfig | null = null;
 /** Addresses a running UI session told us it owns, from the last discovery. */
 let _uiOwned: Set<string> = new Set();
+/**
+ * Device serials a running UI session told us it holds, from the last discovery.
+ *
+ * Refusing that session's *daemons* (`_uiOwned`) was not enough: a headless
+ * session then started its own daemon and its own agent on the very devices
+ * that session was driving. Measured: `tapsmith mcp-server` beside a UI run
+ * logged "Ignoring localhost:50051 — it belongs to a running UI-mode session"
+ * and, two lines later, "Using device: emulator-5554" — the UI run's device.
+ * A group config claimed one per member.
+ */
+let _uiHeld: Set<string> = new Set();
 
 /**
  * Configure the connection pool for the server that is about to use it.
@@ -583,7 +594,9 @@ async function discover(): Promise<void> {
     // Assigned every time, empty included: a UI session that has since exited
     // owns nothing, and keeping the old set would go on excluding the default
     // address from the fallback probe for the rest of this process's life.
-    _uiOwned = await uiOwnedAddresses();
+    const holdings = await uiSessionHoldings();
+    _uiOwned = holdings.addresses;
+    _uiHeld = holdings.devices;
     for (const address of [...candidates.keys()]) {
       if (_uiOwned.has(normalizeDaemonAddress(address))) {
         log(`Ignoring ${address} — it belongs to a running UI-mode session`);
@@ -829,6 +842,18 @@ export interface PlatformTarget {
   address: string
   deviceSerial: string
   platform?: string
+  /**
+   * The rest of a `use.devices` group, each on its own daemon, in member
+   * order. Absent for single-device targets.
+   */
+  members?: PlatformTargetMember[]
+}
+
+export interface PlatformTargetMember {
+  /** Group entry name (`bob`). */
+  name: string
+  address: string
+  deviceSerial: string
 }
 
 /**
@@ -871,11 +896,78 @@ export async function platformTargetIsLive(target: PlatformTarget): Promise<bool
  * and agent paths, so resolve a target per platform from that instead.
  */
 export async function ensurePlatformTarget(config: TapsmithConfig): Promise<PlatformTarget> {
+  const primary = await ensurePrimaryTarget(config);
+  const group = resolveDeviceGroup(config);
+  if (group.length <= 1) return primary;
+  // A `use.devices` project: one more daemon + device per member, each
+  // prepared like the primary. Members never share a daemon (a daemon holds
+  // one device), and never reuse the primary's device.
+  const members: PlatformTargetMember[] = [];
+  const taken = [primary.deviceSerial];
+  try {
+    for (const entry of group.slice(1)) {
+      const member = await ensureMemberTarget(config, entry.name, entry.device, taken);
+      members.push(member);
+      taken.push(member.deviceSerial);
+    }
+  } catch (err) {
+    for (const m of members) {
+      const conn = _connections.find((c) => c.address === m.address);
+      if (conn) discardDaemon(conn);
+    }
+    await refreshDeviceIndex();
+    throw err;
+  }
+  return { ...primary, members };
+}
+
+/** A daemon + device + agent for one group member beyond the primary. */
+async function ensureMemberTarget(
+  config: TapsmithConfig,
+  name: string,
+  wantedSerial: string | undefined,
+  exclude: string[],
+): Promise<PlatformTargetMember> {
+  const platform = config.platform;
+  assertNotHeldByUi(wantedSerial, uiHeldDevices(), name);
+  const conn = await startDaemon(platform);
+  if (!conn) {
+    throw new Error(`Failed to start a ${platform ?? 'Tapsmith'} daemon for group member "${name}". Is tapsmith-core installed?`);
+  }
+  const serial = (await pickDevice(conn, platform, wantedSerial, exclude))?.serial;
+  if (!serial) {
+    const visible = (await visibleDevices(conn, platform)).filter((s) => !exclude.includes(s));
+    discardDaemon(conn);
+    await refreshDeviceIndex();
+    throw new Error(
+      `${noDeviceMessage(platform, wantedSerial, visible, uiHeldDevices())} (needed for group member "${name}"; `
+      + `${exclude.join(', ')} already serve the group's other members)`,
+    );
+  }
+  conn.claimedBy = `${platform ?? 'default'}:${name}`;
+  try {
+    await prepareTarget(conn, serial, config);
+  } catch (err) {
+    discardDaemon(conn);
+    await refreshDeviceIndex();
+    throw err;
+  }
+  await refreshDeviceIndex();
+  return { name, address: conn.address, deviceSerial: serial };
+}
+
+async function ensurePrimaryTarget(config: TapsmithConfig): Promise<PlatformTarget> {
   await ensureConnected();
   const platform = config.platform;
   const key = platform ?? 'default';
+  // The first group member's pin, root `device` included. Reading `config.device`
+  // here honoured `bob`'s pin and auto-picked `alice`'s.
+  const wanted = primaryDevicePin(config);
+  // Before any daemon is started: a pinned device another session drives is
+  // refused outright, not silently taken over.
+  assertNotHeldByUi(wanted, uiHeldDevices());
 
-  const existing = await findConnectionForPlatform(platform, key, config.device);
+  const existing = await findConnectionForPlatform(platform, key, wanted);
   if (existing) {
     // Claim it only for as long as the claim holds: a failed prepare would
     // otherwise leave the daemon marked as this platform's forever, so no
@@ -906,7 +998,7 @@ export async function ensurePlatformTarget(config: TapsmithConfig): Promise<Plat
     throw new Error(`Failed to start a ${platform ?? 'Tapsmith'} daemon. Is tapsmith-core installed?`);
   }
 
-  const serial = (await pickDevice(conn, platform, config.device))?.serial;
+  const serial = (await pickDevice(conn, platform, wanted))?.serial;
   if (!serial) {
     // Ask what it *could* see before discarding it, so a config pinning a
     // serial that does not exist is not reported as "no device available"
@@ -917,7 +1009,7 @@ export async function ensurePlatformTarget(config: TapsmithConfig): Promise<Plat
     // yet another one.
     discardDaemon(conn);
     await refreshDeviceIndex();
-    throw new Error(noDeviceMessage(platform, config.device, visible));
+    throw new Error(noDeviceMessage(platform, wanted, visible, uiHeldDevices()));
   }
 
   conn.claimedBy = key;
@@ -936,17 +1028,53 @@ export async function ensurePlatformTarget(config: TapsmithConfig): Promise<Plat
 }
 
 /** The serials a daemon can see for a platform; empty if it cannot be reached. */
+/** Serials the daemon lists for `platform` that no UI session holds — what a failed pick could have chosen. */
 async function visibleDevices(conn: DaemonConnection, platform: string | undefined): Promise<string[]> {
   try {
     const { devices } = await conn.client.listDevices();
-    return (platform ? devices.filter((d) => d.platform === platform) : devices).map((d) => d.serial);
+    const held = uiHeldDevices();
+    return (platform ? devices.filter((d) => d.platform === platform) : devices)
+      .map((d) => d.serial)
+      .filter((serial) => !held.has(serial));
   } catch {
     return [];
   }
 }
 
-export function noDeviceMessage(platform?: string, wanted?: string, visible: string[] = []): string {
+/** The devices a running UI session holds — none when this process *is* the UI server, whose devices are its own. */
+function uiHeldDevices(): Set<string> {
+  return _uiMode ? new Set() : _uiHeld;
+}
+
+/**
+ * The refusal for pinning a device a running UI-mode session is driving.
+ *
+ * Silent takeover was the harm — the pin was honoured and the other session's
+ * next action landed on a device with a second agent on it — so an explicit
+ * pin of a held device fails loudly here, before any daemon is started.
+ *
+ * @internal — exported for unit testing.
+ */
+export function assertNotHeldByUi(wanted: string | undefined, held: Set<string>, memberName?: string): void {
+  if (!wanted || !held.has(wanted)) return;
+  const forWhom = memberName ? ` for group member "${memberName}"` : '';
+  throw new Error(
+    `Device "${wanted}" is pinned${forWhom} in your config, but a running \`tapsmith test --ui\` session is driving it. `
+    + 'Headless MCP sessions get their own devices, so pin a different one, or connect to that session\'s MCP endpoint instead.',
+  );
+}
+
+export function noDeviceMessage(platform?: string, wanted?: string, visible: string[] = [], heldByUi: Iterable<string> = []): string {
   const what = platform ? `No ${platform} device is available.` : 'No device is available.';
+  // The devices are there, but a UI session is driving every one of them. Telling
+  // the user to boot a simulator beside the one they are looking at would send
+  // them the wrong way — say who has the devices instead.
+  const held = [...heldByUi];
+  if (!wanted && visible.length === 0 && held.length > 0) {
+    return `${what} ${held.length === 1 ? 'The only one visible' : 'Every visible device'} (${held.join(', ')}) `
+      + 'is being driven by a running `tapsmith test --ui` session. Headless MCP sessions get their own devices: '
+      + 'start another device, or connect to that session\'s MCP endpoint instead.';
+  }
   // A pinned serial that does not exist is a different problem with a
   // different fix, and telling the user to boot a simulator when one is
   // already booted sends them looking in the wrong place entirely.
@@ -1034,6 +1162,7 @@ async function pickDevice(
   conn: DaemonConnection,
   platform: string | undefined,
   wantedSerial: string | undefined,
+  exclude: string[] = [],
 ): Promise<DeviceChoice | undefined> {
   let devices: DeviceInfoProto[];
   try {
@@ -1041,9 +1170,29 @@ async function pickDevice(
   } catch {
     return undefined;
   }
+  return chooseDevice(devices, { platform, wantedSerial, exclude, heldByUi: uiHeldDevices() });
+}
 
+/**
+ * The device a daemon listing `devices` should serve.
+ *
+ * A wanted serial is taken only if the daemon lists it; otherwise the pick is
+ * the active/online device, then a discovered one, then anything. `exclude`
+ * holds the serials already serving this group's other members, and
+ * `heldByUi` the devices a running UI-mode session drives — neither is picked,
+ * and a wanted serial in either is not honoured (the caller reports the held
+ * case with a message naming the UI session; see {@link assertNotHeldByUi}).
+ *
+ * @internal — exported for unit testing.
+ */
+export function chooseDevice(
+  devices: DeviceInfoProto[],
+  opts: { platform?: string; wantedSerial?: string; exclude?: string[]; heldByUi?: Set<string> },
+): DeviceChoice | undefined {
+  const { platform, wantedSerial, exclude = [], heldByUi = new Set<string>() } = opts;
   const activeSerial = activeDeviceOf(devices);
-  const candidates = platform ? devices.filter((d) => d.platform === platform) : devices;
+  const candidates = (platform ? devices.filter((d) => d.platform === platform) : devices)
+    .filter((d) => !exclude.includes(d.serial) && !heldByUi.has(d.serial));
   const serial = wantedSerial
     ? candidates.find((d) => d.serial === wantedSerial)?.serial
     : (
@@ -1135,9 +1284,16 @@ interface UiDiscoveryResult {
   deviceSerials: Set<string>
   /** Every address the UI session drives, including its primary daemon. */
   owned: string[]
+  /**
+   * Every device the UI session holds — its whole provisioned set, so the
+   * primary counts before its worker has spawned and group members count
+   * alongside it. Falls back to the worker daemons' serials for a UI server
+   * that predates the field.
+   */
+  heldDevices: string[]
 }
 
-const EMPTY_DISCOVERY: UiDiscoveryResult = { reachable: false, daemons: [], deviceSerials: new Set(), owned: [] };
+const EMPTY_DISCOVERY: UiDiscoveryResult = { reachable: false, daemons: [], deviceSerials: new Set(), owned: [], heldDevices: [] };
 
 /**
  * Addresses a running UI session is using, so a headless one can stay off them.
@@ -1162,15 +1318,23 @@ export function normalizeDaemonAddress(address: string): string {
   return `${loopback}:${port}`;
 }
 
-async function uiOwnedAddresses(): Promise<Set<string>> {
+/**
+ * What every running UI session on this machine holds: the daemon addresses a
+ * headless session must not adopt, and the device serials it must not pick.
+ *
+ * @internal — exported for unit testing.
+ */
+export async function uiSessionHoldings(): Promise<{ addresses: Set<string>; devices: Set<string> }> {
   const files = allUiPortFiles();
-  if (files.length === 0) return new Set();
+  const addresses = new Set<string>();
+  const devices = new Set<string>();
+  if (files.length === 0) return { addresses, devices };
   const perServer = await Promise.all(files.map((f) => queryUiServerAt(f)));
-  const owned = new Set<string>();
   for (const result of perServer) {
-    for (const address of result.owned) owned.add(normalizeDaemonAddress(address));
+    for (const address of result.owned) addresses.add(normalizeDaemonAddress(address));
+    for (const serial of result.heldDevices) devices.add(serial);
   }
-  return owned;
+  return { addresses, devices };
 }
 
 async function discoverFromUiServer(): Promise<UiDiscoveryResult> {
@@ -1203,14 +1367,16 @@ async function queryUiServerAt(portFile: string): Promise<UiDiscoveryResult> {
     // device does the ios project run on?" — the one question routing a device
     // tool by project needs. Headless knows it from `conn.platform`; this is
     // the same fact from the other transport.
-    const data = JSON.parse(json) as { daemons?: UiDaemonRecord[]; owned?: string[] };
+    const data = JSON.parse(json) as { daemons?: UiDaemonRecord[]; owned?: string[]; devices?: string[] };
     if (!Array.isArray(data.daemons)) return EMPTY_DISCOVERY;
     const daemons = data.daemons.filter((d) => Boolean(d.address));
+    const workerSerials = daemons.map(d => d.deviceSerial).filter(Boolean) as string[];
     return {
       reachable: true,
       daemons,
-      deviceSerials: new Set(daemons.map(d => d.deviceSerial).filter(Boolean) as string[]),
+      deviceSerials: new Set(workerSerials),
       owned: Array.isArray(data.owned) ? data.owned.filter((a) => typeof a === 'string') : daemons.map((d) => d.address),
+      heldDevices: Array.isArray(data.devices) ? data.devices.filter((s) => typeof s === 'string') : workerSerials,
     };
   } catch (err) {
     log(`UI server discovery failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -1598,12 +1764,16 @@ async function setDeviceAndAgent(
 ): Promise<string | undefined> {
   let serial: string | undefined;
 
-  if (config?.device) {
-    serial = config.device;
+  const pinned = config ? primaryDevicePin(config) : undefined;
+  assertNotHeldByUi(pinned, uiHeldDevices());
+  if (pinned) {
+    serial = pinned;
   } else {
     const { devices } = await client.listDevices();
-    const best = devices.find(d => d.state === 'Active' || d.state === 'online')
-      ?? devices.find(d => d.state === 'Discovered');
+    const held = uiHeldDevices();
+    const free = devices.filter((d) => !held.has(d.serial));
+    const best = free.find(d => d.state === 'Active' || d.state === 'online')
+      ?? free.find(d => d.state === 'Discovered');
     serial = best?.serial;
   }
 
