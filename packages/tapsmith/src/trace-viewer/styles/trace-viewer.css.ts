@@ -957,6 +957,10 @@ html, body, #app {
 .log-source { font-size: 10px; color: var(--fg-muted); min-width: 46px; }
 /* A device pill on a console row hugs its first line rather than stretching with a wrapped message. */
 .log-device { align-self: flex-start; flex-shrink: 0; margin: 2px 0 0; line-height: 1.4; }
+/* Multi-device only: the column the pill sits in, sized so Message lines up under its heading. */
+.log-device-cell { display: flex; min-width: 64px; flex-shrink: 0; }
+.log-device-cell .action-device-tag { margin-left: 0; }
+.log-device-none { color: var(--fg-muted); }
 .log-message { word-break: break-all; }
 
 .con-container { display: flex; flex-direction: column; height: 100%; min-height: 0; }
@@ -977,6 +981,7 @@ html, body, #app {
 .con-th.log-time { min-width: 84px; flex-shrink: 0; }
 .con-th.log-level { min-width: 40px; }
 .con-th.log-source { min-width: 46px; }
+.con-th.log-device-col { min-width: 64px; flex-shrink: 0; }
 .con-th:hover, .con-th.active { color: var(--fg); }
 .con-th.log-message { flex: 1; }
 .con-sort-indicator { margin-left: 4px; font-size: 9px; }

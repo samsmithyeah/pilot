@@ -377,15 +377,20 @@ function LogTab({ event }: { event: ActionTraceEvent | AssertionTraceEvent | und
 /** `all`, a source, or — in a multi-device trace — a device name. */
 type SourceFilter = string
 type ConsoleTimeMode = 'relative' | 'absolute'
-type ConsoleSortColumn = 'time' | 'level' | 'source' | 'message'
+type ConsoleSortColumn = 'time' | 'level' | 'source' | 'device' | 'message'
 type ConsoleSortDirection = 'asc' | 'desc'
 
-const CONSOLE_COLUMNS: Array<{ key: ConsoleSortColumn; label: string; class: string }> = [
+interface ConsoleColumn { key: ConsoleSortColumn; label: string; class: string }
+
+const CONSOLE_COLUMNS: ConsoleColumn[] = [
   { key: 'time', label: 'Time', class: 'log-time' },
   { key: 'level', label: 'Level', class: 'log-level' },
   { key: 'source', label: 'Source', class: 'log-source' },
   { key: 'message', label: 'Message', class: 'log-message' },
 ];
+
+/** Only present on a multi-device trace, where the rows carry a device pill. */
+const CONSOLE_DEVICE_COLUMN: ConsoleColumn = { key: 'device', label: 'Device', class: 'log-device-col' };
 
 const LEVEL_ORDER: ConsoleLevel[] = ['error', 'warn', 'info', 'log', 'debug'];
 
@@ -445,6 +450,21 @@ function ConsoleTab({ event, events: consoleEvents, metadata, deviceNames = [] }
     return deviceNames.filter((n) => present.has(n));
   }, [consoleEvents, deviceNames]);
   const showSourceFilter = presentSources.size > 1 || presentDevices.length > 1;
+  const showDevices = deviceNames.length > 1;
+  const columns = useMemo(() => {
+    if (!showDevices) return CONSOLE_COLUMNS;
+    const at = CONSOLE_COLUMNS.findIndex(c => c.key === 'message');
+    return [...CONSOLE_COLUMNS.slice(0, at), CONSOLE_DEVICE_COLUMN, ...CONSOLE_COLUMNS.slice(at)];
+  }, [showDevices]);
+
+  // Sorting by a column that just disappeared (a live UI-mode session dropping
+  // back to one device) would leave the list ordered by an invisible key.
+  useEffect(() => {
+    if (!showDevices && sortColumn === 'device') {
+      setSortColumn('time');
+      setSortDirection('asc');
+    }
+  }, [showDevices, sortColumn]);
 
   // If the active source filter is no longer present (e.g. switching to an
   // event with no daemon logs), reset to 'all' so the tab isn't confusingly empty.
@@ -475,6 +495,7 @@ function ConsoleTab({ event, events: consoleEvents, metadata, deviceNames = [] }
         // Severity order, not alphabetical: error < warn < info < log < debug.
         case 'level': cmp = LEVEL_ORDER.indexOf(a.level) - LEVEL_ORDER.indexOf(b.level); break;
         case 'source': cmp = a.source.localeCompare(b.source); break;
+        case 'device': cmp = (a.deviceId ?? '').localeCompare(b.deviceId ?? ''); break;
         case 'message': cmp = a.message.localeCompare(b.message); break;
       }
       return sortDirection === 'asc' ? cmp : -cmp;
@@ -571,7 +592,7 @@ function ConsoleTab({ event, events: consoleEvents, metadata, deviceNames = [] }
         )}
       </div>
       <div class="log-entry con-header" role="group" aria-label="Sort console output">
-        {CONSOLE_COLUMNS.map(col => (
+        {columns.map(col => (
           <button
             key={col.key}
             class={`con-th ${col.class}${sortColumn === col.key ? ' active' : ''}`}
@@ -596,10 +617,16 @@ function ConsoleTab({ event, events: consoleEvents, metadata, deviceNames = [] }
               >{timeMode === 'relative' ? formatConsoleOffset(ev.timestamp - timeBase) : formatConsoleWallClock(ev.timestamp)}</span>
               <span class={`log-level ${ev.level}`}>{ev.level}</span>
               <span class="log-source">{ev.source}</span>
-              {deviceNames.length > 1 && ev.deviceId && (
-                <span class="action-device-tag log-device" data-testid="log-device" style={deviceTagStyle({ devices: metadata.devices ?? [] }, ev.deviceId)}>{ev.deviceId}</span>
+              {showDevices && (
+                // The cell renders even for an untagged line (test output), so
+                // the Message column stays under its heading on every row.
+                <span class="log-device-cell">
+                  {ev.deviceId
+                    ? <span class="action-device-tag log-device" data-testid="log-device" style={deviceTagStyle({ devices: metadata.devices ?? [] }, ev.deviceId)}>{ev.deviceId}</span>
+                    : <span class="log-device-none">—</span>}
+                </span>
               )}
-              <span class="log-message">{ev.message}</span>
+              <span class="log-message" data-testid="log-message">{ev.message}</span>
             </div>
           ))
         }

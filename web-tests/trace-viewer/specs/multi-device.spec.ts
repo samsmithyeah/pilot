@@ -285,6 +285,38 @@ test.describe("Multi-device trace", () => {
       expect(await hue(1)).toBe(await hue(2))
     })
 
+    test("the console device pills get their own column heading", async ({ viewer, actions, detailTabs }) => {
+      await viewer.open({
+        ...PAIR,
+        events: [
+          ...PAIR.events,
+          // A line the test itself logged: no device, so the column is empty on
+          // this row and the Message column must not slide back under Device.
+          consoleEvent({ actionIndex: 0, level: "log", message: "from the test", source: "test", offsetMs: 50 }),
+        ],
+      })
+      await actions.items.nth(0).click()
+      await detailTabs.select("Console")
+      // Without an entry of its own, "Message" sat over the device pills.
+      await expect(detailTabs.consoleColumnHeaders).toHaveText([/Time/, /Level/, /Source/, /Device/, /Message/])
+      const heading = await detailTabs.consoleColumnHeader("Device").boundingBox()
+      const pill = await detailTabs.consoleEntries.getByTestId("log-device").first().boundingBox()
+      expect(Math.abs(heading!.x - pill!.x)).toBeLessThanOrEqual(1)
+      // Every Message cell starts on the same column, pill or no pill.
+      const messageXs = await detailTabs.consoleMessages.evaluateAll(
+        (els) => els.map((el) => Math.round(el.getBoundingClientRect().x)),
+      )
+      expect(messageXs).toHaveLength(4)
+      expect(new Set(messageXs).size).toBe(1)
+      expect(messageXs[0]).toBeGreaterThan(Math.round(heading!.x))
+
+      // And it sorts: the untagged line lands first ascending, last descending.
+      await detailTabs.consoleColumnHeader("Device").click()
+      await expect(detailTabs.consoleEntries.first()).toContainText("from the test")
+      await detailTabs.consoleColumnHeader("Device").click()
+      await expect(detailTabs.consoleEntries.last()).toContainText("from the test")
+    })
+
     test("the Errors tab names whose screen an action failed on", async ({ viewer, actions, detailTabs }) => {
       await viewer.open({
         ...PAIR,
@@ -327,6 +359,7 @@ test.describe("Multi-device trace", () => {
       await actions.items.nth(0).click()
       await detailTabs.select("Console")
       await expect(detailTabs.consoleDevicePill("alice")).toHaveCount(0)
+      await expect(detailTabs.consoleColumnHeaders).toHaveText([/Time/, /Level/, /Source/, /Message/])
       await detailTabs.select("Network")
       await expect(network.columnHeaders).not.toContainText(["Device"])
       await expect(network.pill("All devices")).toHaveCount(0)

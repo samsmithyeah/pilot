@@ -146,7 +146,7 @@ await expect(explorer.statusFilterCount("Fail")).toHaveText("1")    // data-test
 appeal to — bare numbers, message strings, and list rows with no role of their
 own: `node-duration`, `filter-count`, `count-passed`/`-failed`/`-skipped`,
 `tests-empty`, `run-notification`, `preflight-message`, `mirror-status`/`-hint`,
-`call-grid`, `no-content`, `log-entry`, `error-entry`, `source-line`,
+`call-grid`, `no-content`, `log-entry`, `log-message`, `error-entry`, `source-line`,
 `source-filename`, `net-detail-body`, `hierarchy-row`, `hierarchy-properties`,
 `locator-code`, `selector-match-count`, `selector-strict-warning`, `film-frame`,
 `timeline-meta`, `viewer-title`, `screenshot-empty`, `viewer-empty`, `pick-note`, `mcp-entry`,
