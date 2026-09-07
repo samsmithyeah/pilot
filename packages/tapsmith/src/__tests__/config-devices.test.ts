@@ -5,8 +5,8 @@ import {
   deviceGroupSize,
   effectiveConfigForProject,
   MAX_DEVICE_GROUP_SIZE,
+  primaryDevicePin,
   resolveDeviceGroup,
-
   validateDevicesOption,
   type TapsmithConfig,
 } from '../config.js';
@@ -103,6 +103,29 @@ describe('resolveDeviceGroup / deviceGroupSize', () => {
     // An explicit pin on the first member wins over `config.device`.
     expect(resolveDeviceGroup(makeConfig({ device: 'emulator-5554', devices: [{ name: 'alice', device: 'X' }] }))[0])
       .toEqual({ name: 'alice', device: 'X' });
+  });
+});
+
+// The primary is the group's first member. Two embedders (the sequential CLI
+// and the headless MCP server) read its pin from `config.device` and so
+// honoured `bob`'s pin while auto-picking `alice`'s — the exact shape
+// docs/multi-device.md documents. Every embedder reads the pin from here now.
+describe('primaryDevicePin', () => {
+  it('is the first member\'s own pin when the root leaves `device` unset', () => {
+    const config = makeConfig({ devices: [{ name: 'alice', device: 'emulator-5558' }, { name: 'bob', device: 'emulator-5560' }] });
+    expect(primaryDevicePin(config)).toBe('emulator-5558');
+  });
+
+  it('falls back to root `device` for an unpinned first member, and to nothing at all', () => {
+    expect(primaryDevicePin(makeConfig({ device: 'emulator-5554', devices: [{ name: 'alice' }, { name: 'bob', device: 'X' }] })))
+      .toBe('emulator-5554');
+    expect(primaryDevicePin(makeConfig({ device: 'emulator-5554' }))).toBe('emulator-5554');
+    expect(primaryDevicePin(makeConfig({ devices: 2 }))).toBeUndefined();
+    expect(primaryDevicePin(makeConfig())).toBeUndefined();
+  });
+
+  it('lets the first member\'s pin win over root `device`', () => {
+    expect(primaryDevicePin(makeConfig({ device: 'emulator-5554', devices: [{ name: 'alice', device: 'X' }] }))).toBe('X');
   });
 });
 

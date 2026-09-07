@@ -579,6 +579,20 @@ export function resolveDeviceGroup(
 }
 
 /**
+ * The serial the primary device is pinned to, if any.
+ *
+ * The primary is the group's first member, so its pin is that entry's
+ * `device` — with root `device` (and `--device`) as the fallback that
+ * {@link resolveDeviceGroup} already folds in. Every embedder that picks the
+ * primary must read it from here rather than from `config.device`: the two
+ * that read `config.device` directly honoured `bob`'s pin and silently
+ * auto-picked `alice`'s, the exact shape `docs/multi-device.md` documents.
+ */
+export function primaryDevicePin(config: Pick<TapsmithConfig, 'devices' | 'device'>): string | undefined {
+  return resolveDeviceGroup(config)[0]?.device;
+}
+
+/**
  * The member names of a `use.devices` project (`['alice', 'bob']`), or
  * `undefined` for a single-device project. What MCP consumers see beside a
  * project so they know its tests need a group and which names the device

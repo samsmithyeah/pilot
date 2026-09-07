@@ -11,7 +11,7 @@
 
 import * as path from 'node:path';
 import * as fs from 'node:fs';
-import { loadConfig, configPathOf, normalizeGrep, resolveDeviceStrategy, resolveDeviceGroup, deviceGroupSize, assignGroupMemberDevices, EXPLICIT_WORKERS, isExplicitWorkers, type DeviceGroupEntry, type TapsmithConfig } from './config.js';
+import { loadConfig, configPathOf, normalizeGrep, resolveDeviceStrategy, resolveDeviceGroup, primaryDevicePin, deviceGroupSize, assignGroupMemberDevices, EXPLICIT_WORKERS, isExplicitWorkers, type DeviceGroupEntry, type TapsmithConfig } from './config.js';
 import figlet from 'figlet';
 import { TapsmithGrpcClient } from './grpc-client.js';
 import { Device } from './device.js';
@@ -1004,12 +1004,15 @@ async function ensureSequentialTargetDevice(
   config: Awaited<ReturnType<typeof loadConfig>>,
   progress?: LaunchProgressSink,
 ): Promise<{ selectedSerial?: string; launched: LaunchedEmulator[] }> {
-  if (config.device) {
+  // The first `use.devices` member's pin, or root `device` — not `config.device`
+  // alone, which left a group pinning both members with its primary auto-picked.
+  const pinned = primaryDevicePin(config);
+  if (pinned) {
     // If the device is an iOS simulator that's already booted, log reuse
     if (config.platform === 'ios') {
       const { listBootedSimulators } = await import('./ios-simulator.js');
       const booted = listBootedSimulators();
-      const sim = booted.find((s) => s.udid === config.device);
+      const sim = booted.find((s) => s.udid === pinned);
       if (sim) {
         // "Already booted" and nothing more — the boot may have come from a
         // previous tapsmith run OR from something else entirely (e.g. a CI
@@ -1019,7 +1022,7 @@ async function ensureSequentialTargetDevice(
         else process.stderr.write(`${DIM}${message}${RESET}\n`);
       }
     }
-    return { selectedSerial: config.device, launched: [] };
+    return { selectedSerial: pinned, launched: [] };
   }
 
   // ─── iOS: use simulator instead of ADB device ───

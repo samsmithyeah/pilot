@@ -4458,8 +4458,13 @@ function wireStatus(status: TestResultEntry['status']): TestNodeStatus {
         ...daemons.map((d) => d.address),
         ctx.daemonAddress ?? ctx.config.daemonAddress,
       ].filter(Boolean);
+      // Every device this session provisioned, not just those with a live
+      // worker: the primary before its worker spawns, and each group member.
+      // A headless MCP server refusing our daemons but then starting its own
+      // agent on these devices took them over just the same.
+      const devices = [...new Set([...workerGroups.flat(), ...daemons.map((d) => d.deviceSerial)].filter(Boolean))];
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ daemons, owned }));
+      res.end(JSON.stringify({ daemons, owned, devices }));
       return;
     }
 
