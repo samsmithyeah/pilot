@@ -856,14 +856,14 @@ export class Device {
    * as a visible warning so users aren't left wondering why their trace
    * has no network entries.
    */
-  async _startNetworkCapture(): Promise<{
+  async _startNetworkCapture(options?: { requireIsolation?: boolean }): Promise<{
     proxyPort: number
     success: boolean
     errorMessage: string
   }> {
     let res: Awaited<ReturnType<TapsmithGrpcClient['startNetworkCapture']>>;
     try {
-      res = await this._client.startNetworkCapture();
+      res = await this._client.startNetworkCapture(options);
     } catch (err) {
       this._networkCaptureActive = false;
       this._networkCaptureError = err instanceof Error ? err.message : String(err);

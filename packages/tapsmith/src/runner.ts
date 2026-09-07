@@ -1471,6 +1471,10 @@ async function runSuiteContext(
       // Trace recording — start if configured
       const recording = shouldRecord(traceConfig.mode, attempt);
       let traceCollector: TraceCollector | null = null;
+      // Devices whose network capture the daemon confirmed. Only these are
+      // drained: stopping a capture that never started would print a
+      // "not running" warning on every test for the device that failed.
+      const networkCapturingDevices = new Set<Device>();
 
       if (recording && primary) {
         const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tapsmith-trace-'));
@@ -1497,22 +1501,39 @@ async function runSuiteContext(
         // users whose trace has no network entries know exactly why and
         // exactly what to do.
         // Every device of the group captures on its own daemon's proxy.
+        //
+        // Started one device at a time, deliberately. On iOS simulators each
+        // daemon launches the mitmproxy redirector, and the stock launcher
+        // reuses any "mitmproxy" Network Extension manager that is not yet
+        // `connected` — two launchers inside that ~150ms window overwrite each
+        // other's socket path, the second start is skipped, and that daemon
+        // silently ends up on the host-wide system-proxy fallback. Waiting for
+        // each start to return (the daemon only returns once the extension has
+        // connected back) keeps the launches out of each other's window.
+        //
+        // A group also requires per-device isolation: entries are stamped with
+        // the capturing device's name, and the system-proxy fallback records
+        // the whole Mac, so the daemon refuses it instead of mislabelling.
         if (traceConfig.network) {
-          await Promise.all(devices.map(async (d) => {
+          const multiDevice = devices.length > 1;
+          const forDevice = (d: Device, msg: string): string =>
+            multiDevice && d._traceDeviceId ? `[${d._traceDeviceId}] ${msg}` : msg;
+          for (const d of devices) {
             try {
-              const res = await d._startNetworkCapture();
+              const res = await d._startNetworkCapture({ requireIsolation: multiDevice });
+              if (res.success) networkCapturingDevices.add(d);
               if (!res.success && res.errorMessage) {
-                _warnCaptureOnce('Network capture disabled', res.errorMessage);
+                _warnCaptureOnce('Network capture disabled', forDevice(d, res.errorMessage));
               } else if (res.errorMessage) {
-                _warnCaptureOnce('Network capture warning', res.errorMessage);
+                _warnCaptureOnce('Network capture warning', forDevice(d, res.errorMessage));
               }
             } catch (err) {
               _warnCaptureOnce(
                 'Network capture failed to start',
-                err instanceof Error ? err.message : String(err),
+                forDevice(d, err instanceof Error ? err.message : String(err)),
               );
             }
-          }));
+          }
         }
 
         // Start device log streaming if configured
@@ -1939,7 +1960,7 @@ async function runSuiteContext(
         const rawNetworkByDevice: Array<{ deviceId?: string; entries: RawEntries }> = [];
         if (traceConfig.network) {
           const { filterEntriesByHosts } = await import('./trace/filter-hosts.js');
-          for (const d of devices) {
+          for (const d of networkCapturingDevices) {
             try {
               const res = await d._stopNetworkCapture({ keepRunning: true });
               if (res.success) {
@@ -2025,11 +2046,19 @@ async function runSuiteContext(
           const actionTimestamps = collector.events
             .filter((e): e is import('./trace/types.js').ActionTraceEvent | import('./trace/types.js').AssertionTraceEvent =>
               e.type === 'action' || e.type === 'assertion')
-            .map((e) => ({ timestamp: e.timestamp, actionIndex: e.actionIndex }));
+            .map((e) => ({ timestamp: e.timestamp, actionIndex: e.actionIndex, deviceId: e.deviceId }));
 
-          const findActionIndex = (startTimeMs: number): number => {
+          // A request is anchored to the latest step that started before it
+          // — on the device that made it. Group members interleave in the
+          // shared index space, so a global walk would hang bob's request off
+          // alice's step whenever hers was the more recent one. A device with
+          // no steps of its own (or an unlabelled entry) falls back to the
+          // whole list.
+          const findActionIndex = (startTimeMs: number, deviceId: string | undefined): number => {
+            const own = deviceId ? actionTimestamps.filter((a) => a.deviceId === deviceId) : [];
+            const candidates = own.length > 0 ? own : actionTimestamps;
             let best = 0;
-            for (const a of actionTimestamps) {
+            for (const a of candidates) {
               if (a.timestamp <= startTimeMs) {
                 best = a.actionIndex;
               }
@@ -2043,7 +2072,7 @@ async function runSuiteContext(
             return {
               index: i,
               ...(deviceId ? { deviceId } : {}),
-              actionIndex: findActionIndex(e.startTimeMs),
+              actionIndex: findActionIndex(e.startTimeMs, deviceId),
               startTime: e.startTimeMs,
               endTime: e.startTimeMs + e.durationMs,
               method: e.method,

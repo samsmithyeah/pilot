@@ -5647,6 +5647,35 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                                      falling back to macOS system proxy"
                                 );
                             }
+                            // The system-proxy fallback is host-wide: it records
+                            // every process on the Mac (browsers, trustd, other
+                            // simulators) and nothing in the captured entries
+                            // says which. A caller that needs per-device
+                            // attribution — the runner, for a multi-device group
+                            // — asks for isolation and gets a clear refusal
+                            // rather than someone else's traffic under this
+                            // device's name. Note the most common local cause:
+                            // two daemons launching the redirector at once share
+                            // one NETransparentProxyManager, and the loser's
+                            // control channel never connects.
+                            if req.require_isolation {
+                                let msg = format!(
+                                    "iOS network capture unavailable for this device: the \
+                                     Network Extension redirector failed ({e}) and the \
+                                     macOS system-proxy fallback is not device-isolated, so \
+                                     it is refused for multi-device runs. If another \
+                                     Tapsmith daemon is capturing on this Mac, the \
+                                     redirector session may already be owned by it; see \
+                                     docs/ios-network-capture.md#multi-device-groups"
+                                );
+                                warn!("{msg}");
+                                return Ok(Response::new(proto::StartNetworkCaptureResponse {
+                                    request_id,
+                                    success: false,
+                                    proxy_port: 0,
+                                    error_message: msg,
+                                }));
+                            }
                             match ios::system_proxy::set_system_proxy(host_port).await {
                                 Ok(service) => {
                                     *self.ios_system_proxy_service.write().await = Some(service);

@@ -88,7 +88,6 @@ export function pickResolvedDeviceName(
 
 /**
  * An unknown `device` is answered with the group names the session accepts,
-
  * not just its serials. The pool lists what it can see — serials — but a
  * caller who wrote `alice` and got `Available devices: emulator-5554, …`
  * could not tell that `alice` was a typo rather than the wrong kind of name.

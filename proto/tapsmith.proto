@@ -796,6 +796,13 @@ message DaemonLogEntry {
 
 message StartNetworkCaptureRequest {
   string request_id = 1;
+  // When true, the daemon only starts capture on a route that attributes
+  // traffic to this device alone (iOS simulator: the per-PID Network
+  // Extension redirector). It refuses the host-wide macOS system-proxy
+  // fallback and returns success=false instead, because that fallback records
+  // every process on the Mac. Set by the runner for multi-device groups, where
+  // entries are labelled with the capturing device's name.
+  bool require_isolation = 2;
 }
 
 message StartNetworkCaptureResponse {

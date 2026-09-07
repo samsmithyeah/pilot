@@ -839,6 +839,105 @@ describe('runner execution', () => {
     }
   });
 
+  it('starts group network capture one device at a time, requiring isolation, and drains only what started', async () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'tapsmith-runner-network-group-'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const order: string[] = [];
+    const makeMember = (name: string, start: () => Promise<{ success: boolean; proxyPort: number; errorMessage: string }>) => ({
+      _traceDeviceId: name,
+      tracing: new Tracing(async () => undefined, async () => undefined),
+      waitForIdle: vi.fn(async () => {}),
+      _startNetworkCapture: vi.fn(start),
+      _stopNetworkCapture: vi.fn(async () => ({ success: true, entries: [], errorMessage: '' })),
+      _stopDeviceLogStream: vi.fn(),
+      _startDaemonLogStream: vi.fn(),
+      _stopDaemonLogStream: vi.fn(),
+      _disposeRouteManager: vi.fn(async () => {}),
+      _disposeWebViewManager: vi.fn(async () => {}),
+      _resetWebViewContext: vi.fn(),
+    });
+    // alice's daemon takes a while to bring the redirector up; bob's refuses
+    // the host-wide fallback (what the daemon does when isolation is required
+    // and the Network Extension is unavailable).
+    const alice = makeMember('alice', async () => {
+      order.push('alice:start');
+      await new Promise((r) => setTimeout(r, 20));
+      order.push('alice:done');
+      return { success: true, proxyPort: 1111, errorMessage: '' };
+    });
+    const bob = makeMember('bob', async () => {
+      order.push('bob:start');
+      return { success: false, proxyPort: 0, errorMessage: 'system-proxy fallback refused' };
+    });
+
+    try {
+      pushContext();
+      tapsmithTest('traced group test', async () => {});
+      const ctx = popContext();
+
+      const result = await runSuiteContext(ctx, '', [], [], makeOpts({
+        config: makeConfig({
+          rootDir: tempRoot,
+          outputDir: 'out',
+          trace: { mode: 'on', network: true, screenshots: false, snapshots: false, sources: false, deviceLogs: false },
+        }),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- focused runner lifecycle mocks
+        devices: [{ name: 'alice', device: alice as any }, { name: 'bob', device: bob as any }],
+      }));
+
+      expect(result.tests.map((t) => t.status)).toEqual(['passed']);
+      // Sequential: bob's launcher must not race alice's redirector start.
+      expect(order).toEqual(['alice:start', 'alice:done', 'bob:start']);
+      // A group needs per-device attribution, so both ask the daemon for it.
+      expect(alice._startNetworkCapture).toHaveBeenCalledWith({ requireIsolation: true });
+      expect(bob._startNetworkCapture).toHaveBeenCalledWith({ requireIsolation: true });
+      // Only the capture that started is drained.
+      expect(alice._stopNetworkCapture).toHaveBeenCalledWith({ keepRunning: true });
+      expect(bob._stopNetworkCapture).not.toHaveBeenCalled();
+      // The refusal names the device, so the once-per-run dedup cannot hide
+      // one member's failure behind another's identical message.
+      const disabled = warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes('Network capture disabled'));
+      expect(disabled).toEqual(['[tapsmith] Network capture disabled: [bob] system-proxy fallback refused']);
+    } finally {
+      warn.mockRestore();
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('starts single-device network capture without requiring isolation', async () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'tapsmith-runner-network-single-'));
+    const mockDevice = {
+      tracing: new Tracing(async () => undefined, async () => undefined),
+      waitForIdle: vi.fn(async () => {}),
+      _startNetworkCapture: vi.fn(async () => ({ success: true, proxyPort: 12345, errorMessage: '' })),
+      _stopNetworkCapture: vi.fn(async () => ({ success: true, entries: [], errorMessage: '' })),
+      _stopDeviceLogStream: vi.fn(),
+      _startDaemonLogStream: vi.fn(),
+      _stopDaemonLogStream: vi.fn(),
+      _disposeRouteManager: vi.fn(async () => {}),
+      _disposeWebViewManager: vi.fn(async () => {}),
+      _resetWebViewContext: vi.fn(),
+    };
+    try {
+      pushContext();
+      tapsmithTest('traced test', async () => {});
+      const ctx = popContext();
+      await runSuiteContext(ctx, '', [], [], makeOpts({
+        config: makeConfig({
+          rootDir: tempRoot,
+          outputDir: 'out',
+          trace: { mode: 'on', network: true, screenshots: false, snapshots: false, sources: false, deviceLogs: false },
+        }),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- focused runner lifecycle mock
+        devices: [{ name: 'device-1', device: mockDevice as any }],
+      }));
+      // A lone device keeps the CI-friendly system-proxy fallback available.
+      expect(mockDevice._startNetworkCapture).toHaveBeenCalledWith({ requireIsolation: false });
+    } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   it('drains network capture between traced tests without hard teardown', async () => {
     const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'tapsmith-runner-network-'));
     const tracing = new Tracing(async () => undefined, async () => undefined);

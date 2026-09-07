@@ -144,7 +144,12 @@ story, and it needs to live in one file.
   reads as two rows on one timeline. Every action row carries a device badge,
   and the Metadata tab lists every device.
 - The Console and Network tabs offer a **filter pill per device**; network rows
-  show which device's proxy captured them. The Hierarchy tab defaults to the
+  show which device's proxy captured them and anchor to that device's own
+  steps. Capture runs on every member's daemon and requires a per-device route:
+  on iOS simulators that is the Network Extension redirector, and a member that
+  can only use the host-wide macOS system-proxy fallback has its capture
+  disabled with a warning naming it (see
+  [Multi-device groups](ios-network-capture.md#multi-device-groups)). The Hierarchy tab defaults to the
   acting device's tree and has a toggle to view the other device's tree at the
   frame its pane displays. Device and daemon log lines keep the timestamp the
   daemon recorded, so lines from two devices interleave in true order.
@@ -162,10 +167,8 @@ Device groups work in every run mode. Each mode holds one group per worker:
 | --- | --- |
 | `tapsmith test` (sequential) | The primary is set up as usual; the other members get their own daemons on free ports before the first file runs. Switching to a project with a different group tears the previous one down. |
 | `tapsmith test --workers N` | Each worker receives `groupSize` device slots, so the run needs `N × groupSize` devices; the dispatcher provisions that many and hands each worker its chunk. A group project's own `workers` should be kept low. |
-
 | `--ui` and `--watch` | Worker 0 adopts the CLI's group; further workers get their own. The device pane has one tab per member (labelled `<worker> · <name>`), the **All** view tiles every member, and pick mode and mirror gestures target the member whose tab is open. |
 | `tapsmith mcp-server` | A group project resolves its own set of daemons; `tapsmith_run_tests` runs against all of them. Device tools accept a member's **name** (`device: "bob"`) in place of a serial, and `tapsmith_session_info` lists each member. Names are unique per group, not per session: when two projects' groups both have a `bob`, pass `project` as well, or the tool refuses rather than guess. |
-
 
 ## Limits
 

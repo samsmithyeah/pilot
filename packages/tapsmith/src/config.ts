@@ -507,8 +507,6 @@ export const MAX_DEVICE_GROUP_SIZE = 10;
  * config loading and project `use` (via `effectiveConfigForProject`).
  */
 export function validateDevicesOption(
-
-
   options: Pick<Partial<TapsmithConfig>, 'devices'>,
   source = 'config',
 ): void {
@@ -580,7 +578,6 @@ export function resolveDeviceGroup(
   return entries;
 }
 
-/** Number of devices every test of this config drives (1 without `devices`). */
 /**
  * The member names of a `use.devices` project (`['alice', 'bob']`), or
  * `undefined` for a single-device project. What MCP consumers see beside a
@@ -592,6 +589,7 @@ export function deviceGroupNames(config: Pick<TapsmithConfig, 'devices' | 'devic
   return resolveDeviceGroup(config).map((d) => d.name);
 }
 
+/** Number of devices every test of this config drives (1 without `devices`). */
 export function deviceGroupSize(config: Pick<TapsmithConfig, 'devices'>): number {
   const devices = config.devices;
   if (devices === undefined) return 1;
