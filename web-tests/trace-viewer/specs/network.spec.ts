@@ -479,3 +479,38 @@ for (const enabled of [true, false]) {
     await expect(page.getByText("Enable network capture in your trace config to record HTTP requests.")).toHaveCount(enabled ? 0 : 1)
   })
 }
+
+for (const inFlight of [true, false]) {
+  test(`distinguishes an inherited request's lifetime from this test (${inFlight ? 'open' : 'completed'})`, async ({ viewer, detailTabs, network, page }) => {
+    const start = 1_700_000_000_000
+    const observedStartTime = start + 42 * 60_000
+    const inherited = {
+      ...networkEntry({ index: 0, url: 'http://test/Listen', contentType: 'text/plain' }),
+      startTime: start, observedStartTime, endTime: observedStartTime + 10_000,
+      duration: 42 * 60_000 + 10_000, inFlight,
+    }
+    const fresh = {
+      ...networkEntry({ index: 1, url: 'http://test/fresh', duration: 20_000 }),
+      startTime: observedStartTime + 2000, endTime: observedStartTime + 22_000,
+    }
+    await viewer.open({ network: [inherited, fresh] })
+    await detailTabs.select('Network')
+    await expect(network.row('Listen')).toContainText('Started before this test')
+    await expect(network.row('Listen')).toContainText('10.00 s')
+    await expect(network.row('Listen').getByText('Started before this test', { exact: true })).toBeInViewport()
+    await expect(network.row('fresh')).not.toContainText('Started before this test')
+    await network.columnHeaders.filter({ hasText: /^Time/ }).click()
+    await expect(network.rows.first()).toContainText('fresh')
+    const inheritedBar = await network.row('Listen').locator('.net-waterfall-bar').boundingBox()
+    const freshBar = await network.row('fresh').locator('.net-waterfall-bar').boundingBox()
+    expect(inheritedBar!.width).toBeLessThan(freshBar!.width)
+    await network.selectRow('Listen')
+    await network.openDetailTab('Timing')
+    await expect(network.detailBody).toContainText('Observed during this test')
+    await expect(network.detailBody).toContainText(inFlight ? 'Stream age' : 'Total request duration')
+    await expect(network.detailBody).toContainText('42 min 10 s')
+    await expect(network.detailBody).toContainText(new Date(start).toISOString())
+    await expect(network.detailBody).toContainText('bodies and byte counts are cumulative')
+    await expect(page.getByText('Started before this test', { exact: true })).toBeInViewport()
+  })
+}

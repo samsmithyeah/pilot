@@ -51,6 +51,8 @@ const NETWORK_STYLES = `
 
   .net-name-cell { display: flex; align-items: center; min-width: 0; }
   .net-name { flex-shrink: 0; max-width: 50%; overflow: hidden; text-overflow: ellipsis; font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace; color: var(--color-text-secondary); }
+  .net-inherited-label { color: var(--color-text-muted); font-size: 10px; white-space: normal; }
+  .net-name-origin { padding-left: 14px; margin-top: 2px; }
   .net-domain { color: var(--color-text-faintest); margin-left: 6px; font-size: 10px; flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
   .net-method { font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace; font-size: 10px; font-weight: 700; color: var(--color-text-muted); }
@@ -262,7 +264,25 @@ function formatDuration(ms: number): string {
   return `${(ms / 1000).toFixed(2)} s`;
 }
 
+function startedBeforeTest(entry: NetworkEntry): boolean {
+  return entry.observedStartTime !== undefined && entry.observedStartTime > entry.startTime;
+}
+
+function observedStart(entry: NetworkEntry): number {
+  return Math.max(entry.startTime, entry.observedStartTime ?? entry.startTime);
+}
+
+function observedDuration(entry: NetworkEntry): number {
+  return startedBeforeTest(entry) ? Math.max(0, entry.endTime - observedStart(entry)) : entry.duration;
+}
+
+function streamAge(entry: NetworkEntry): string {
+  if (entry.duration < 60_000) return formatDuration(entry.duration);
+  return `${Math.floor(entry.duration / 60_000)} min ${Math.floor(entry.duration % 60_000 / 1000)} s`;
+}
+
 function entryDuration(entry: NetworkEntry): string {
+  if (startedBeforeTest(entry)) return `${formatDuration(observedDuration(entry))} this test`;
   return formatDuration(entry.duration) + (entry.inFlight ? ' so far' : '');
 }
 
@@ -322,7 +342,7 @@ export function NetworkTab({ entries, bodies, deviceNames, networkCaptureEnabled
     let min = Infinity;
     let max = -Infinity;
     for (const e of entries) {
-      if (e.startTime < min) min = e.startTime;
+      if (observedStart(e) < min) min = observedStart(e);
       if (e.endTime > max) max = e.endTime;
     }
     return { min, max: max > min ? max : min + 1 };
@@ -362,8 +382,8 @@ export function NetworkTab({ entries, bodies, deviceNames, networkCaptureEnabled
         // so sort by duration — sorting by startTime would silently reorder
         // rows without matching the values the user sees. Chronological
         // ordering lives on the Waterfall column instead.
-        case 'time': cmp = a.duration - b.duration; break;
-        case 'waterfall': cmp = a.startTime - b.startTime; break;
+        case 'time': cmp = observedDuration(a) - observedDuration(b); break;
+        case 'waterfall': cmp = observedStart(a) - observedStart(b); break;
       }
       return sortDirection === 'asc' ? cmp : -cmp;
     });
@@ -567,6 +587,7 @@ export function NetworkTab({ entries, bodies, deviceNames, networkCaptureEnabled
                         {!selected && domain && <span class="net-domain" title={domain}>{domain}</span>}
                         {routeBadge(entry.routeAction)}
                       </div>
+                      {startedBeforeTest(entry) && <div class="net-inherited-label net-name-origin">Started before this test</div>}
                     </td>
                     {showDevices && (
                       <td class="net-device" data-testid="net-device">
@@ -581,7 +602,9 @@ export function NetworkTab({ entries, bodies, deviceNames, networkCaptureEnabled
                     </td>
                     {!selected && <td class="net-type">{shortenContentType(entry.contentType) || '—'}</td>}
                     {!selected && <td class="net-size">{formatSize(entry.responseSize)}</td>}
-                    <td class="net-duration">{entryDuration(entry)}</td>
+                    <td class="net-duration" title={startedBeforeTest(entry) ? `${entry.inFlight ? 'Stream age' : 'Total request duration'}: ${streamAge(entry)}` : undefined}>
+                      {startedBeforeTest(entry) ? <>{formatDuration(observedDuration(entry))}<div class="net-inherited-label">this test</div></> : entryDuration(entry)}
+                    </td>
                     {!selected && (
                       <td class="net-waterfall-cell">
                         <Waterfall entry={entry} extent={timeExtent} />
@@ -613,8 +636,8 @@ export function NetworkTab({ entries, bodies, deviceNames, networkCaptureEnabled
 
 function Waterfall({ entry, extent }: { entry: NetworkEntry; extent: { min: number; max: number } }) {
   const span = extent.max - extent.min;
-  const left = ((entry.startTime - extent.min) / span) * 100;
-  const width = Math.max(((entry.endTime - entry.startTime) / span) * 100, 0.5);
+  const left = ((observedStart(entry) - extent.min) / span) * 100;
+  const width = Math.max((Math.max(0, entry.endTime - observedStart(entry)) / span) * 100, 0.5);
   const cls = entry.routeAction === 'mocked' ? 'mocked'
     : entry.routeAction === 'aborted' ? 'saborted'
     : entry.status >= 500 ? 's5xx'
@@ -666,6 +689,9 @@ function DetailPanel({ entry, bodies, tab, onTab, onClose, extent }: DetailPanel
         <button class="net-detail-close" onClick={onClose} title="Close" aria-label="Close">{'\u2715'}</button>
       </div>
       <div class="net-detail-body" data-testid="net-detail-body">
+        {startedBeforeTest(entry) && <div class="net-streaming-note">
+          Started before this test. Timing shows the period observed during this test; bodies and byte counts are cumulative since the request started.
+        </div>}
         {entry.inFlight && <div class="net-streaming-note">
           Streaming — still open at capture time. This snapshot shows the headers and body bytes captured so far.
         </div>}
@@ -844,10 +870,10 @@ function looksBinary(body: Uint8Array): boolean {
 
 function TimingTab({ entry, extent }: { entry: NetworkEntry; extent: { min: number; max: number } }) {
   const total = extent.max - extent.min || 1;
-  const startedAt = entry.startTime - extent.min;
+  const startedAt = observedStart(entry) - extent.min;
   const rows = [
     { label: 'Queued', left: 0, width: (startedAt / total) * 100, value: `${formatDuration(startedAt)} waited` },
-    { label: 'Request', left: (startedAt / total) * 100, width: (entry.duration / total) * 100, value: entryDuration(entry) },
+    { label: startedBeforeTest(entry) ? 'Observed' : 'Request', left: (startedAt / total) * 100, width: (observedDuration(entry) / total) * 100, value: entryDuration(entry) },
   ];
   return (
     <>
@@ -868,12 +894,21 @@ function TimingTab({ entry, extent }: { entry: NetworkEntry; extent: { min: numb
       <div class="net-detail-section">
         <div class="net-detail-section-title">Breakdown</div>
         <div class="net-summary-grid">
-          <span class="net-summary-key">Started</span>
-          <span class="net-summary-value">{formatDuration(startedAt)} after first request</span>
-          <span class="net-summary-key">Duration</span>
-          <span class="net-summary-value">{entryDuration(entry)}</span>
+          {startedBeforeTest(entry) ? <>
+            <span class="net-summary-key">Request started</span>
+            <span class="net-summary-value">{new Date(entry.startTime).toISOString()}</span>
+            <span class="net-summary-key">{entry.inFlight ? 'Stream age' : 'Total request duration'}</span>
+            <span class="net-summary-value">{streamAge(entry)}</span>
+            <span class="net-summary-key">Observed during this test</span>
+            <span class="net-summary-value">{formatDuration(observedDuration(entry))}</span>
+          </> : <>
+            <span class="net-summary-key">Started</span>
+            <span class="net-summary-value">{formatDuration(startedAt)} after first request</span>
+            <span class="net-summary-key">Duration</span>
+            <span class="net-summary-value">{entryDuration(entry)}</span>
+          </>}
           <span class="net-summary-key">{entry.inFlight ? 'Snapshot taken' : 'Finished'}</span>
-          <span class="net-summary-value">{formatDuration(entry.endTime - extent.min)} after first request</span>
+          <span class="net-summary-value">{startedBeforeTest(entry) ? new Date(entry.endTime).toISOString() : `${formatDuration(entry.endTime - extent.min)} after first request`}</span>
         </div>
       </div>
     </>

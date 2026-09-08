@@ -2395,10 +2395,11 @@ describe('live network final drain', () => {
   for (const failure of ['rpc', 'unsuccessful', 'empty'] as const) {
     it(`preserves per-device live data on ${failure}, with an authoritative successful drain`, async () => {
       const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'tapsmith-live-final-'));
+      const oldStart = Date.now() - 42 * 60_000;
       const raw = (name: string, body = 'live') => ({
         captureId: `session:${name}`, method: 'GET', url: `http://test/${name}`, statusCode: 200,
-        contentType: 'text/plain', requestSize: 0, responseSize: body.length, startTimeMs: 1,
-        durationMs: 1, requestHeadersJson: '{}', responseHeadersJson: '{"Content-Encoding":"gzip"}',
+        contentType: 'text/plain', requestSize: 0, responseSize: body.length, startTimeMs: name === 'alice' ? oldStart : Date.now(),
+        durationMs: name === 'alice' ? Date.now() - oldStart : 1, requestHeadersJson: '{}', responseHeadersJson: '{"Content-Encoding":"gzip"}',
         requestBody: Buffer.alloc(0), responseBody: gzipSync(Buffer.from(body)), isHttps: false,
         routeAction: '', inFlight: true,
       });
@@ -2444,6 +2445,13 @@ describe('live network final drain', () => {
         const zip = unzipSync(new Uint8Array(fs.readFileSync(result.tests[0].tracePath!)));
         const archived = Buffer.from(zip['network.json']).toString().trim().split('\n').map((line) => JSON.parse(line));
         expect(archived.map((e) => e.url)).toEqual(final.map((e) => e.url));
+        const metadata = JSON.parse(Buffer.from(zip['metadata.json']).toString());
+        expect(live[0][0].observedStartTime).toBe(metadata.startTime);
+        expect(live[0][0].startTime).toBe(oldStart);
+        for (const entry of archived) {
+          expect(entry.observedStartTime).toBe(entry.url.endsWith('alice') ? metadata.startTime : undefined);
+          if (entry.url.endsWith('alice')) expect(entry.startTime).toBe(oldStart);
+        }
         for (const entry of archived) expect(Buffer.from(zip[entry.responseBodyPath]).toString()).toBe(entry.url.endsWith('alice') ? 'live' : 'final');
       } finally { fs.rmSync(tempRoot, { recursive: true, force: true }); }
     });

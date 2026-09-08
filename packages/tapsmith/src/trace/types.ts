@@ -502,6 +502,9 @@ export interface NetworkEntry {
   actionIndex: number
   /** Timestamp of request start. */
   startTime: number
+  /** Start of this test's observation when the request began before this test.
+   * Original timestamps, duration, sizes and bodies remain cumulative. */
+  observedStartTime?: number
   /** Timestamp of response end, or snapshot time when inFlight. */
   endTime: number
   /** HTTP method. */

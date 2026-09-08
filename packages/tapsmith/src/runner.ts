@@ -180,7 +180,7 @@ type RawNetworkEntries = Awaited<ReturnType<Device['_stopNetworkCapture']>>['ent
 type DeviceNetworkEntries = Array<{ deviceId?: string; entries: RawNetworkEntries }>;
 
 /** Keep row/body identities stable as streams finish or new devices report data. */
-function createNetworkMapper(): (
+function createNetworkMapper(testStartTime: number): (
   rawNetworkByDevice: DeviceNetworkEntries, events: readonly AnyTraceEvent[], apiEntries: NetworkEntry[],
 ) => Promise<NetworkEntry[]> {
   const decodedBodies = new WeakMap<Buffer, Map<string, Promise<Buffer | undefined>>>();
@@ -236,6 +236,7 @@ function createNetworkMapper(): (
         ...(deviceId ? { deviceId } : {}),
         actionIndex: findActionIndex(e.startTimeMs, deviceId),
         startTime: e.startTimeMs,
+        observedStartTime: e.startTimeMs < testStartTime ? testStartTime : undefined,
         endTime: e.startTimeMs + e.durationMs,
         method: e.method,
         url: e.url,
@@ -1704,7 +1705,7 @@ async function runSuiteContext(
         ...suiteFixtures,
         request: requestContext,
       };
-      const mapNetworkEntries = createNetworkMapper();
+      const mapNetworkEntries = createNetworkMapper(attemptStart);
       const latestByDevice = new Map<Device, NetworkSnapshots>();
       const snapshotsFor = (d: Device): NetworkSnapshots => {
         let snapshots = latestByDevice.get(d);
