@@ -895,8 +895,8 @@ export class Device {
   }
 
   /** @internal — Read live capture without ending the active capture session. */
-  async _snapshotNetworkCapture(): ReturnType<TapsmithGrpcClient['snapshotNetworkCapture']> {
-    return this._client.snapshotNetworkCapture();
+  async _snapshotNetworkCapture(knownBodies?: Parameters<TapsmithGrpcClient['snapshotNetworkCapture']>[0]): ReturnType<TapsmithGrpcClient['snapshotNetworkCapture']> {
+    return this._client.snapshotNetworkCapture(knownBodies);
   }
 
   /** @internal — Stop network capture and return entries (used by the runner). */

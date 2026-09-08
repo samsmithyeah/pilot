@@ -82,6 +82,58 @@ pub struct CapturedEntry {
     pub capture_id: u64,
 }
 
+/// Body acknowledgements are scoped by the proxy's unique session prefix.
+/// Entry bodies are append-only; a known stored length therefore identifies
+/// the exact bytes, including once capture reaches its cap.
+pub type KnownBodies = HashMap<String, (usize, usize)>;
+pub struct SnapshotEntry {
+    pub entry: CapturedEntry,
+    pub request_body_omitted: bool,
+    pub response_body_omitted: bool,
+}
+const MAX_SNAPSHOT_BODY_BYTES: usize = MAX_BODY_SIZE;
+
+impl CapturedEntry {
+    fn snapshot_update(&self, known: Option<&(usize, usize)>, budget: &mut usize) -> SnapshotEntry {
+        let mut copy_body = |body: &[u8], known_length: Option<usize>| {
+            if known_length == Some(body.len()) || body.len() > *budget {
+                (Vec::new(), true)
+            } else {
+                *budget -= body.len();
+                (body.to_vec(), false)
+            }
+        };
+        let (request_body, request_body_omitted) =
+            copy_body(&self.request_body, known.map(|v| v.0));
+        let (response_body, response_body_omitted) =
+            copy_body(&self.response_body, known.map(|v| v.1));
+        // Do not clone bodies before deciding whether they need transferring.
+        let entry = CapturedEntry {
+            method: self.method.clone(),
+            url: self.url.clone(),
+            status_code: self.status_code,
+            content_type: self.content_type.clone(),
+            request_size: self.request_size,
+            response_size: self.response_size,
+            start_time_ms: self.start_time_ms,
+            duration_ms: self.duration_ms,
+            request_headers: self.request_headers.clone(),
+            response_headers: self.response_headers.clone(),
+            request_body,
+            response_body,
+            is_https: self.is_https,
+            route_action: self.route_action.clone(),
+            in_flight: self.in_flight,
+            capture_id: self.capture_id,
+        };
+        SnapshotEntry {
+            entry,
+            request_body_omitted,
+            response_body_omitted,
+        }
+    }
+}
+
 /// One stream's capture. DATA never locks ProxyState, and after the body cap
 /// it only publishes a byte count. Weak registry references avoid retaining
 /// buffers if a stream task is cancelled before it can record its final row.
@@ -390,6 +442,7 @@ pub struct NetworkProxy {
     port: u16,
     state: Arc<Mutex<ProxyState>>,
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
+    capture_session: String,
 }
 
 impl NetworkProxy {
@@ -491,6 +544,7 @@ impl NetworkProxy {
             port,
             state,
             shutdown_tx,
+            capture_session: uuid::Uuid::new_v4().to_string(),
         })
     }
 
@@ -607,6 +661,45 @@ impl NetworkProxy {
         self.state.lock().await.snapshot_entries()
     }
 
+    pub fn capture_session(&self) -> &str {
+        &self.capture_session
+    }
+
+    /// Return all metadata, but at most 1 MiB of new body bytes. Clients
+    /// acknowledge only bytes actually received; deferred bodies are retried.
+    pub async fn snapshot_updates(&self, known: &KnownBodies) -> Vec<SnapshotEntry> {
+        let mut state = self.state.lock().await;
+        let mut budget = MAX_SNAPSHOT_BODY_BYTES;
+        let mut updates: Vec<_> = state
+            .entries
+            .iter()
+            .map(|entry| {
+                entry.snapshot_update(
+                    known.get(&format!("{}:{}", self.capture_session, entry.capture_id)),
+                    &mut budget,
+                )
+            })
+            .collect();
+        state.in_flight.retain(|_, capture| {
+            let Some(capture) = capture.upgrade() else {
+                return false;
+            };
+            let guard = capture.entry.lock().unwrap();
+            let mut update = guard.snapshot_update(
+                known.get(&format!("{}:{}", self.capture_session, guard.capture_id)),
+                &mut budget,
+            );
+            update.entry.request_size = capture.request_size.load(Ordering::Relaxed);
+            update.entry.response_size = capture.response_size.load(Ordering::Relaxed);
+            update.entry.duration_ms = now_ms().saturating_sub(guard.start_time_ms);
+            update.entry.in_flight = true;
+            updates.push(update);
+            true
+        });
+        updates.sort_by_key(|update| update.entry.capture_id);
+        updates
+    }
+
     pub async fn set_android_emulator(&self, enabled: bool) {
         self.state.lock().await.android_emulator = enabled;
     }
@@ -703,7 +796,7 @@ async fn handle_connection(
     // Three bytes distinguish its connection preface from HTTP/1 methods;
     // h2::server validates the complete preface, including fragmented input.
     if buf.starts_with(b"PRI") {
-        handle_cleartext_h2(PrefixedStream::new(buf, client), state).await;
+        handle_cleartext_h2(PrefixedStream::new(buf, client), state, None).await;
         return;
     }
 
@@ -771,8 +864,18 @@ async fn handle_connection(
                 let upstream_host = capture_upstream_host(&state, &hostname).await;
                 if let Some(upstream_tcp) = dial_upstream(&upstream_host, port).await {
                     let chained = PrefixedStream::new(header_buf.clone(), client);
-                    handle_mitm_http(chained, upstream_tcp, host, state, false).await;
+                    handle_mitm_http(
+                        chained,
+                        upstream_tcp,
+                        &capture_authority(host, false),
+                        state,
+                        false,
+                    )
+                    .await;
                 }
+            } else {
+                debug!(%host, "Invalid transparent HTTP Host header");
+                let _ = client.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
             }
         } else {
             debug!("Transparent HTTP request missing Host header: {first_line}");
@@ -854,19 +957,33 @@ async fn handle_pac_request(
 
 /// Parse a `Host:` header value of the form `<host>` or `<host>:<port>`
 /// into its components. Returns `None` when the header is empty or the
-/// port part can't be parsed. IPv6 literals aren't handled — iOS only
-/// uses IPv4 LAN addresses for physical-device Wi-Fi proxies today.
+/// port part can't be parsed. Bracketed IPv6 literals are supported.
 fn parse_host_header(header: &str) -> Option<(String, u16)> {
-    let trimmed = header.trim();
-    if trimmed.is_empty() {
+    let authority: http::uri::Authority = header.trim().parse().ok()?;
+    // `Authority::port()` returns None for malformed ports too.
+    let suffix = &authority.as_str()[authority.host().len()..];
+    let port = if suffix.is_empty() {
+        80
+    } else {
+        suffix.strip_prefix(':')?.parse::<u16>().ok()?
+    };
+    let host = authority
+        .host()
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    if host.is_empty() || authority.as_str().contains('@') {
         return None;
     }
-    if let Some((host, port_str)) = trimmed.rsplit_once(':') {
-        let port: u16 = port_str.parse().ok()?;
-        Some((host.to_string(), port))
-    } else {
-        // No port in the header — default to port 80 for HTTP.
-        Some((trimmed.to_string(), 80))
+    Some((host.to_string(), port))
+}
+
+/// Match conventional URLs while retaining custom ports and IPv6 brackets.
+fn capture_authority(host: &str, is_https: bool) -> String {
+    match host.parse::<http::uri::Authority>() {
+        Ok(authority) if authority.port_u16() == Some(if is_https { 443 } else { 80 }) => {
+            authority.host().to_string()
+        }
+        _ => host.to_string(),
     }
 }
 
@@ -1205,8 +1322,11 @@ async fn capture_upstream_host(state: &Arc<Mutex<ProxyState>>, host: &str) -> St
     }
 }
 
-async fn handle_cleartext_h2<C>(client: C, state: Arc<Mutex<ProxyState>>)
-where
+async fn handle_cleartext_h2<C>(
+    client: C,
+    state: Arc<Mutex<ProxyState>>,
+    destination: Option<(String, u16)>,
+) where
     C: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let mut conn = match h2::server::handshake(client).await {
@@ -1237,10 +1357,19 @@ where
             .host()
             .trim_start_matches('[')
             .trim_end_matches(']');
+        // Transparent redirects already resolved the real socket destination.
+        // Authority is an HTTP identity, and may be unresolvable on this host.
+        let (upstream_host, upstream_port) = match &destination {
+            Some(destination) => destination.clone(),
+            None => (
+                capture_upstream_host(&state, host).await,
+                authority.port_u16().unwrap_or(80),
+            ),
+        };
         let target = H2Target {
             hostname: host.to_string(),
-            upstream_host: capture_upstream_host(&state, host).await,
-            upstream_port: authority.port_u16().unwrap_or(80),
+            upstream_host,
+            upstream_port,
             is_https: false,
         };
         let upstream = upstreams
@@ -1348,6 +1477,7 @@ async fn serve_h2_stream(
         .authority()
         .map(|a| a.as_str().to_string())
         .unwrap_or_else(|| hostname.clone());
+    let cap_host = capture_authority(&cap_host, is_https);
     let req_headers = parsed_headers_from_h2(&parts.headers);
 
     // Fire the request notification immediately on headers so waitForRequest /
@@ -3495,7 +3625,7 @@ async fn dial_upstream(dst_host: &str, dst_port: u16) -> Option<TcpStream> {
 /// extension** (upstream `ServerName` + per-host MITM cert CN), and decides
 /// between MITM interception and end-to-end passthrough (PILOT-231). Plain
 /// HTTP flows pass through to [`handle_mitm_http`] directly (no SNI needed).
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 pub(crate) async fn handle_transparent_tcp<S>(
     mut client: S,
     dst_host: String,
@@ -3537,7 +3667,7 @@ pub(crate) async fn handle_transparent_tcp<S>(
     if is_tls {
         handle_transparent_tls(chained, dst_host, dst_port, state, mitm_ca).await;
     } else if peek == *b"PRI" {
-        handle_cleartext_h2(chained, state).await;
+        handle_cleartext_h2(chained, state, Some((dst_host, dst_port))).await;
     } else {
         let Some(upstream_tcp) = dial_upstream(&dst_host, dst_port).await else {
             return;
@@ -6507,6 +6637,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn transparent_h2c_uses_resolved_destination_with_portless_device_authority() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut conn = h2::server::handshake(socket).await.unwrap();
+                while let Some(Ok((req, mut respond))) = conn.accept().await {
+                    assert_eq!(
+                        req.uri().authority().unwrap().as_str(),
+                        "device-only.invalid"
+                    );
+                    tokio::spawn(async move {
+                        let mut recv = req.into_body();
+                        let response = http::Response::builder()
+                            .header("content-type", "application/grpc")
+                            .body(())
+                            .unwrap();
+                        let mut send = respond.send_response(response, false).unwrap();
+                        while let Some(Ok(chunk)) = recv.data().await {
+                            let len = chunk.len();
+                            send_owned_body(&mut send, chunk.to_vec(), false)
+                                .await
+                                .unwrap();
+                            recv.flow_control().release_capacity(len).unwrap();
+                        }
+                        let mut trailers = http::HeaderMap::new();
+                        trailers.insert("grpc-status", http::HeaderValue::from_static("0"));
+                        send.send_trailers(trailers).unwrap();
+                    });
+                }
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let ca = Arc::new(
+                MitmAuthority::generate_new(
+                    &dir.path().join("ca.pem"),
+                    &dir.path().join("key.pem"),
+                )
+                .unwrap(),
+            );
+            let proxy = NetworkProxy::start(ca.clone()).await.unwrap();
+            // The alias is an Android-emulator property, never a global rewrite.
+            assert_eq!(
+                capture_upstream_host(&proxy.state, "10.0.2.2").await,
+                "10.0.2.2"
+            );
+            proxy.set_android_emulator(true).await;
+            let (tcp, redirected) = tokio::io::duplex(65536);
+            tokio::spawn(handle_transparent_tcp(
+                redirected,
+                "127.0.0.1".to_string(),
+                port,
+                proxy.state.clone(),
+                ca,
+            ));
+            let (client, conn) = h2::client::handshake(tcp).await.unwrap();
+            tokio::spawn(async move {
+                let _ = conn.await;
+            });
+            let mut client = client.ready().await.unwrap();
+            let url = "http://device-only.invalid/google.firestore.v1.Firestore/Listen".to_string();
+            let request = http::Request::builder()
+                .method("POST")
+                .uri(&url)
+                .header("content-type", "application/grpc")
+                .body(())
+                .unwrap();
+            let (response, mut send) = client.send_request(request, false).unwrap();
+            send.send_data(bytes::Bytes::from_static(b"first"), false)
+                .unwrap();
+            let mut recv = response.await.unwrap().into_body();
+            assert_eq!(read_echo(&mut recv, 5).await, b"first");
+            let first = proxy.snapshot_entries().await;
+            assert_eq!(first.len(), 1);
+            assert_eq!(first[0].url, url);
+            assert!(!first[0].is_https);
+            assert!(first[0].in_flight);
+            assert_eq!(first[0].response_body, b"first");
+            send.send_data(bytes::Bytes::from_static(b"second"), true)
+                .unwrap();
+            assert_eq!(read_echo(&mut recv, 6).await, b"second");
+            while let Some(chunk) = recv.data().await {
+                assert!(chunk.unwrap().is_empty());
+            }
+            assert_eq!(recv.trailers().await.unwrap().unwrap()["grpc-status"], "0");
+            wait_for_entries(&proxy.state, 1).await;
+            let final_entries = proxy.drain_entries().await;
+            assert_eq!(final_entries.len(), 1);
+            assert_eq!(final_entries[0].capture_id, first[0].capture_id);
+            assert_eq!(final_entries[0].response_body, b"firstsecond");
+            assert!(!final_entries[0].in_flight);
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
     async fn transparent_http_emulator_alias_uses_host_port() {
         tokio::time::timeout(Duration::from_secs(10), async {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -6618,6 +6845,7 @@ mod tests {
                 port: 0,
                 state,
                 shutdown_tx,
+                capture_session: uuid::Uuid::new_v4().to_string(),
             },
             send,
         )
@@ -7115,5 +7343,106 @@ mod tests {
         assert_eq!(entries[0].route_action, "continued");
 
         drop(proxy_task);
+    }
+    #[test]
+    fn host_authorities_normalize_only_scheme_default_ports() {
+        for (input, host, port) in [
+            ("[::1]", "::1", 80),
+            ("[::1]:8080", "::1", 8080),
+            ("example.com:80", "example.com", 80),
+        ] {
+            assert_eq!(parse_host_header(input), Some((host.into(), port)));
+        }
+        for input in [
+            "example.com:no",
+            "example.com:99999",
+            "user@example.com",
+            "[::1",
+        ] {
+            assert!(parse_host_header(input).is_none(), "{input}");
+        }
+        for (input, tls, expected) in [
+            ("example.com:80", false, "example.com"),
+            ("example.com:443", false, "example.com:443"),
+            ("example.com:443", true, "example.com"),
+            ("example.com:80", true, "example.com:80"),
+            ("[::1]:80", false, "[::1]"),
+            ("example.com:8080", false, "example.com:8080"),
+        ] {
+            assert_eq!(capture_authority(input, tls), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn large_snapshots_bound_new_bytes_and_never_resend_acknowledged_bodies() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = Arc::new(
+            MitmAuthority::generate_new(&dir.path().join("ca.pem"), &dir.path().join("key.pem"))
+                .unwrap(),
+        );
+        let proxy = NetworkProxy::start(ca).await.unwrap();
+        let template = CapturedEntry {
+            method: "GET".to_string(),
+            url: "https://example.test/users/1".to_string(),
+            status_code: 200,
+            content_type: "application/json".to_string(),
+            request_size: 0,
+            response_size: 2,
+            start_time_ms: 1,
+            duration_ms: 2,
+            request_headers: Vec::new(),
+            response_headers: Vec::new(),
+            request_body: Vec::new(),
+            response_body: vec![42; 200 * 1024],
+            is_https: true,
+            in_flight: false,
+            capture_id: 0,
+            route_action: String::new(),
+        };
+        for _ in 0..40 {
+            proxy.state.lock().await.push_entry(template.clone());
+        }
+        let mut known = KnownBodies::new();
+        let mut transferred = 0;
+        for _ in 0..10 {
+            let updates = proxy.snapshot_updates(&known).await;
+            assert_eq!(updates.len(), 40);
+            let bytes: usize = updates
+                .iter()
+                .map(|u| u.entry.request_body.len() + u.entry.response_body.len())
+                .sum();
+            assert!(bytes <= MAX_SNAPSHOT_BODY_BYTES);
+            transferred += bytes;
+            for u in updates {
+                let lengths = known
+                    .entry(format!(
+                        "{}:{}",
+                        proxy.capture_session(),
+                        u.entry.capture_id
+                    ))
+                    .or_default();
+                if !u.request_body_omitted {
+                    lengths.0 = u.entry.request_body.len();
+                }
+                if !u.response_body_omitted {
+                    lengths.1 = u.entry.response_body.len();
+                }
+            }
+        }
+        assert_eq!(transferred, 40 * 200 * 1024);
+        assert!(proxy.snapshot_updates(&known).await.iter().all(|u| u
+            .entry
+            .response_body
+            .is_empty()
+            && u.response_body_omitted));
+        assert_eq!(
+            proxy
+                .drain_entries()
+                .await
+                .iter()
+                .map(|e| e.response_body.len())
+                .sum::<usize>(),
+            transferred
+        );
     }
 }

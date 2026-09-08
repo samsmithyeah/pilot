@@ -754,10 +754,10 @@ trace: {
 ```
 
 Ports 80 and 443 remain included. The extra ports support HTTP/1.1 and HTTP/2
-prior knowledge (h2c), which Firestore uses on its emulator port. Tapsmith dials
-Android's `10.0.2.2` host alias as host loopback while preserving the original
+prior knowledge (h2c), which Firestore uses on its emulator port. For these
+transparent cleartext HTTP/1.1 and h2c connections, Tapsmith dials Android's `10.0.2.2` host alias as host loopback while preserving the original
 host and port in captured URLs. This translation applies only to Android
-emulators. Open Firestore listeners appear with live, cumulative body snapshots.
+emulators; TLS and forward-proxy connections do not translate the alias. Open Firestore listeners appear with live, cumulative body snapshots.
 Start capture before opening the connection, or restart the app during the test;
 connections that were already open cannot be redirected retroactively.
 

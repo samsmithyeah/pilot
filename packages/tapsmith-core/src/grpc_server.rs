@@ -1928,6 +1928,7 @@ impl TapsmithServiceImpl {
         let platform = self.proxy_platform.write().await.take();
         let reverse_port = self.proxy_reverse_port.write().await.take();
         let ca_cert_path = self.proxy_ca_cert_path.write().await.take();
+        self.proxy_http_ports.write().await.clear();
         let used_iptables = std::mem::replace(&mut *self.proxy_uses_iptables.write().await, false);
 
         // Reset macOS system proxy if we set it as a fallback.
@@ -3409,6 +3410,7 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                     }
                 }
                 if device_changed {
+                    self.cleanup_network_proxy().await;
                     *self.started_agent_config.write().await = None;
                     *self.ios_agent_config.write().await = None;
                     *self.android_launcher_activity.write().await = None;
@@ -5394,18 +5396,34 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
         if let Some(existing) = proxy_guard.as_ref() {
             let existing_port = existing.port();
             let old_ports = self.proxy_http_ports.read().await.clone();
-            if old_ports != http_ports && *self.proxy_uses_iptables.read().await {
-                let serial = self.active_serial().await?;
-                if let Some(port) = *self.proxy_reverse_port.read().await {
+            let uses_iptables = *self.proxy_uses_iptables.read().await;
+            let mut warnings = Vec::new();
+            let reverse_port = *self.proxy_reverse_port.read().await;
+            match capture_port_update(&old_ports, &http_ports, uses_iptables, reverse_port) {
+                Ok(Some(port)) => {
+                    let serial = self.active_serial().await?;
                     if !adb::setup_iptables_redirect(&serial, port, &http_ports).await {
-                        let _ = adb::setup_iptables_redirect(&serial, port, &old_ports).await;
+                        if !adb::setup_iptables_redirect(&serial, port, &old_ports).await {
+                            // The rules are now unknown. Tear down so retries
+                            // cannot mistake stale bookkeeping for applied ports.
+                            drop(proxy_guard);
+                            self.cleanup_network_proxy().await;
+                        }
                         return Err(Status::internal(
                             "Failed to update Android HTTP capture ports",
                         ));
                     }
+                    *self.proxy_http_ports.write().await = http_ports;
                 }
+                Ok(None) => {}
+                Err(message) if !uses_iptables => warnings.push(message),
+                Err(message) => return Err(Status::failed_precondition(message)),
             }
-            *self.proxy_http_ports.write().await = http_ports;
+            let android_emulator = {
+                let dm = self.device_manager.read().await;
+                matches!(dm.active_device(), Some(d) if d.platform == Platform::Android && d.is_emulator)
+            };
+            existing.set_android_emulator(android_emulator).await;
             existing.reset_capture_state().await;
             // Clone out of the read guard before awaiting — holding a
             // RwLock guard across an await risks starving writers.
@@ -5424,7 +5442,7 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                 request_id,
                 success: true,
                 proxy_port: u32::from(existing_port),
-                error_message: String::new(),
+                error_message: warnings.join("; "),
             }));
         }
 
@@ -5844,7 +5862,14 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
             }
         }
 
-        *self.proxy_http_ports.write().await = http_ports;
+        if *self.proxy_uses_iptables.read().await {
+            *self.proxy_http_ports.write().await = http_ports;
+        } else {
+            self.proxy_http_ports.write().await.clear();
+            if !http_ports.is_empty() {
+                warnings.push("networkHttpPorts was not applied: Android transparent iptables capture is unavailable".to_string());
+            }
+        }
         *proxy_guard = Some(proxy);
 
         // If a NetworkRoute stream is active, install its handler on the
@@ -5872,7 +5897,8 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
         &self,
         request: Request<proto::SnapshotNetworkCaptureRequest>,
     ) -> Result<Response<proto::SnapshotNetworkCaptureResponse>, Status> {
-        let request_id = Self::request_id(&request.into_inner().request_id);
+        let req = request.into_inner();
+        let request_id = Self::request_id(&req.request_id);
         let guard = self.network_proxy.read().await;
         let Some(proxy) = guard.as_ref() else {
             return Ok(Response::new(proto::SnapshotNetworkCaptureResponse {
@@ -5882,10 +5908,35 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                 error_message: "Network capture is not running".to_string(),
             }));
         };
+        let entries = if req.incremental_bodies {
+            let known = req
+                .known_bodies
+                .into_iter()
+                .map(|v| {
+                    (
+                        v.capture_id,
+                        (v.request_body_size as usize, v.response_body_size as usize),
+                    )
+                })
+                .collect();
+            proxy
+                .snapshot_updates(&known)
+                .await
+                .into_iter()
+                .map(|update| {
+                    let mut entry = captured_entry_to_proto(update.entry, proxy.capture_session());
+                    entry.request_body_omitted = update.request_body_omitted;
+                    entry.response_body_omitted = update.response_body_omitted;
+                    entry
+                })
+                .collect()
+        } else {
+            captured_entries_to_proto(proxy.snapshot_entries().await, proxy.capture_session())
+        };
         Ok(Response::new(proto::SnapshotNetworkCaptureResponse {
             request_id,
             success: true,
-            entries: captured_entries_to_proto(proxy.snapshot_entries().await),
+            entries,
             error_message: String::new(),
         }))
     }
@@ -5931,7 +5982,7 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
             };
 
             let captured = proxy.drain_entries().await;
-            let entries = captured_entries_to_proto(captured);
+            let entries = captured_entries_to_proto(captured, proxy.capture_session());
             return Ok(Response::new(proto::StopNetworkCaptureResponse {
                 request_id,
                 success: true,
@@ -6034,8 +6085,9 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
             }
         }
 
+        let capture_session = proxy.capture_session().to_string();
         let captured = proxy.stop().await;
-        let entries = captured_entries_to_proto(captured);
+        let entries = captured_entries_to_proto(captured, &capture_session);
 
         Ok(Response::new(proto::StopNetworkCaptureResponse {
             request_id,
@@ -8083,33 +8135,41 @@ fn is_terminal_adb_reverse_error(error: &str) -> bool {
 }
 
 fn captured_entries_to_proto(
-    captured: Vec<crate::network_proxy::CapturedEntry>,
+    entries: Vec<crate::network_proxy::CapturedEntry>,
+    capture_session: &str,
 ) -> Vec<proto::CapturedNetworkEntry> {
-    captured
+    entries
         .into_iter()
-        .map(|e| proto::CapturedNetworkEntry {
-            method: e.method,
-            url: e.url,
-            status_code: e.status_code,
-            content_type: e.content_type,
-            request_size: e.request_size,
-            response_size: e.response_size,
-            start_time_ms: e.start_time_ms,
-            duration_ms: e.duration_ms,
-            request_headers_json: crate::network_proxy::headers_to_json_object(&e.request_headers)
-                .to_string(),
-            response_headers_json: crate::network_proxy::headers_to_json_object(
-                &e.response_headers,
-            )
-            .to_string(),
-            request_body: e.request_body,
-            response_body: e.response_body,
-            is_https: e.is_https,
-            route_action: e.route_action,
-            in_flight: e.in_flight,
-            capture_id: e.capture_id.to_string(),
-        })
+        .map(|e| captured_entry_to_proto(e, capture_session))
         .collect()
+}
+
+fn captured_entry_to_proto(
+    e: crate::network_proxy::CapturedEntry,
+    capture_session: &str,
+) -> proto::CapturedNetworkEntry {
+    proto::CapturedNetworkEntry {
+        method: e.method,
+        url: e.url,
+        status_code: e.status_code,
+        content_type: e.content_type,
+        request_size: e.request_size,
+        response_size: e.response_size,
+        start_time_ms: e.start_time_ms,
+        duration_ms: e.duration_ms,
+        request_headers_json: crate::network_proxy::headers_to_json_object(&e.request_headers)
+            .to_string(),
+        response_headers_json: crate::network_proxy::headers_to_json_object(&e.response_headers)
+            .to_string(),
+        request_body: e.request_body,
+        response_body: e.response_body,
+        is_https: e.is_https,
+        route_action: e.route_action,
+        in_flight: e.in_flight,
+        capture_id: format!("{capture_session}:{}", e.capture_id),
+        request_body_omitted: false,
+        response_body_omitted: false,
+    }
 }
 
 async fn setup_android_reverse_with_fallback(
@@ -8454,6 +8514,25 @@ impl app_reset::ResetOps for ServiceResetOps<'_> {
             )
             .await
     }
+}
+
+/// An applied port set is meaningful only while its redirect still exists.
+fn capture_port_update(
+    applied: &[u16],
+    requested: &[u16],
+    uses_iptables: bool,
+    reverse_port: Option<u16>,
+) -> Result<Option<u16>, &'static str> {
+    if !uses_iptables {
+        return if requested.is_empty() {
+            Ok(None)
+        } else {
+            Err("networkHttpPorts was not applied: Android transparent iptables capture is unavailable")
+        };
+    }
+    let port =
+        reverse_port.ok_or("Android capture redirect has no reverse port; restart capture")?;
+    Ok((applied != requested).then_some(port))
 }
 
 #[cfg(test)]
@@ -9013,5 +9092,25 @@ mod tests {
     fn parse_resolved_activity_rejects_other_package() {
         let output = "com.other.app/.MainActivity";
         assert!(parse_resolved_activity(output, "com.example.app").is_none());
+    }
+    #[test]
+    fn capture_ports_require_an_applied_redirect_even_when_values_match() {
+        assert_eq!(
+            capture_port_update(&[8080], &[9099], true, Some(1234)),
+            Ok(Some(1234))
+        );
+        assert_eq!(
+            capture_port_update(&[8080], &[8080], true, Some(1234)),
+            Ok(None)
+        );
+        assert!(capture_port_update(&[8080], &[8080], true, None).is_err());
+        assert!(capture_port_update(&[], &[8080], false, Some(1234)).is_err());
+        // An unsupported request must continue reporting unsupported on retry.
+        assert!(capture_port_update(&[8080], &[8080], false, Some(1234)).is_err());
+        assert_eq!(capture_port_update(&[], &[], false, None), Ok(None));
+        assert_eq!(
+            capture_port_update(&[8080], &[], true, Some(1234)),
+            Ok(Some(1234))
+        );
     }
 }

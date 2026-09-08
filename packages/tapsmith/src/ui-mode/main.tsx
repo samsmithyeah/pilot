@@ -1,3 +1,4 @@
+import { mergeNetworkBodies } from './network-bodies.js';
 import './fonts.css';
 import { render } from 'preact';
 import { useState, useCallback, useMemo, useRef, useEffect } from 'preact/hooks';
@@ -1100,13 +1101,14 @@ function App() {
         if (!key) break;
         setTestTraces((prev) => {
           const { data, map } = getOrCreateTrace(key, prev);
-          const networkBodies = new Map<string, Uint8Array>();
+          const updates = new Map<string, Uint8Array>();
           if (msg.bodies) {
             for (const [path, b64] of Object.entries(msg.bodies)) {
-              networkBodies.set(path, base64ToBytes(b64));
+              updates.set(path, base64ToBytes(b64));
             }
           }
           const next = new Map(map);
+          const networkBodies = mergeNetworkBodies(msg.entries, data.networkBodies, updates, msg.bodyMode === 'patch');
           next.set(key, { ...data, network: msg.entries, networkBodies, networkCaptureEnabled: msg.networkCaptureEnabled ?? data.networkCaptureEnabled });
           return next;
         });

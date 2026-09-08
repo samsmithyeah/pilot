@@ -23,7 +23,7 @@ test("network requests and selected bodies update while the test is running", as
   }
   const snapshot = (body: string, inFlight: boolean) => app.send({
     type: "network", testFullName: FULL_NAME, networkCaptureEnabled: true,
-    entries: [{ ...entry, inFlight }], bodies: { "network/res-7.bin": Buffer.from(body).toString("base64") },
+    bodyMode: "patch", entries: [{ ...entry, inFlight }], bodies: { "network/res-7.bin": Buffer.from(body).toString("base64") },
   })
   snapshot("partial", true)
   await expect(network.rows).toHaveCount(1)
@@ -31,12 +31,21 @@ test("network requests and selected bodies update while the test is running", as
   await network.selectRow("Listen")
   await network.openDetailTab("Response")
   await expect(network.detailBody).toContainText("partial")
+  app.send({ type: "network", testFullName: FULL_NAME, bodyMode: "patch", entries: [{ ...entry, duration: 9000 }], bodies: {} })
+  await expect(network.detailBody).toContainText("partial")
   snapshot("partial grown", true)
   await expect(network.detailBody).toContainText("partial grown")
   snapshot("complete", false)
   await expect(network.detailBody).toContainText("complete")
   await expect(network.rows).toHaveCount(1)
   await expect(network.rows.first()).not.toContainText("Streaming")
+  app.send({ type: "network", testFullName: FULL_NAME, bodyMode: "patch", entries: [], bodies: {} })
+  await expect(network.rows).toHaveCount(0)
+  app.send({ type: "network", testFullName: FULL_NAME, bodyMode: "patch", entries: [entry], bodies: { "network/res-7.bin": Buffer.from("new attempt").toString("base64") } })
+  await network.selectRow("Listen")
+  await network.openDetailTab("Response")
+  await expect(network.detailBody).toContainText("new attempt")
+  await expect(network.detailBody).not.toContainText("complete")
   // No test-status or run-end message: all updates occurred during execution.
 })
 

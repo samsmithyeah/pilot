@@ -1,3 +1,4 @@
+import { mergeNetworkBodies } from './network-bodies.js';
 /**
  * UI mode server.
  *
@@ -2395,15 +2396,20 @@ function wireStatus(status: TestResultEntry['status']): TestNodeStatus {
               break;
             }
             case 'network': {
-              const networkMsg: NetworkMessage = { type: 'network', testFullName: worker.currentTest ?? '', projectName: worker.currentFile?.projectName, entries: msg.entries, bodies: msg.bodies, networkCaptureEnabled: msg.networkCaptureEnabled };
+              const networkMsg: NetworkMessage = { type: 'network', testFullName: worker.currentTest ?? '', projectName: worker.currentFile?.projectName, entries: msg.entries, bodies: msg.bodies, bodyMode: msg.bodyMode, networkCaptureEnabled: msg.networkCaptureEnabled };
               // Each message is a full snapshot. Keep only the latest per test
               // for reconnect, rather than retaining every polling tick's bodies.
               const previous = networkBuffer.findIndex((entry) =>
                 entry.testFullName === networkMsg.testFullName && entry.projectName === networkMsg.projectName);
-              if (previous >= 0) networkBuffer[previous] = networkMsg;
+              const retained: NetworkMessage = { ...networkMsg, bodyMode: undefined,
+                bodies: Object.fromEntries(mergeNetworkBodies(networkMsg.entries,
+                  new Map(Object.entries(previous >= 0 ? networkBuffer[previous].bodies ?? {} : {})),
+                  new Map(Object.entries(networkMsg.bodies ?? {})), networkMsg.bodyMode === 'patch')),
+              };
+              if (previous >= 0) networkBuffer[previous] = retained;
               else if (!networkBufferFull) {
                 if (networkBuffer.length >= MAX_NETWORK_BUFFER) networkBufferFull = true;
-                else networkBuffer.push(networkMsg);
+                else networkBuffer.push(retained);
               }
               broadcast(networkMsg);
               break;

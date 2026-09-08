@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { unzipSync } from 'fflate';
+import { gzipSync } from 'node:zlib';
 import { emitActionProgress } from '../action-progress.js';
 
 // We need to test the runner's registration and execution logic.
@@ -2387,4 +2388,64 @@ describe('afterAll trace amendment into packaged traces', () => {
       fs.rmSync(tempRoot, { recursive: true, force: true });
     }
   });
+});
+
+
+describe('live network final drain', () => {
+  for (const failure of ['rpc', 'unsuccessful', 'empty'] as const) {
+    it(`preserves per-device live data on ${failure}, with an authoritative successful drain`, async () => {
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'tapsmith-live-final-'));
+      const raw = (name: string, body = 'live') => ({
+        captureId: `session:${name}`, method: 'GET', url: `http://test/${name}`, statusCode: 200,
+        contentType: 'text/plain', requestSize: 0, responseSize: body.length, startTimeMs: 1,
+        durationMs: 1, requestHeadersJson: '{}', responseHeadersJson: '{"Content-Encoding":"gzip"}',
+        requestBody: Buffer.alloc(0), responseBody: gzipSync(Buffer.from(body)), isHttps: false,
+        routeAction: '', inFlight: true,
+      });
+      let liveReady!: () => void;
+      const ready = new Promise<void>((resolve) => { liveReady = resolve; });
+      const updates: import('../trace/types.js').NetworkEntry[][] = [];
+      const devices = ['alice', 'bob'].map((name) => ({
+        name,
+        device: {
+          _traceDeviceId: name,
+          tracing: new Tracing(async () => undefined, async () => undefined),
+          waitForIdle: vi.fn(async () => {}),
+          _startNetworkCapture: vi.fn(async () => ({ success: true, proxyPort: 12345, errorMessage: '' })),
+          _snapshotNetworkCapture: vi.fn(async () => ({ success: true, entries: [raw(name)], errorMessage: '' })),
+          _stopNetworkCapture: vi.fn(async () => {
+            if (name === 'bob') return { success: true, entries: [raw(name, 'final')], errorMessage: '' };
+            if (failure === 'rpc') throw new Error('daemon unavailable');
+            return { success: failure === 'empty', entries: [], errorMessage: 'drain failed' };
+          }),
+          _stopDeviceLogStream: vi.fn(), _startDaemonLogStream: vi.fn(), _stopDaemonLogStream: vi.fn(),
+        },
+      }));
+      try {
+        pushContext();
+        tapsmithTest('stream then drain', async () => { await ready; });
+        const ctx = popContext();
+        const result = await runSuiteContext(ctx, '', [], [], makeOpts({
+          config: makeConfig({ rootDir: tempRoot, outputDir: 'out', trace: {
+            mode: 'on', network: true, screenshots: false, snapshots: false, sources: false, deviceLogs: false,
+          } }),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any -- focused lifecycle mock
+          devices: devices as any,
+          onNetworkEntries: (entries) => { updates.push(entries); if (updates.filter((e) => e.length === 2).length >= 2) liveReady(); },
+        }));
+        expect(result.tests[0].status).toBe('passed');
+        const live = updates.filter((e) => e.length === 2);
+        expect(live[1][0].responseBody).toBe(live[0][0].responseBody);
+        expect(devices[0].device._snapshotNetworkCapture.mock.calls.length).toBeGreaterThanOrEqual(2);
+        const final = updates.at(-1)!;
+        expect(final.map((e) => [e.url, e.responseBody?.toString()])).toEqual(failure === 'empty'
+          ? [['http://test/bob', 'final']]
+          : [['http://test/alice', 'live'], ['http://test/bob', 'final']]);
+        const zip = unzipSync(new Uint8Array(fs.readFileSync(result.tests[0].tracePath!)));
+        const archived = Buffer.from(zip['network.json']).toString().trim().split('\n').map((line) => JSON.parse(line));
+        expect(archived.map((e) => e.url)).toEqual(final.map((e) => e.url));
+        for (const entry of archived) expect(Buffer.from(zip[entry.responseBodyPath]).toString()).toBe(entry.url.endsWith('alice') ? 'live' : 'final');
+      } finally { fs.rmSync(tempRoot, { recursive: true, force: true }); }
+    });
+  }
 });

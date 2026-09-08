@@ -392,11 +392,13 @@ export interface SourceMessage {
   content: string
 }
 
-/** Full current snapshot; replaces this test's prior entries and bodies. */
+/** Full current entry list, with either complete bodies or changed bodies. */
 export interface NetworkMessage {
   type: 'network'
   /** Effective network capture setting for this test; absent for older workers. */
   networkCaptureEnabled?: boolean
+  /** Omitted for full snapshots, including reconnect replay. */
+  bodyMode?: 'patch'
   testFullName: string
   /** Project the test belongs to. Used to scope trace storage in multi-device
    * configs so the same test under multiple projects doesn't collide. */
@@ -1011,6 +1013,8 @@ export interface UIWorkerNetworkMessage {
   type: 'network'
   /** Effective network capture setting for this test; absent for older workers. */
   networkCaptureEnabled?: boolean
+  /** Omitted for full snapshots, including reconnect replay. */
+  bodyMode?: 'patch'
   workerId: number
   entries: import('../trace/types.js').NetworkEntry[]
   bodies?: Record<string, string>

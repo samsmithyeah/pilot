@@ -984,6 +984,8 @@ export class TapsmithGrpcClient {
       routeAction: string;
       inFlight: boolean;
       captureId?: string;
+      requestBodyOmitted?: boolean;
+      responseBodyOmitted?: boolean;
     }>;
     errorMessage: string;
   }> {
@@ -996,8 +998,8 @@ export class TapsmithGrpcClient {
     }, 30_000, { bypassAbort: true });
   }
 
-  async snapshotNetworkCapture(): ReturnType<TapsmithGrpcClient['stopNetworkCapture']> {
-    return this.call('snapshotNetworkCapture', { requestId: requestId() }, 2_000);
+  async snapshotNetworkCapture(knownBodies: Array<{ captureId: string; requestBodySize: number; responseBodySize: number }> = []): ReturnType<TapsmithGrpcClient['stopNetworkCapture']> {
+    return this.call('snapshotNetworkCapture', { requestId: requestId(), knownBodies, incrementalBodies: true }, 10_000);
   }
 
   // ── Video Recording (PILOT-114) ──

@@ -15,6 +15,11 @@ import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import * as zlib from 'node:zlib';
+import { promisify } from 'node:util';
+import { NetworkSnapshots } from './trace/network-snapshots.js';
+const gunzip = promisify(zlib.gunzip);
+const inflate = promisify(zlib.inflate);
+const brotliDecompress = promisify(zlib.brotliDecompress);
 import type { TapsmithConfig, Platform, UseOptions } from './config.js';
 import type { Device } from './device.js';
 import type { TapsmithReporter } from './reporter.js';
@@ -152,7 +157,7 @@ function headerValue(headers: Record<string, string>, name: string): string | un
  * then decompress per Content-Encoding. Device-level network interception
  * captures raw wire bytes, so we have to reverse any hop-by-hop framing
  * before display. Falls back to the raw buffer on any parse/decode failure. */
-function decodeHttpBody(body: Buffer | undefined, headers: Record<string, string>): Buffer | undefined {
+async function decodeHttpBody(body: Buffer | undefined, headers: Record<string, string>): Promise<Buffer | undefined> {
   if (!body || body.length === 0) return body;
   let decoded = body;
   const te = (headerValue(headers, 'transfer-encoding') ?? '').toLowerCase();
@@ -162,9 +167,9 @@ function decodeHttpBody(body: Buffer | undefined, headers: Record<string, string
   const ce = (headerValue(headers, 'content-encoding') ?? '').toLowerCase().trim();
   if (!ce || ce === 'identity') return decoded;
   try {
-    if (ce === 'gzip' || ce === 'x-gzip') return zlib.gunzipSync(decoded);
-    if (ce === 'deflate') return zlib.inflateSync(decoded);
-    if (ce === 'br') return zlib.brotliDecompressSync(decoded);
+    if (ce === 'gzip' || ce === 'x-gzip') return await gunzip(decoded);
+    if (ce === 'deflate') return await inflate(decoded);
+    if (ce === 'br') return await brotliDecompress(decoded);
   } catch {
     // Fall through on decompression failure
   }
@@ -177,14 +182,24 @@ type DeviceNetworkEntries = Array<{ deviceId?: string; entries: RawNetworkEntrie
 /** Keep row/body identities stable as streams finish or new devices report data. */
 function createNetworkMapper(): (
   rawNetworkByDevice: DeviceNetworkEntries, events: readonly AnyTraceEvent[], apiEntries: NetworkEntry[],
-) => NetworkEntry[] {
+) => Promise<NetworkEntry[]> {
+  const decodedBodies = new WeakMap<Buffer, Map<string, Promise<Buffer | undefined>>>();
+  const decode = (body: Buffer | undefined, headers: Record<string, string>): Promise<Buffer | undefined> => {
+    if (!body?.length) return Promise.resolve(body);
+    const key = JSON.stringify([headerValue(headers, 'transfer-encoding'), headerValue(headers, 'content-encoding')]);
+    let cached = decodedBodies.get(body);
+    if (!cached) { cached = new Map(); decodedBodies.set(body, cached); }
+    let decoded = cached.get(key);
+    if (!decoded) { decoded = decodeHttpBody(body, headers); cached.set(key, decoded); }
+    return decoded;
+  };
   const indices = new Map<string, number>();
   const stableIndex = (key: string): number => {
     let index = indices.get(key);
     if (index === undefined) { index = indices.size; indices.set(key, index); }
     return index;
   };
-  return (rawNetworkByDevice, events, apiEntries) => {
+  return async (rawNetworkByDevice, events, apiEntries) => {
     // Build sorted list of action timestamps with their indices
     const actionTimestamps = events
       .filter((e): e is import('./trace/types.js').ActionTraceEvent | import('./trace/types.js').AssertionTraceEvent =>
@@ -213,7 +228,7 @@ function createNetworkMapper(): (
       return best;
     };
 
-    const networkEntries = rawNetworkByDevice.flatMap(({ deviceId, entries }) => entries.map((e) => ({ deviceId, e }))).map(({ deviceId, e }, i) => {
+    const networkEntries = await Promise.all(rawNetworkByDevice.flatMap(({ deviceId, entries }) => entries.map((e) => ({ deviceId, e }))).map(async ({ deviceId, e }, i) => {
       const requestHeaders = e.requestHeadersJson ? JSON.parse(e.requestHeadersJson) : {};
       const responseHeaders = e.responseHeadersJson ? JSON.parse(e.responseHeadersJson) : {};
       return {
@@ -232,13 +247,13 @@ function createNetworkMapper(): (
         inFlight: e.inFlight || undefined,
         requestHeaders,
         responseHeaders,
-        requestBody: decodeHttpBody(e.requestBody, requestHeaders),
-        responseBody: decodeHttpBody(e.responseBody, responseHeaders),
+        requestBody: await decode(e.requestBody, requestHeaders),
+        responseBody: await decode(e.responseBody, responseHeaders),
         routeAction: e.routeAction
           ? e.routeAction as import('./trace/types.js').NetworkEntry['routeAction']
           : undefined,
       };
-    });
+    }));
 
     return [...networkEntries, ...apiEntries.map((entry, i) => ({
       ...entry, index: stableIndex(`api:${i}`),
@@ -1690,6 +1705,16 @@ async function runSuiteContext(
         request: requestContext,
       };
       const mapNetworkEntries = createNetworkMapper();
+      const latestByDevice = new Map<Device, NetworkSnapshots>();
+      const snapshotsFor = (d: Device): NetworkSnapshots => {
+        let snapshots = latestByDevice.get(d);
+        if (!snapshots) { snapshots = new NetworkSnapshots(); latestByDevice.set(d, snapshots); }
+        return snapshots;
+      };
+      const networkSnapshotEntries = (): DeviceNetworkEntries => [...latestByDevice].map(([d, snapshots]) => ({
+        deviceId: d._traceDeviceId,
+        entries: filterEntriesByHosts(snapshots.entries, { allow: traceConfig.networkHosts, deny: traceConfig.networkIgnoreHosts }),
+      }));
       let stopLiveNetwork = async (): Promise<void> => {};
       let testFixtureTeardown: (() => Promise<void>) | undefined;
       let allFixtures: Record<string, unknown> = baseFixtures;
@@ -1711,18 +1736,16 @@ async function runSuiteContext(
           opts.onNetworkEntries?.([], traceConfig.network);
           if (traceCollector && opts.onNetworkEntries) {
             const liveCollector = traceCollector;
-            const latestByDevice = new Map<Device, RawNetworkEntries>();
             const unsupported = new Set<Device>();
             stopLiveNetwork = startLiveNetwork(async () => {
               if (traceConfig.network) {
                 await Promise.all(networkDrainDevices().map(async (d) => {
                   if (unsupported.has(d)) return;
                   try {
-                    const res = await d._snapshotNetworkCapture();
+                    const snapshots = snapshotsFor(d);
+                    const res = await d._snapshotNetworkCapture(snapshots.knownBodies());
                     if (!res.success) throw new Error(res.errorMessage);
-                    latestByDevice.set(d, filterEntriesByHosts(res.entries, {
-                      allow: traceConfig.networkHosts, deny: traceConfig.networkIgnoreHosts,
-                    }));
+                    snapshots.update(res.entries);
                   } catch (err) {
                     if (isAbortError(err) || opts.abortSignal?.aborted) return;
                     if ((err as { code?: number }).code === 12) unsupported.add(d);
@@ -1731,7 +1754,7 @@ async function runSuiteContext(
                 }));
               }
               return mapNetworkEntries(
-                [...latestByDevice].map(([d, entries]) => ({ deviceId: d._traceDeviceId, entries })),
+                networkSnapshotEntries(),
                 liveCollector.events, requestContext.getNetworkEntries(),
               );
             }, (entries) => opts.onNetworkEntries?.(entries, traceConfig.network), opts.abortSignal);
@@ -2071,7 +2094,6 @@ async function runSuiteContext(
         // once after the file so soft-reset tests do not churn device routing.
         // Each device's daemon runs its own proxy with its own index space,
         // so entries are collected per device and re-indexed when merged.
-        const rawNetworkByDevice: DeviceNetworkEntries = [];
         if (traceConfig.network) {
           for (const d of networkDrainDevices()) {
             try {
@@ -2098,7 +2120,7 @@ async function runSuiteContext(
                     `[tapsmith] trace.networkHosts allowlist matched 0 of ${res.entries.length} captured entries — trace will have no network data.`,
                   );
                 }
-                rawNetworkByDevice.push({ deviceId: d._traceDeviceId, entries: filtered });
+                snapshotsFor(d).update(res.entries);
               } else {
                 console.warn(`[tapsmith] Network capture stopped with error: ${res.errorMessage}`);
               }
@@ -2152,8 +2174,8 @@ async function runSuiteContext(
         const collector = primary.tracing._stopManaged();
         setActiveTraceCollector(null);
 
-        const networkEntries = mapNetworkEntries(
-          rawNetworkByDevice, collector?.events ?? [], requestContext.getNetworkEntries(),
+        const networkEntries = await mapNetworkEntries(
+          networkSnapshotEntries(), collector?.events ?? [], requestContext.getNetworkEntries(),
         );
 
         // Notify UI mode with the full set of network entries (device + API)

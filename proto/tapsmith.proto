@@ -826,6 +826,15 @@ message StopNetworkCaptureRequest {
 // Read current capture without draining entries or changing proxy/routing state.
 message SnapshotNetworkCaptureRequest {
   string request_id = 1;
+  repeated CapturedBodyVersion known_bodies = 2;
+  // Opt in to omitted unchanged bodies and bounded body transfer per poll.
+  bool incremental_bodies = 3;
+}
+
+message CapturedBodyVersion {
+  string capture_id = 1;
+  uint32 request_body_size = 2;
+  uint32 response_body_size = 3;
 }
 
 message SnapshotNetworkCaptureResponse {
@@ -856,6 +865,10 @@ message CapturedNetworkEntry {
   bool in_flight = 15;
   // Stable for the lifetime of a proxy, including open -> completed transitions.
   string capture_id = 16;
+  // Retain the prior body when true. False + empty bytes clears the body.
+  // Omission may mean unchanged bytes or transfer deferred to a later poll.
+  bool request_body_omitted = 17;
+  bool response_body_omitted = 18;
 }
 
 message StopNetworkCaptureResponse {
