@@ -112,6 +112,7 @@ pub struct TapsmithServiceImpl {
     proxy_platform: Arc<RwLock<Option<Platform>>>,
     /// Device-side port used for `adb reverse` (for cleanup, Android only).
     proxy_reverse_port: Arc<RwLock<Option<u16>>>,
+    proxy_http_ports: Arc<RwLock<Vec<u16>>>,
     /// On-device path of the installed CA cert (for cleanup, Android only).
     proxy_ca_cert_path: Arc<RwLock<Option<String>>>,
     /// Whether iptables transparent redirect is active (Android only). Used
@@ -321,6 +322,7 @@ impl TapsmithServiceImpl {
             proxy_device_serial: Arc::new(RwLock::new(None)),
             proxy_platform: Arc::new(RwLock::new(None)),
             proxy_reverse_port: Arc::new(RwLock::new(None)),
+            proxy_http_ports: Arc::new(RwLock::new(Vec::new())),
             proxy_ca_cert_path: Arc::new(RwLock::new(None)),
             proxy_uses_iptables: Arc::new(RwLock::new(false)),
             #[cfg(target_os = "macos")]
@@ -5373,12 +5375,37 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
         let req = request.into_inner();
         let request_id = Self::request_id(&req.request_id);
 
+        let mut http_ports = Vec::new();
+        for port in &req.http_ports {
+            if *port == 0 || *port > u16::MAX as u32 {
+                return Err(Status::invalid_argument(
+                    "HTTP capture ports must be between 1 and 65535",
+                ));
+            }
+            http_ports.push(*port as u16);
+        }
+        http_ports.sort_unstable();
+        http_ports.dedup();
+
         let mut proxy_guard = self.network_proxy.write().await;
         // If a proxy is already running (pre-started for physical iOS OCSP
         // passthrough during start_agent), reuse it instead of erroring.
         // Capture state is reset so this session starts clean.
         if let Some(existing) = proxy_guard.as_ref() {
             let existing_port = existing.port();
+            let old_ports = self.proxy_http_ports.read().await.clone();
+            if old_ports != http_ports && *self.proxy_uses_iptables.read().await {
+                let serial = self.active_serial().await?;
+                if let Some(port) = *self.proxy_reverse_port.read().await {
+                    if !adb::setup_iptables_redirect(&serial, port, &http_ports).await {
+                        let _ = adb::setup_iptables_redirect(&serial, port, &old_ports).await;
+                        return Err(Status::internal(
+                            "Failed to update Android HTTP capture ports",
+                        ));
+                    }
+                }
+            }
+            *self.proxy_http_ports.write().await = http_ports;
             existing.reset_capture_state().await;
             // Clone out of the read guard before awaiting — holding a
             // RwLock guard across an await risks starving writers.
@@ -5562,6 +5589,11 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                 Self::embedded_root_defaults_for(Some(platform)),
             )
             .await;
+        let android_emulator = {
+            let dm = self.device_manager.read().await;
+            matches!(dm.active_device(), Some(d) if d.platform == Platform::Android && d.is_emulator)
+        };
+        proxy.set_android_emulator(android_emulator).await;
         let host_port = proxy.port();
 
         // Physical iOS: verify the proxy is reachable from the LAN. On
@@ -5763,7 +5795,8 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                 // HTTPS through the system proxy, causing HTTPS traffic to be
                 // recorded as http://. Transparent redirect intercepts at the
                 // TCP level, so TLS is correctly detected from the ClientHello.
-                let iptables_ok = adb::setup_iptables_redirect(&serial, device_port).await;
+                let iptables_ok =
+                    adb::setup_iptables_redirect(&serial, device_port, &http_ports).await;
                 *self.proxy_uses_iptables.write().await = iptables_ok;
                 // The redirect is IPv4-only. On a device with IPv6 egress, an
                 // app that prefers IPv6 bypasses it entirely and its traffic is
@@ -5811,6 +5844,7 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
             }
         }
 
+        *self.proxy_http_ports.write().await = http_ports;
         *proxy_guard = Some(proxy);
 
         // If a NetworkRoute stream is active, install its handler on the
@@ -5831,6 +5865,28 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
             success: true,
             proxy_port: host_port as u32,
             error_message: warnings.join("\n"),
+        }))
+    }
+
+    async fn snapshot_network_capture(
+        &self,
+        request: Request<proto::SnapshotNetworkCaptureRequest>,
+    ) -> Result<Response<proto::SnapshotNetworkCaptureResponse>, Status> {
+        let request_id = Self::request_id(&request.into_inner().request_id);
+        let guard = self.network_proxy.read().await;
+        let Some(proxy) = guard.as_ref() else {
+            return Ok(Response::new(proto::SnapshotNetworkCaptureResponse {
+                request_id,
+                success: false,
+                entries: Vec::new(),
+                error_message: "Network capture is not running".to_string(),
+            }));
+        };
+        Ok(Response::new(proto::SnapshotNetworkCaptureResponse {
+            request_id,
+            success: true,
+            entries: captured_entries_to_proto(proxy.snapshot_entries().await),
+            error_message: String::new(),
         }))
     }
 
@@ -8050,6 +8106,8 @@ fn captured_entries_to_proto(
             response_body: e.response_body,
             is_https: e.is_https,
             route_action: e.route_action,
+            in_flight: e.in_flight,
+            capture_id: e.capture_id.to_string(),
         })
         .collect()
 }

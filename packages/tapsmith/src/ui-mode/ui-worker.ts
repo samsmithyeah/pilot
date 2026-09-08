@@ -404,9 +404,9 @@ async function runFileWithRecovery(
         projectUseOptions,
         projectName,
         testFilter,
-        onNetworkEntries: (entries) => {
+        onNetworkEntries: (entries, networkCaptureEnabled) => {
           const { entries: safe, bodies } = encodeNetworkBodies(entries);
-          send({ type: 'network', workerId, entries: safe, bodies });
+          send({ type: 'network', workerId, entries: safe, bodies, networkCaptureEnabled });
         },
       });
 

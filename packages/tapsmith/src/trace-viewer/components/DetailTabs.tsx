@@ -222,7 +222,7 @@ export function DetailTabs({ event, events, hierarchies, sources, metadata, netw
         {activeTab === 'hierarchy' && <HierarchyTabWrapper event={event} hierarchies={hierarchies} onNodeSelect={onHierarchyNodeSelect} group={group} screenshotVariant={screenshotVariant} />}
 
         {activeTab === 'locator' && locatorTab}
-        {activeTab === 'network' && <NetworkTab entries={networkEntries} bodies={networkBodies} deviceNames={deviceNames} />}
+        {activeTab === 'network' && <NetworkTab networkCaptureEnabled={metadata?.traceConfig?.network} entries={networkEntries} bodies={networkBodies} deviceNames={deviceNames} />}
         {activeTab === 'errors' && <ErrorsTab event={event} events={events} testError={testError} sources={sources} metadata={metadata} />}
       </div>
     </div>

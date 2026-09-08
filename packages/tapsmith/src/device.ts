@@ -856,7 +856,7 @@ export class Device {
    * as a visible warning so users aren't left wondering why their trace
    * has no network entries.
    */
-  async _startNetworkCapture(options?: { requireIsolation?: boolean }): Promise<{
+  async _startNetworkCapture(options?: { requireIsolation?: boolean; httpPorts?: number[] }): Promise<{
     proxyPort: number
     success: boolean
     errorMessage: string
@@ -892,6 +892,11 @@ export class Device {
    */
   get _networkProxyRunning(): boolean {
     return this._networkCaptureEverStarted;
+  }
+
+  /** @internal — Read live capture without ending the active capture session. */
+  async _snapshotNetworkCapture(): ReturnType<TapsmithGrpcClient['snapshotNetworkCapture']> {
+    return this._client.snapshotNetworkCapture();
   }
 
   /** @internal — Stop network capture and return entries (used by the runner). */

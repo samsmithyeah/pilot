@@ -1,0 +1,54 @@
+import { test, expect } from "../fixtures.js"
+import { GESTURES_FILE } from "../messages/scenarios.js"
+import { NetworkPane } from "../../panes/network.pane.js"
+import { networkEntry } from "../../trace-viewer/trace-builder.js"
+
+const FULL_NAME = "Gestures screen > double tap registers double tap gesture"
+const HINT = "Enable network capture in your trace config to record HTTP requests."
+
+test("network requests and selected bodies update while the test is running", async ({ app, detailTabs, page, explorer }) => {
+  app.send({ type: "run-start", fileCount: 1 })
+  app.send({ type: "test-start", fullName: FULL_NAME, filePath: GESTURES_FILE })
+  app.send({ type: "network", testFullName: FULL_NAME, entries: [], networkCaptureEnabled: true })
+  await explorer.expandAll()
+  await explorer.clickNode("double tap registers double tap gesture")
+  await detailTabs.select("Network")
+  await expect(detailTabs.noContent).toContainText("No network requests captured")
+  await expect(page.getByText(HINT)).toHaveCount(0)
+
+  const network = new NetworkPane(page)
+  const entry = {
+    ...networkEntry({ index: 7, url: "https://example.com/Listen", contentType: "text/plain" }),
+    inFlight: true, responseBodyPath: "network/res-7.bin",
+  }
+  const snapshot = (body: string, inFlight: boolean) => app.send({
+    type: "network", testFullName: FULL_NAME, networkCaptureEnabled: true,
+    entries: [{ ...entry, inFlight }], bodies: { "network/res-7.bin": Buffer.from(body).toString("base64") },
+  })
+  snapshot("partial", true)
+  await expect(network.rows).toHaveCount(1)
+  await expect(network.rows.first()).toContainText("Streaming")
+  await network.selectRow("Listen")
+  await network.openDetailTab("Response")
+  await expect(network.detailBody).toContainText("partial")
+  snapshot("partial grown", true)
+  await expect(network.detailBody).toContainText("partial grown")
+  snapshot("complete", false)
+  await expect(network.detailBody).toContainText("complete")
+  await expect(network.rows).toHaveCount(1)
+  await expect(network.rows.first()).not.toContainText("Streaming")
+  // No test-status or run-end message: all updates occurred during execution.
+})
+
+for (const enabled of [true, false, undefined]) {
+  test(`empty network hint requires explicit disabled capture (${enabled})`, async ({ app, detailTabs, page, explorer }) => {
+    app.send({ type: "run-start", fileCount: 1 })
+    app.send({ type: "test-start", fullName: FULL_NAME, filePath: GESTURES_FILE })
+    app.send({ type: "network", testFullName: FULL_NAME, entries: [], networkCaptureEnabled: enabled })
+    await explorer.expandAll()
+    await explorer.clickNode("double tap registers double tap gesture")
+    await detailTabs.select("Network")
+    await expect(detailTabs.noContent).toContainText("No network requests captured")
+    await expect(page.getByText(HINT)).toHaveCount(enabled === false ? 1 : 0)
+  })
+}

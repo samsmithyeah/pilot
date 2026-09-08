@@ -24,7 +24,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -76,6 +77,80 @@ pub struct CapturedEntry {
     /// h2-capable MITM cert rejection) -- no request/response detail is
     /// available for those.
     pub route_action: String,
+    /// Still open at snapshot time; sizes and duration are elapsed so far.
+    pub in_flight: bool,
+    pub capture_id: u64,
+}
+
+/// One stream's capture. DATA never locks ProxyState, and after the body cap
+/// it only publishes a byte count. Weak registry references avoid retaining
+/// buffers if a stream task is cancelled before it can record its final row.
+struct InFlight {
+    entry: StdMutex<CapturedEntry>,
+    request_size: AtomicU64,
+    response_size: AtomicU64,
+}
+
+impl InFlight {
+    fn new(entry: CapturedEntry) -> Self {
+        Self {
+            entry: StdMutex::new(entry),
+            request_size: AtomicU64::new(0),
+            response_size: AtomicU64::new(0),
+        }
+    }
+
+    fn snapshot(&self, in_flight: bool) -> CapturedEntry {
+        let guard = self.entry.lock().unwrap();
+        let mut entry = guard.clone();
+        entry.request_size = self.request_size.load(Ordering::Relaxed);
+        entry.response_size = self.response_size.load(Ordering::Relaxed);
+        entry.duration_ms = now_ms().saturating_sub(entry.start_time_ms);
+        entry.in_flight = in_flight;
+        entry
+    }
+}
+
+/// Each pump owns its stored-length counter, so a full tee never locks again.
+struct BodyTee<'a> {
+    capture: &'a InFlight,
+    response: bool,
+    stored: usize,
+    total: u64,
+}
+
+impl<'a> BodyTee<'a> {
+    fn new(capture: &'a InFlight, response: bool) -> Self {
+        Self {
+            capture,
+            response,
+            stored: 0,
+            total: 0,
+        }
+    }
+
+    fn append(&mut self, bytes: &[u8]) {
+        self.total += bytes.len() as u64;
+        let size = if self.response {
+            &self.capture.response_size
+        } else {
+            &self.capture.request_size
+        };
+        if self.stored < MAX_BODY_SIZE && !bytes.is_empty() {
+            let take = (MAX_BODY_SIZE - self.stored).min(bytes.len());
+            let mut entry = self.capture.entry.lock().unwrap();
+            let body = if self.response {
+                &mut entry.response_body
+            } else {
+                &mut entry.request_body
+            };
+            body.extend_from_slice(&bytes[..take]);
+            self.stored += take;
+            size.store(self.total, Ordering::Relaxed);
+        } else {
+            size.store(self.total, Ordering::Relaxed);
+        }
+    }
 }
 
 /// A decoded HTTP request, structured for transformation hooks.
@@ -227,6 +302,9 @@ pub(crate) trait NetworkHandler: Send + Sync {
 /// Shared state for the proxy server.
 pub(crate) struct ProxyState {
     entries: Vec<CapturedEntry>,
+    in_flight: HashMap<u64, Weak<InFlight>>,
+    next_stream_key: u64,
+    android_emulator: bool,
     tls_client_config: Arc<ClientConfig>,
     /// Upstream TLS config for the HTTP/2 pipeline (PILOT-245). Offers `h2`
     /// first then `http/1.1` so the proxy can detect an origin that only
@@ -271,6 +349,40 @@ pub(crate) struct ProxyState {
     /// [`MITM_ABORT_PASSTHROUGH_THRESHOLD`] it graduates into
     /// `mitm_rejected_hosts`. Cleared for a host on any successful handshake.
     mitm_handshake_aborts: HashMap<String, u32>,
+}
+
+impl ProxyState {
+    fn push_entry(&mut self, mut entry: CapturedEntry) {
+        entry.capture_id = self.next_stream_key;
+        self.next_stream_key += 1;
+        self.entries.push(entry);
+    }
+
+    fn append_open_entries(&mut self, entries: &mut Vec<CapturedEntry>) {
+        self.in_flight.retain(|_, capture| {
+            if let Some(capture) = capture.upgrade() {
+                entries.push(capture.snapshot(true));
+                true
+            } else {
+                false
+            }
+        });
+        entries.sort_by_key(|entry| entry.capture_id);
+    }
+
+    fn snapshot_entries(&mut self) -> Vec<CapturedEntry> {
+        let mut entries = self.entries.clone();
+        self.append_open_entries(&mut entries);
+        entries
+    }
+
+    /// Frozen cumulative snapshots: a stream spanning tests appears once in
+    /// each drain. Completion removes it and queues one final entry atomically.
+    fn drain_entries(&mut self) -> Vec<CapturedEntry> {
+        let mut entries = std::mem::take(&mut self.entries);
+        self.append_open_entries(&mut entries);
+        entries
+    }
 }
 
 /// Handle to the running proxy. Dropping it stops the proxy.
@@ -332,6 +444,9 @@ impl NetworkProxy {
 
         let state = Arc::new(Mutex::new(ProxyState {
             entries: Vec::new(),
+            in_flight: HashMap::new(),
+            next_stream_key: 0,
+            android_emulator: false,
             tls_client_config,
             h2_client_config,
             handler: None,
@@ -484,7 +599,16 @@ impl NetworkProxy {
     /// test trace while keeping capture stable for the next test.
     pub async fn drain_entries(&self) -> Vec<CapturedEntry> {
         let mut state = self.state.lock().await;
-        std::mem::take(&mut state.entries)
+        state.drain_entries()
+    }
+
+    /// Read capture for live viewers without consuming the final trace data.
+    pub async fn snapshot_entries(&self) -> Vec<CapturedEntry> {
+        self.state.lock().await.snapshot_entries()
+    }
+
+    pub async fn set_android_emulator(&self, enabled: bool) {
+        self.state.lock().await.android_emulator = enabled;
     }
 
     /// Stop the proxy and return all captured entries.
@@ -493,7 +617,7 @@ impl NetworkProxy {
         // Give in-flight requests a moment to complete
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let mut state = self.state.lock().await;
-        std::mem::take(&mut state.entries)
+        state.drain_entries()
     }
 }
 
@@ -523,7 +647,7 @@ pub(crate) fn join_host_port(host: &str, port: u16) -> String {
 
 /// Handle a single proxy connection.
 ///
-/// Supports three connection types:
+/// Supports four connection types:
 ///
 /// 1. **Forward-proxy HTTP** — `GET http://host/path` or `CONNECT host:port`
 ///    (classic HTTP proxy protocol).
@@ -533,6 +657,8 @@ pub(crate) fn join_host_port(host: &str, port: u16) -> String {
 /// 3. **Transparent HTTP** — plain HTTP with a relative path (`GET /path`)
 ///    arriving via iptables redirect. The Host header provides the upstream
 ///    destination.
+/// 4. **Cleartext HTTP/2** — prior-knowledge h2c (for example, local gRPC
+///    emulators). The :authority pseudo-header provides the destination.
 async fn handle_connection(
     mut client: TcpStream,
     addr: SocketAddr,
@@ -570,6 +696,14 @@ async fn handle_connection(
         let chained = PrefixedStream::new(buf, client);
         // Port 443: the iptables rules only redirect --dport 443 to TLS.
         handle_transparent_tls(chained, String::new(), 443, state, mitm_ca).await;
+        return;
+    }
+
+    // gRPC emulators use HTTP/2 prior knowledge (h2c), without TLS/ALPN.
+    // Three bytes distinguish its connection preface from HTTP/1 methods;
+    // h2::server validates the complete preface, including fragmented input.
+    if buf.starts_with(b"PRI") {
+        handle_cleartext_h2(PrefixedStream::new(buf, client), state).await;
         return;
     }
 
@@ -633,10 +767,12 @@ async fn handle_connection(
         // chunked transfer-encoding and HTTP keep-alive.
         let (headers, _) = parse_headers(&header_buf);
         if let Some(host) = get_header(&headers, "host") {
-            let hostname = host.split(':').next().unwrap_or(host);
-            if let Some(upstream_tcp) = dial_upstream(hostname, 80).await {
-                let chained = PrefixedStream::new(header_buf, client);
-                handle_mitm_http(chained, upstream_tcp, hostname, state, false).await;
+            if let Some((hostname, port)) = parse_host_header(host) {
+                let upstream_host = capture_upstream_host(&state, &hostname).await;
+                if let Some(upstream_tcp) = dial_upstream(&upstream_host, port).await {
+                    let chained = PrefixedStream::new(header_buf.clone(), client);
+                    handle_mitm_http(chained, upstream_tcp, host, state, false).await;
+                }
             }
         } else {
             debug!("Transparent HTTP request missing Host header: {first_line}");
@@ -1051,6 +1187,76 @@ async fn handle_mitm_https_lazy_upstream<C>(
 /// connection the way a gRPC channel expects.
 type SharedH2Upstream = Arc<Mutex<Option<h2::client::SendRequest<bytes::Bytes>>>>;
 
+/// Address to dial and scheme to report. Android's host alias is translated
+/// only for the socket; captured URLs keep the authority the app requested.
+#[derive(Clone)]
+struct H2Target {
+    hostname: String,
+    upstream_host: String,
+    upstream_port: u16,
+    is_https: bool,
+}
+
+async fn capture_upstream_host(state: &Arc<Mutex<ProxyState>>, host: &str) -> String {
+    if host == "10.0.2.2" && state.lock().await.android_emulator {
+        "127.0.0.1".to_string()
+    } else {
+        host.to_string()
+    }
+}
+
+async fn handle_cleartext_h2<C>(client: C, state: Arc<Mutex<ProxyState>>)
+where
+    C: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let mut conn = match h2::server::handshake(client).await {
+        Ok(conn) => conn,
+        Err(e) => {
+            debug!("h2c handshake failed: {e}");
+            return;
+        }
+    };
+    let mut upstreams: HashMap<String, SharedH2Upstream> = HashMap::new();
+    while let Some(result) = conn.accept().await {
+        let (request, mut respond) = match result {
+            Ok(pair) => pair,
+            Err(e) => {
+                debug!("h2c accept error: {e}");
+                return;
+            }
+        };
+        let Some(authority) = request.uri().authority() else {
+            respond.send_reset(h2::Reason::PROTOCOL_ERROR);
+            continue;
+        };
+        if request.uri().scheme_str() != Some("http") {
+            respond.send_reset(h2::Reason::PROTOCOL_ERROR);
+            continue;
+        }
+        let host = authority
+            .host()
+            .trim_start_matches('[')
+            .trim_end_matches(']');
+        let target = H2Target {
+            hostname: host.to_string(),
+            upstream_host: capture_upstream_host(&state, host).await,
+            upstream_port: authority.port_u16().unwrap_or(80),
+            is_https: false,
+        };
+        let upstream = upstreams
+            .entry(authority.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(None)))
+            .clone();
+        tokio::spawn(serve_h2_stream(
+            request,
+            respond,
+            target,
+            state.clone(),
+            upstream,
+        ));
+    }
+}
+
 /// MITM an HTTP/2 connection (PILOT-245). Accepts each inbound h2 stream and
 /// spawns a per-stream task that proxies it to the upstream origin, streaming
 /// DATA frames and trailers in both directions (so gRPC keeps working) while
@@ -1072,8 +1278,12 @@ async fn handle_mitm_h2<C>(
         }
     };
 
-    let hostname = Arc::new(hostname);
-    let upstream_host = Arc::new(upstream_host);
+    let target = H2Target {
+        hostname: hostname.clone(),
+        upstream_host,
+        upstream_port,
+        is_https: true,
+    };
     let upstream: SharedH2Upstream = Arc::new(Mutex::new(None));
 
     // The accept loop IS the connection driver — keep polling it so
@@ -1085,9 +1295,7 @@ async fn handle_mitm_h2<C>(
                 tokio::spawn(serve_h2_stream(
                     request,
                     respond,
-                    hostname.clone(),
-                    upstream_host.clone(),
-                    upstream_port,
+                    target.clone(),
                     state.clone(),
                     upstream.clone(),
                 ));
@@ -1112,12 +1320,16 @@ async fn handle_mitm_h2<C>(
 async fn serve_h2_stream(
     request: http::Request<h2::RecvStream>,
     mut respond: h2::server::SendResponse<bytes::Bytes>,
-    hostname: Arc<String>,
-    upstream_host: Arc<String>,
-    upstream_port: u16,
+    target: H2Target,
     state: Arc<Mutex<ProxyState>>,
     upstream: SharedH2Upstream,
 ) {
+    let H2Target {
+        hostname,
+        upstream_host,
+        upstream_port,
+        is_https,
+    } = target;
     let start = now_ms();
     let handler = state.lock().await.handler.clone();
 
@@ -1135,7 +1347,7 @@ async fn serve_h2_stream(
         .uri
         .authority()
         .map(|a| a.as_str().to_string())
-        .unwrap_or_else(|| (*hostname).clone());
+        .unwrap_or_else(|| hostname.clone());
     let req_headers = parsed_headers_from_h2(&parts.headers);
 
     // Fire the request notification immediately on headers so waitForRequest /
@@ -1149,10 +1361,11 @@ async fn serve_h2_stream(
             raw_bytes: Vec::new(),
             override_host: None,
         };
-        h.notify_request(&notify_req, &cap_host, true).await;
+        h.notify_request(&notify_req, &cap_host, is_https).await;
     }
 
-    let url = format!("https://{cap_host}{path}");
+    let scheme = if is_https { "https" } else { "http" };
+    let url = format!("{scheme}://{cap_host}{path}");
     let route_matches = match handler.as_ref() {
         Some(h) => h.matches(&url).await,
         None => false,
@@ -1179,14 +1392,14 @@ async fn serve_h2_stream(
                     raw_bytes: Vec::new(),
                     override_host: None,
                 };
-                match handler.on_request(&mut req, &cap_host, true).await {
+                match handler.on_request(&mut req, &cap_host, is_https).await {
                     RequestOutcome::Synthesized(synth) => {
                         write_h2_synthesized(
                             &mut respond,
                             synth,
                             handler,
                             &req,
-                            &cap_host,
+                            (&cap_host, is_https),
                             &state,
                             start,
                         )
@@ -1202,7 +1415,7 @@ async fn serve_h2_stream(
                                 &mut respond,
                                 &origin,
                                 &req,
-                                &cap_host,
+                                (&cap_host, is_https),
                                 handler,
                                 &state,
                                 start,
@@ -1246,6 +1459,7 @@ async fn serve_h2_stream(
         &upstream_host,
         upstream_port,
         &hostname,
+        is_https,
     )
     .await
     {
@@ -1295,94 +1509,115 @@ async fn serve_h2_stream(
         }
     };
 
-    // Request side: send a buffered body, or stream (with any overflow prefix).
+    let capture = Arc::new(InFlight::new(CapturedEntry {
+        method: method.to_string(),
+        url,
+        status_code: 0,
+        content_type: String::new(),
+        request_size: 0,
+        response_size: 0,
+        start_time_ms: start,
+        duration_ms: 0,
+        request_headers: record_headers.clone(),
+        response_headers: Vec::new(),
+        request_body: Vec::new(),
+        response_body: Vec::new(),
+        is_https,
+        route_action: route_action.to_string(),
+        in_flight: true,
+        capture_id: 0,
+    }));
+    let stream_key = {
+        let mut state = state.lock().await;
+        state
+            .in_flight
+            .retain(|_, capture| capture.strong_count() > 0);
+        let key = state.next_stream_key;
+        state.next_stream_key += 1;
+        capture.entry.lock().unwrap().capture_id = key;
+        state.in_flight.insert(key, Arc::downgrade(&capture));
+        key
+    };
+
+    // Both directions publish their capped bodies while forwarding immediately.
+    let req_capture = capture.clone();
     let req_side = async move {
-        let mut tee = Vec::new();
-        let mut size: u64 = 0;
+        let mut tee = BodyTee::new(&req_capture, false);
         let mut up_send = up_send;
         if let Some(body) = complete_body {
             if !body.is_empty() {
-                size = body.len() as u64;
-                let cap = body.len().min(MAX_BODY_SIZE);
-                tee.extend_from_slice(&body[..cap]);
+                tee.append(&body);
                 if let Err(e) = send_owned_body(&mut up_send, body, true).await {
                     debug!("h2 buffered request send error: {e}");
                 }
             }
         } else if !end_on_headers {
             if !stream_prefix.is_empty() {
-                size += stream_prefix.len() as u64;
-                let cap = stream_prefix.len().min(MAX_BODY_SIZE);
-                tee.extend_from_slice(&stream_prefix[..cap]);
+                tee.append(&stream_prefix);
                 if let Err(e) = send_owned_body(&mut up_send, stream_prefix, false).await {
                     debug!("h2 request prefix send error: {e}");
                 }
             }
-            if let Err(e) = pump_body(&mut client_recv, &mut up_send, &mut tee, &mut size).await {
+            if let Err(e) = pump_body(&mut client_recv, &mut up_send, &mut tee).await {
                 debug!("h2 request body pump error: {e}");
+                up_send.send_reset(e.reason().unwrap_or(h2::Reason::INTERNAL_ERROR));
             }
         }
-        (tee, size)
     };
+    tokio::join!(req_side, forward_h2_response(resp_fut, respond, &capture));
 
-    // Response side: relay the upstream response (streamed) back to the client.
-    let resp_side = forward_h2_response(resp_fut, respond);
-
-    let ((req_tee, req_size), (status_code, resp_headers, resp_tee, resp_size)) =
-        tokio::join!(req_side, resp_side);
-
-    // Record the exchange. For never-ending streams this only runs once the
-    // stream closes (documented limitation).
+    // One transition under the global lock: a drain sees either the open
+    // snapshot or the completed row, never both (nor a gap between them).
+    let entry = capture.snapshot(false);
     let parsed_req = ParsedRequest {
         method: method.to_string(),
         path,
         headers: record_headers,
-        body: req_tee,
+        body: entry.request_body.clone(),
         raw_bytes: Vec::new(),
         override_host: None,
     };
     let parsed_resp = ParsedResponse {
-        status_code,
-        headers: resp_headers,
-        body: resp_tee,
+        status_code: entry.status_code,
+        headers: entry.response_headers.clone(),
+        body: entry.response_body.clone(),
         raw_bytes: Vec::new(),
     };
+    {
+        let mut state = state.lock().await;
+        state.in_flight.remove(&stream_key);
+        state.entries.push(entry);
+    }
     if let Some(h) = handler.as_ref() {
-        h.notify_response(&parsed_req, &parsed_resp, &cap_host, true, route_action)
+        h.notify_response(&parsed_req, &parsed_resp, &cap_host, is_https, route_action)
             .await;
     }
-    record_entry_sized(
-        &state,
-        &parsed_req,
-        &parsed_resp,
-        &cap_host,
-        true,
-        start,
-        route_action,
-        req_size,
-        resp_size,
-    )
-    .await;
 }
 
-/// Await the upstream response, relay its head + streamed body + trailers to the
-/// client, and return `(status, headers, teed_body, total_size)` for capture.
-/// Consumes `respond` (it owns the client send half).
+/// Relay response HEADERS immediately, then DATA and trailers. Capture metadata
+/// is published before sending the head so readers can inspect an open stream.
 async fn forward_h2_response(
     resp_fut: h2::client::ResponseFuture,
     mut respond: h2::server::SendResponse<bytes::Bytes>,
-) -> (i32, Vec<(String, String)>, Vec<u8>, u64) {
+    capture: &InFlight,
+) {
     let response = match resp_fut.await {
         Ok(r) => r,
         Err(e) => {
             debug!("h2 upstream response error: {e}");
             respond.send_reset(h2::Reason::INTERNAL_ERROR);
-            return (0, Vec::new(), Vec::new(), 0);
+            return;
         }
     };
     let (rparts, mut up_recv) = response.into_parts();
-    let status_code = rparts.status.as_u16() as i32;
-    let resp_headers = parsed_headers_from_h2(&rparts.headers);
+    {
+        let mut entry = capture.entry.lock().unwrap();
+        entry.status_code = rparts.status.as_u16() as i32;
+        entry.response_headers = parsed_headers_from_h2(&rparts.headers);
+        entry.content_type = get_header(&entry.response_headers, "content-type")
+            .unwrap_or_default()
+            .to_string();
+    }
 
     let mut client_resp = http::Response::new(());
     *client_resp.status_mut() = rparts.status;
@@ -1393,15 +1628,14 @@ async fn forward_h2_response(
         Ok(s) => s,
         Err(e) => {
             debug!("h2 send_response to client failed: {e}");
-            return (status_code, resp_headers, Vec::new(), 0);
+            return;
         }
     };
-    let mut tee = Vec::new();
-    let mut size: u64 = 0;
-    if let Err(e) = pump_body(&mut up_recv, &mut client_send, &mut tee, &mut size).await {
+    let mut tee = BodyTee::new(capture, true);
+    if let Err(e) = pump_body(&mut up_recv, &mut client_send, &mut tee).await {
         debug!("h2 response body pump error: {e}");
+        client_send.send_reset(e.reason().unwrap_or(h2::Reason::INTERNAL_ERROR));
     }
-    (status_code, resp_headers, tee, size)
 }
 
 /// Write a synthesized response (route `fulfill`/`abort`) to the client h2
@@ -1411,22 +1645,23 @@ async fn write_h2_synthesized(
     synth: ParsedResponse,
     handler: &Arc<dyn NetworkHandler>,
     req: &ParsedRequest,
-    cap_host: &str,
+    capture_origin: (&str, bool),
     state: &Arc<Mutex<ProxyState>>,
     start: u64,
 ) {
+    let (cap_host, is_https) = capture_origin;
     if synth.status_code == 0 {
         // Abort: reset the stream rather than send a response.
         respond.send_reset(h2::Reason::CANCEL);
         handler
-            .notify_response(req, &synth, cap_host, true, "aborted")
+            .notify_response(req, &synth, cap_host, is_https, "aborted")
             .await;
         record_entry_sized(
             state,
             req,
             &synth,
             cap_host,
-            true,
+            is_https,
             start,
             "aborted",
             req.body.len() as u64,
@@ -1453,7 +1688,7 @@ async fn write_h2_synthesized(
         Err(e) => debug!("h2 fulfill send_response failed: {e}"),
     }
     handler
-        .notify_response(req, &synth, cap_host, true, "mocked")
+        .notify_response(req, &synth, cap_host, is_https, "mocked")
         .await;
     let resp_size = synth.body.len() as u64;
     record_entry_sized(
@@ -1461,7 +1696,7 @@ async fn write_h2_synthesized(
         req,
         &synth,
         cap_host,
-        true,
+        is_https,
         start,
         "mocked",
         req.body.len() as u64,
@@ -1476,11 +1711,12 @@ async fn forward_h2_cross_origin(
     respond: &mut h2::server::SendResponse<bytes::Bytes>,
     origin: &OverrideOrigin,
     req: &ParsedRequest,
-    cap_host: &str,
+    capture_origin: (&str, bool),
     handler: &Arc<dyn NetworkHandler>,
     state: &Arc<Mutex<ProxyState>>,
     start: u64,
 ) {
+    let (cap_host, is_https) = capture_origin;
     let url = origin.url(&req.path);
     match crate::route_handler::fetch_upstream(&url, &req.method, &req.headers, &req.body).await {
         Some(resp) => {
@@ -1501,7 +1737,7 @@ async fn forward_h2_cross_origin(
                 Err(e) => debug!("h2 cross-origin send_response failed: {e}"),
             }
             handler
-                .notify_response(req, &resp, cap_host, true, "continued")
+                .notify_response(req, &resp, cap_host, is_https, "continued")
                 .await;
             let resp_size = resp.body.len() as u64;
             record_entry_sized(
@@ -1509,7 +1745,7 @@ async fn forward_h2_cross_origin(
                 req,
                 &resp,
                 cap_host,
-                true,
+                is_https,
                 start,
                 "continued",
                 req.body.len() as u64,
@@ -1606,22 +1842,16 @@ fn h2_headers_from_parsed(headers: &[(String, String)]) -> http::HeaderMap {
 
 /// Copy DATA frames and trailers from `recv` to `send`, threading flow control
 /// (release receive capacity as consumed, await send capacity before writing)
-/// and teeing up to `MAX_BODY_SIZE` bytes into `tee` while counting the true
-/// total in `total`.
+/// and publishing up to `MAX_BODY_SIZE` bytes plus the true byte count.
 async fn pump_body(
     recv: &mut h2::RecvStream,
     send: &mut h2::SendStream<bytes::Bytes>,
-    tee: &mut Vec<u8>,
-    total: &mut u64,
+    tee: &mut BodyTee<'_>,
 ) -> Result<(), h2::Error> {
     while let Some(chunk) = recv.data().await {
         let mut chunk = chunk?;
         let len = chunk.len();
-        *total += len as u64;
-        if tee.len() < MAX_BODY_SIZE {
-            let take = (MAX_BODY_SIZE - tee.len()).min(len);
-            tee.extend_from_slice(&chunk[..take]);
-        }
+        tee.append(&chunk);
         // Forward the chunk in send-window-sized pieces. Sending only what the
         // downstream window currently allows (rather than waiting for the whole
         // chunk's worth of capacity) keeps data flowing — waiting for a full
@@ -1647,7 +1877,17 @@ async fn pump_body(
     // After DATA drains, forward trailers (grpc-status/grpc-message live here)
     // or end the stream cleanly with an empty final frame.
     match recv.trailers().await? {
-        Some(trailers) => send.send_trailers(trailers)?,
+        Some(trailers) => {
+            if tee.response {
+                tee.capture
+                    .entry
+                    .lock()
+                    .unwrap()
+                    .response_headers
+                    .extend(parsed_headers_from_h2(&trailers));
+            }
+            send.send_trailers(trailers)?;
+        }
         None => send.send_data(bytes::Bytes::new(), true)?,
     }
     Ok(())
@@ -1661,12 +1901,17 @@ async fn ensure_h2_upstream(
     upstream_host: &str,
     upstream_port: u16,
     sni: &str,
+    is_https: bool,
 ) -> Option<h2::client::SendRequest<bytes::Bytes>> {
     let mut guard = upstream.lock().await;
     if let Some(sr) = guard.as_ref() {
         return Some(sr.clone());
     }
-    let sr = connect_h2_upstream(state, upstream_host, upstream_port, sni).await?;
+    let sr = if is_https {
+        connect_h2_upstream(state, upstream_host, upstream_port, sni).await?
+    } else {
+        handshake_h2_upstream(dial_upstream(upstream_host, upstream_port).await?).await?
+    };
     *guard = Some(sr.clone());
     Some(sr)
 }
@@ -1709,10 +1954,17 @@ async fn connect_h2_upstream(
         return None;
     }
 
-    let (send_req, connection) = match h2::client::handshake(tls).await {
+    handshake_h2_upstream(tls).await
+}
+
+async fn handshake_h2_upstream<S>(stream: S) -> Option<h2::client::SendRequest<bytes::Bytes>>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (send_req, connection) = match h2::client::handshake(stream).await {
         Ok(x) => x,
         Err(e) => {
-            debug!("h2 upstream handshake failed for {server_name_host}: {e}");
+            debug!("h2 upstream handshake failed: {e}");
             return None;
         }
     };
@@ -2491,7 +2743,7 @@ async fn record_entry_sized(
         }
     };
 
-    state.lock().await.entries.push(CapturedEntry {
+    state.lock().await.push_entry(CapturedEntry {
         method: req.method.clone(),
         url,
         status_code: resp.status_code,
@@ -2505,6 +2757,8 @@ async fn record_entry_sized(
         request_body: truncate(&req.body),
         response_body: truncate(&resp.body),
         is_https,
+        in_flight: false,
+        capture_id: 0,
         route_action: route_action.to_string(),
     });
 }
@@ -2947,7 +3201,7 @@ async fn handle_http(
         Err(e) => {
             debug!("Failed to connect to {connect_target}: {e}");
             let _ = client.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await;
-            state.lock().await.entries.push(CapturedEntry {
+            state.lock().await.push_entry(CapturedEntry {
                 method: method.to_string(),
                 url: target_url.to_string(),
                 status_code: 502,
@@ -2961,6 +3215,8 @@ async fn handle_http(
                 request_body,
                 response_body: Vec::new(),
                 is_https: false,
+                in_flight: false,
+                capture_id: 0,
                 route_action: String::new(),
             });
             return;
@@ -3052,7 +3308,7 @@ async fn handle_http(
 
     // Truncate bodies to 1MB max
     let max_body = MAX_BODY_SIZE;
-    state.lock().await.entries.push(CapturedEntry {
+    state.lock().await.push_entry(CapturedEntry {
         method: method.to_string(),
         url: target_url.to_string(),
         status_code,
@@ -3074,6 +3330,8 @@ async fn handle_http(
             response_body
         },
         is_https: false,
+        in_flight: false,
+        capture_id: 0,
         route_action: if was_continued {
             "continued".to_string()
         } else {
@@ -3278,6 +3536,8 @@ pub(crate) async fn handle_transparent_tcp<S>(
 
     if is_tls {
         handle_transparent_tls(chained, dst_host, dst_port, state, mitm_ca).await;
+    } else if peek == *b"PRI" {
+        handle_cleartext_h2(chained, state).await;
     } else {
         let Some(upstream_tcp) = dial_upstream(&dst_host, dst_port).await else {
             return;
@@ -3571,7 +3831,7 @@ async fn record_passthrough_entry(state: &Arc<Mutex<ProxyState>>, host: &str, po
     } else {
         format!("https://{host}:{port}/")
     };
-    state.lock().await.entries.push(CapturedEntry {
+    state.lock().await.push_entry(CapturedEntry {
         method: "CONNECT".to_string(),
         url,
         status_code: 0,
@@ -3585,6 +3845,8 @@ async fn record_passthrough_entry(state: &Arc<Mutex<ProxyState>>, host: &str, po
         request_body: Vec::new(),
         response_body: Vec::new(),
         is_https: true,
+        in_flight: false,
+        capture_id: 0,
         route_action: "passthrough".to_string(),
     });
 }
@@ -4779,6 +5041,9 @@ mod tests {
         let (seen_tx, mut seen_rx) = tokio::sync::mpsc::unbounded_channel();
         let state = Arc::new(Mutex::new(ProxyState {
             entries: Vec::new(),
+            in_flight: HashMap::new(),
+            next_stream_key: 0,
+            android_emulator: false,
             tls_client_config: client_config.clone(),
             h2_client_config: client_config.clone(),
             handler: Some(Arc::new(SyntheticHttpsHandler { seen_tx })),
@@ -4961,7 +5226,7 @@ mod tests {
         let proxy = NetworkProxy::start(ca).await.unwrap();
         let port = proxy.port();
 
-        proxy.state.lock().await.entries.push(CapturedEntry {
+        proxy.state.lock().await.push_entry(CapturedEntry {
             method: "GET".to_string(),
             url: "https://example.test/users/1".to_string(),
             status_code: 200,
@@ -4975,6 +5240,8 @@ mod tests {
             request_body: Vec::new(),
             response_body: b"{}".to_vec(),
             is_https: true,
+            in_flight: false,
+            capture_id: 0,
             route_action: String::new(),
         });
 
@@ -5315,6 +5582,9 @@ mod tests {
         );
         Arc::new(Mutex::new(ProxyState {
             entries: Vec::new(),
+            in_flight: HashMap::new(),
+            next_stream_key: 0,
+            android_emulator: false,
             tls_client_config: client_config.clone(),
             h2_client_config: client_config,
             handler: None,
@@ -5644,6 +5914,9 @@ mod tests {
         let (seen_tx, mut seen_rx) = tokio::sync::mpsc::unbounded_channel();
         let state = Arc::new(Mutex::new(ProxyState {
             entries: Vec::new(),
+            in_flight: HashMap::new(),
+            next_stream_key: 0,
+            android_emulator: false,
             tls_client_config: client_config.clone(),
             h2_client_config: client_config.clone(),
             handler: Some(Arc::new(SyntheticHttpsHandler { seen_tx })),
@@ -5882,6 +6155,9 @@ mod tests {
         let upstream_cfg = client_config_trusting(origin_cert, &[b"h2", b"http/1.1"]);
         Arc::new(Mutex::new(ProxyState {
             entries: Vec::new(),
+            in_flight: HashMap::new(),
+            next_stream_key: 0,
+            android_emulator: false,
             tls_client_config: upstream_cfg.clone(),
             h2_client_config: upstream_cfg,
             handler,
@@ -6143,6 +6419,428 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn h2c_emulator_stream_captures_before_eos_and_preserves_authority() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut conn = h2::server::handshake(socket).await.unwrap();
+                while let Some(Ok((req, mut respond))) = conn.accept().await {
+                    tokio::spawn(async move {
+                        let mut recv = req.into_body();
+                        let response = http::Response::builder()
+                            .header("content-type", "application/grpc")
+                            .body(())
+                            .unwrap();
+                        let mut send = respond.send_response(response, false).unwrap();
+                        while let Some(Ok(chunk)) = recv.data().await {
+                            let len = chunk.len();
+                            send_owned_body(&mut send, chunk.to_vec(), false)
+                                .await
+                                .unwrap();
+                            recv.flow_control().release_capacity(len).unwrap();
+                        }
+                        let mut trailers = http::HeaderMap::new();
+                        trailers.insert("grpc-status", http::HeaderValue::from_static("0"));
+                        send.send_trailers(trailers).unwrap();
+                    });
+                }
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let ca = Arc::new(
+                MitmAuthority::generate_new(
+                    &dir.path().join("ca.pem"),
+                    &dir.path().join("key.pem"),
+                )
+                .unwrap(),
+            );
+            let proxy = NetworkProxy::start(ca).await.unwrap();
+            // The alias is an Android-emulator property, never a global rewrite.
+            assert_eq!(
+                capture_upstream_host(&proxy.state, "10.0.2.2").await,
+                "10.0.2.2"
+            );
+            proxy.set_android_emulator(true).await;
+            let tcp = TcpStream::connect(("127.0.0.1", proxy.port()))
+                .await
+                .unwrap();
+            let (client, conn) = h2::client::handshake(tcp).await.unwrap();
+            tokio::spawn(async move {
+                let _ = conn.await;
+            });
+            let mut client = client.ready().await.unwrap();
+            let url = format!("http://10.0.2.2:{port}/google.firestore.v1.Firestore/Listen");
+            let request = http::Request::builder()
+                .method("POST")
+                .uri(&url)
+                .header("content-type", "application/grpc")
+                .body(())
+                .unwrap();
+            let (response, mut send) = client.send_request(request, false).unwrap();
+            send.send_data(bytes::Bytes::from_static(b"first"), false)
+                .unwrap();
+            let mut recv = response.await.unwrap().into_body();
+            assert_eq!(read_echo(&mut recv, 5).await, b"first");
+            let first = proxy.snapshot_entries().await;
+            assert_eq!(first.len(), 1);
+            assert_eq!(first[0].url, url);
+            assert!(!first[0].is_https);
+            assert!(first[0].in_flight);
+            assert_eq!(first[0].response_body, b"first");
+            send.send_data(bytes::Bytes::from_static(b"second"), true)
+                .unwrap();
+            assert_eq!(read_echo(&mut recv, 6).await, b"second");
+            while let Some(chunk) = recv.data().await {
+                assert!(chunk.unwrap().is_empty());
+            }
+            assert_eq!(recv.trailers().await.unwrap().unwrap()["grpc-status"], "0");
+            wait_for_entries(&proxy.state, 1).await;
+            let final_entries = proxy.drain_entries().await;
+            assert_eq!(final_entries.len(), 1);
+            assert_eq!(final_entries[0].capture_id, first[0].capture_id);
+            assert_eq!(final_entries[0].response_body, b"firstsecond");
+            assert!(!final_entries[0].in_flight);
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn transparent_http_emulator_alias_uses_host_port() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buf = [0u8; 4096];
+                socket.read(&mut buf).await.unwrap();
+                socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                    )
+                    .await
+                    .unwrap();
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let ca = Arc::new(
+                MitmAuthority::generate_new(
+                    &dir.path().join("ca.pem"),
+                    &dir.path().join("key.pem"),
+                )
+                .unwrap(),
+            );
+            let proxy = NetworkProxy::start(ca).await.unwrap();
+            proxy.set_android_emulator(true).await;
+            let mut client = TcpStream::connect(("127.0.0.1", proxy.port()))
+                .await
+                .unwrap();
+            client
+                .write_all(
+                    format!("GET /accounts HTTP/1.1\r\nHost: 10.0.2.2:{port}\r\n\r\n").as_bytes(),
+                )
+                .await
+                .unwrap();
+            let mut response = Vec::new();
+            client.read_to_end(&mut response).await.unwrap();
+            assert!(response.ends_with(b"ok"));
+            let entries = wait_for_entries(&proxy.state, 1).await;
+            assert_eq!(entries[0].url, format!("http://10.0.2.2:{port}/accounts"));
+            assert!(!entries[0].is_https);
+        })
+        .await
+        .unwrap();
+    }
+
+    /// In-memory bidi origin: send HEADERS immediately and echo each DATA frame
+    /// without waiting for request EOS, just like a long-lived gRPC listener.
+    async fn open_echo_h2_proxy() -> (NetworkProxy, h2::client::SendRequest<bytes::Bytes>) {
+        let (_, cert) = origin_server_config("stream.test", &[b"h2"]);
+        let state = proxy_state_trusting(&cert, None);
+        let (up_client, up_server) = tokio::io::duplex(65536);
+        tokio::spawn(async move {
+            let mut conn = h2::server::handshake(up_server).await.unwrap();
+            while let Some(Ok((req, mut respond))) = conn.accept().await {
+                tokio::spawn(async move {
+                    let mut recv = req.into_body();
+                    let response = http::Response::builder()
+                        .header("content-type", "application/grpc")
+                        .body(())
+                        .unwrap();
+                    let mut send = respond.send_response(response, false).unwrap();
+                    while let Some(Ok(chunk)) = recv.data().await {
+                        let len = chunk.len();
+                        if send_owned_body(&mut send, chunk.to_vec(), false)
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                        recv.flow_control().release_capacity(len).unwrap();
+                    }
+                    let mut trailers = http::HeaderMap::new();
+                    trailers.insert("grpc-status", http::HeaderValue::from_static("0"));
+                    let _ = send.send_trailers(trailers);
+                });
+            }
+        });
+        let (up_send, up_conn) = h2::client::handshake(up_client).await.unwrap();
+        tokio::spawn(async move {
+            let _ = up_conn.await;
+        });
+        let upstream = Arc::new(Mutex::new(Some(up_send)));
+        let (client, server) = tokio::io::duplex(65536);
+        let proxy_state = state.clone();
+        tokio::spawn(async move {
+            let mut conn = h2::server::handshake(server).await.unwrap();
+            while let Some(Ok((req, respond))) = conn.accept().await {
+                tokio::spawn(serve_h2_stream(
+                    req,
+                    respond,
+                    H2Target {
+                        hostname: "stream.test".into(),
+                        upstream_host: "unused".into(),
+                        upstream_port: 443,
+                        is_https: true,
+                    },
+                    proxy_state.clone(),
+                    upstream.clone(),
+                ));
+            }
+        });
+        let (send, conn) = h2::client::handshake(client).await.unwrap();
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+        let (shutdown_tx, _) = tokio::sync::oneshot::channel();
+        (
+            NetworkProxy {
+                port: 0,
+                state,
+                shutdown_tx,
+            },
+            send,
+        )
+    }
+
+    async fn open_echo_stream(
+        client: &mut h2::client::SendRequest<bytes::Bytes>,
+    ) -> (h2::SendStream<bytes::Bytes>, h2::RecvStream) {
+        let request = http::Request::builder()
+            .method("POST")
+            .uri("https://stream.test/google.firestore.v1.Firestore/Listen")
+            .header("content-type", "application/grpc")
+            .body(())
+            .unwrap();
+        let (response, send) = client.send_request(request, false).unwrap();
+        (send, response.await.unwrap().into_body())
+    }
+
+    async fn read_echo(recv: &mut h2::RecvStream, length: usize) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        while bytes.len() < length {
+            let chunk = recv.data().await.unwrap().unwrap();
+            recv.flow_control().release_capacity(chunk.len()).unwrap();
+            bytes.extend_from_slice(&chunk);
+        }
+        bytes
+    }
+
+    #[tokio::test]
+    async fn h2_open_stream_snapshots_grow_and_complete_without_duplicates() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let (proxy, client) = open_echo_h2_proxy().await;
+            let mut client = client.ready().await.unwrap();
+            let (mut send, mut recv) = open_echo_stream(&mut client).await;
+            let head = proxy.drain_entries().await;
+            assert_eq!(head.len(), 1);
+            assert!(head[0].in_flight);
+            assert_eq!(head[0].status_code, 200);
+            assert_eq!(head[0].content_type, "application/grpc");
+            assert!(head[0].response_body.is_empty());
+            assert_eq!(get_header(&head[0].response_headers, "grpc-status"), None);
+
+            // Includes half a gRPC frame: capture must preserve the exact bytes.
+            let first = b"\x00\x00\x00\x00\x02\x08";
+            send.send_data(bytes::Bytes::from_static(first), false)
+                .unwrap();
+            assert_eq!(read_echo(&mut recv, first.len()).await, first);
+            let snapshot = proxy.snapshot_entries().await;
+            assert_eq!(snapshot.len(), 1);
+            assert_eq!(snapshot[0].request_body, first);
+            assert_eq!(snapshot[0].response_body, first);
+            assert_eq!(snapshot[0].response_size, first.len() as u64);
+            assert!(snapshot[0].in_flight);
+            assert!(snapshot[0].route_action.is_empty());
+
+            // The next test's reset must preserve open streams, and their
+            // snapshots remain cumulative without mutating the prior trace.
+            proxy.reset_capture_state().await;
+            send.send_data(bytes::Bytes::from_static(b"\x01"), false)
+                .unwrap();
+            assert_eq!(read_echo(&mut recv, 1).await, b"\x01");
+            let later = proxy.drain_entries().await;
+            assert_eq!(later.len(), 1);
+            assert_eq!(later[0].response_body, b"\x00\x00\x00\x00\x02\x08\x01");
+            assert_eq!(later[0].request_size, 7);
+            assert_eq!(later[0].start_time_ms, snapshot[0].start_time_ms);
+            assert!(later[0].duration_ms >= snapshot[0].duration_ms);
+            assert_eq!(snapshot[0].response_body, first);
+
+            send.send_data(bytes::Bytes::new(), true).unwrap();
+            while let Some(chunk) = recv.data().await {
+                assert!(chunk.unwrap().is_empty());
+            }
+            assert_eq!(recv.trailers().await.unwrap().unwrap()["grpc-status"], "0");
+            wait_for_entries(&proxy.state, 1).await;
+            let live_complete = proxy.snapshot_entries().await;
+            assert_eq!(live_complete.len(), 1);
+            assert_eq!(live_complete[0].capture_id, head[0].capture_id);
+            assert_eq!(snapshot[0].capture_id, head[0].capture_id);
+            assert_eq!(proxy.snapshot_entries().await.len(), 1);
+            let complete = proxy.drain_entries().await;
+            assert_eq!(complete[0].capture_id, live_complete[0].capture_id);
+            assert_eq!(complete.len(), 1);
+            assert!(!complete[0].in_flight);
+            assert_eq!(complete[0].response_body, later[0].response_body);
+            assert_eq!(
+                get_header(&complete[0].response_headers, "grpc-status"),
+                Some("0")
+            );
+            assert!(proxy.drain_entries().await.is_empty());
+        })
+        .await
+        .expect("open stream capture must not wait for EOS");
+    }
+
+    #[tokio::test]
+    async fn h2_same_url_streams_stay_distinct_and_stop_snapshots_open_streams() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let (proxy, client) = open_echo_h2_proxy().await;
+            let mut client = client.ready().await.unwrap();
+            let (mut first, mut first_recv) = open_echo_stream(&mut client).await;
+            let (_second, _second_recv) = open_echo_stream(&mut client).await;
+            first
+                .send_data(bytes::Bytes::from_static(b"first"), true)
+                .unwrap();
+            assert_eq!(read_echo(&mut first_recv, 5).await, b"first");
+            while let Some(chunk) = first_recv.data().await {
+                assert!(chunk.unwrap().is_empty());
+            }
+            wait_for_entries(&proxy.state, 1).await;
+            let entries = proxy.stop().await;
+            assert_eq!(entries.len(), 2);
+            assert_ne!(entries[0].capture_id, entries[1].capture_id);
+            assert_eq!(entries.iter().filter(|e| e.in_flight).count(), 1);
+            assert_eq!(entries.iter().filter(|e| !e.in_flight).count(), 1);
+            assert_eq!(entries[0].url, entries[1].url);
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn h2_reset_stream_leaves_no_stale_open_capture() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let (proxy, client) = open_echo_h2_proxy().await;
+            let mut client = client.ready().await.unwrap();
+            let (mut send, _recv) = open_echo_stream(&mut client).await;
+            assert_eq!(proxy.drain_entries().await.len(), 1);
+            send.send_reset(h2::Reason::CANCEL);
+            wait_for_entries(&proxy.state, 1).await;
+            let entries = proxy.drain_entries().await;
+            assert_eq!(entries.len(), 1);
+            assert!(!entries[0].in_flight);
+            assert!(proxy.state.lock().await.in_flight.is_empty());
+            assert!(proxy.drain_entries().await.is_empty());
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn h2_cancelled_task_capture_buffers_are_not_owned_by_registry() {
+        let (proxy, client) = open_echo_h2_proxy().await;
+        let mut client = client.ready().await.unwrap();
+        let (_send, _recv) = open_echo_stream(&mut client).await;
+        // Model a task aborted before its normal completion cleanup runs.
+        let capture = Arc::new(InFlight::new(proxy.drain_entries().await.remove(0)));
+        let weak = Arc::downgrade(&capture);
+        proxy
+            .state
+            .lock()
+            .await
+            .in_flight
+            .insert(u64::MAX, weak.clone());
+        drop(capture);
+        assert!(
+            weak.upgrade().is_none(),
+            "registry must not retain abandoned bodies"
+        );
+        assert_eq!(proxy.drain_entries().await.len(), 1);
+        assert_eq!(proxy.state.lock().await.in_flight.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn h2_large_stream_keeps_flowing_while_capture_locked() {
+        // Deterministic throughput guard: after 1 MiB, even an indefinitely
+        // held capture mutex must add zero waiting to a further 32 MiB in each
+        // direction. Also hold ProxyState to catch accidental per-frame use.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let (proxy, client) = open_echo_h2_proxy().await;
+            let mut client = client.ready().await.unwrap();
+            let (mut send, mut recv) = open_echo_stream(&mut client).await;
+            for _ in 0..MAX_BODY_SIZE / BIG_FRAME.len() {
+                let (sent, received) = tokio::join!(
+                    send_owned_body(&mut send, BIG_FRAME.to_vec(), false),
+                    read_echo(&mut recv, BIG_FRAME.len()),
+                );
+                sent.unwrap();
+                assert_eq!(received, BIG_FRAME);
+            }
+            let mut state = proxy.state.lock().await;
+            let capture = state.in_flight.values().next().unwrap().upgrade().unwrap();
+            let snapshot = capture.snapshot(true);
+            assert_eq!(snapshot.request_body.len(), MAX_BODY_SIZE);
+            assert_eq!(snapshot.response_body.len(), MAX_BODY_SIZE);
+            {
+                // Hold the stream mutex on another OS thread, with a deadline
+                // so a regression fails instead of deadlocking the test runtime.
+                let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+                let (release_tx, release_rx) = std::sync::mpsc::channel();
+                let locked_capture = capture.clone();
+                let holder = std::thread::spawn(move || {
+                    let _guard = locked_capture.entry.lock().unwrap();
+                    ready_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(5)).is_ok()
+                });
+                ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                for _ in 0..512 {
+                    let (sent, received) = tokio::join!(
+                        send_owned_body(&mut send, BIG_FRAME.to_vec(), false),
+                        read_echo(&mut recv, BIG_FRAME.len()),
+                    );
+                    sent.unwrap();
+                    assert_eq!(received, BIG_FRAME);
+                }
+                let _ = release_tx.send(());
+                assert!(
+                    holder.join().unwrap(),
+                    "DATA must not wait for the capture lock"
+                );
+            }
+            let entries = state.drain_entries();
+            let size = (MAX_BODY_SIZE + 512 * BIG_FRAME.len()) as u64;
+            assert_eq!(entries[0].request_size, size);
+            assert_eq!(entries[0].response_size, size);
+            assert_eq!(entries[0].request_body.len(), MAX_BODY_SIZE);
+            assert_eq!(entries[0].response_body.len(), MAX_BODY_SIZE);
+        })
+        .await
+        .expect("capture must not stall a large streamed response");
+    }
+
+    #[tokio::test]
     async fn h2_streaming_response_does_not_buffer() {
         let dir = tempfile::tempdir().unwrap();
         let ca = Arc::new(
@@ -6209,6 +6907,9 @@ mod tests {
         );
         Arc::new(Mutex::new(ProxyState {
             entries: Vec::new(),
+            in_flight: HashMap::new(),
+            next_stream_key: 0,
+            android_emulator: false,
             tls_client_config: cfg.clone(),
             h2_client_config: cfg,
             handler: Some(handler),

@@ -45,6 +45,8 @@ import { deviceGroupSize, resolveDeviceGroup, validateAppResetOptions, validateD
 import { onActionProgress } from './action-progress.js';
 import { runInAttemptContext, type AttemptToken } from './attempt-fence.js';
 import { matchesTestFilter } from './test-filter.js';
+import { startLiveNetwork } from './trace/live-network.js';
+import { filterEntriesByHosts } from './trace/filter-hosts.js';
 
 // ─── Trace Device Info ───
 
@@ -167,6 +169,81 @@ function decodeHttpBody(body: Buffer | undefined, headers: Record<string, string
     // Fall through on decompression failure
   }
   return decoded;
+}
+
+type RawNetworkEntries = Awaited<ReturnType<Device['_stopNetworkCapture']>>['entries'];
+type DeviceNetworkEntries = Array<{ deviceId?: string; entries: RawNetworkEntries }>;
+
+/** Keep row/body identities stable as streams finish or new devices report data. */
+function createNetworkMapper(): (
+  rawNetworkByDevice: DeviceNetworkEntries, events: readonly AnyTraceEvent[], apiEntries: NetworkEntry[],
+) => NetworkEntry[] {
+  const indices = new Map<string, number>();
+  const stableIndex = (key: string): number => {
+    let index = indices.get(key);
+    if (index === undefined) { index = indices.size; indices.set(key, index); }
+    return index;
+  };
+  return (rawNetworkByDevice, events, apiEntries) => {
+    // Build sorted list of action timestamps with their indices
+    const actionTimestamps = events
+      .filter((e): e is import('./trace/types.js').ActionTraceEvent | import('./trace/types.js').AssertionTraceEvent =>
+        e.type === 'action' || e.type === 'assertion')
+      // `timestamp` is the step's completion time; a request the step
+      // itself triggers (tap → fetch) starts before that, so anchor on
+      // when the step began. Falls back to completion for events that
+      // carry no start time.
+      .map((e) => ({ timestamp: e.startTime ?? e.timestamp, actionIndex: e.actionIndex, deviceId: e.deviceId }));
+
+    // A request is anchored to the latest step that started before it
+    // — on the device that made it. Group members interleave in the
+    // shared index space, so a global walk would hang bob's request off
+    // alice's step whenever hers was the more recent one. A device with
+    // no steps of its own (or an unlabelled entry) falls back to the
+    // whole list.
+    const findActionIndex = (startTimeMs: number, deviceId: string | undefined): number => {
+      const own = deviceId ? actionTimestamps.filter((a) => a.deviceId === deviceId) : [];
+      const candidates = own.length > 0 ? own : actionTimestamps;
+      let best = 0;
+      for (const a of candidates) {
+        if (a.timestamp <= startTimeMs) {
+          best = a.actionIndex;
+        }
+      }
+      return best;
+    };
+
+    const networkEntries = rawNetworkByDevice.flatMap(({ deviceId, entries }) => entries.map((e) => ({ deviceId, e }))).map(({ deviceId, e }, i) => {
+      const requestHeaders = e.requestHeadersJson ? JSON.parse(e.requestHeadersJson) : {};
+      const responseHeaders = e.responseHeadersJson ? JSON.parse(e.responseHeadersJson) : {};
+      return {
+        index: stableIndex(JSON.stringify([deviceId ?? '', e.captureId || `legacy:${i}`])),
+        ...(deviceId ? { deviceId } : {}),
+        actionIndex: findActionIndex(e.startTimeMs, deviceId),
+        startTime: e.startTimeMs,
+        endTime: e.startTimeMs + e.durationMs,
+        method: e.method,
+        url: e.url,
+        status: e.statusCode,
+        contentType: e.contentType,
+        requestSize: e.requestSize,
+        responseSize: e.responseSize,
+        duration: e.durationMs,
+        inFlight: e.inFlight || undefined,
+        requestHeaders,
+        responseHeaders,
+        requestBody: decodeHttpBody(e.requestBody, requestHeaders),
+        responseBody: decodeHttpBody(e.responseBody, responseHeaders),
+        routeAction: e.routeAction
+          ? e.routeAction as import('./trace/types.js').NetworkEntry['routeAction']
+          : undefined,
+      };
+    });
+
+    return [...networkEntries, ...apiEntries.map((entry, i) => ({
+      ...entry, index: stableIndex(`api:${i}`),
+    }))];
+  };
 }
 
 function _warnCaptureOnce(prefix: string, msg: string): void {
@@ -695,8 +772,8 @@ export interface RunOptions {
    * matches any pattern in either set is skipped.
    */
   projectGrepInvert?: RegExp[];
-  /** Called with mapped network entries after capture stops. Used by UI mode for live streaming. */
-  onNetworkEntries?: (entries: import('./trace/types.js').NetworkEntry[]) => void;
+  /** Full snapshots during a test and after its final drain. Enables live polling in UI mode. */
+  onNetworkEntries?: (entries: NetworkEntry[], networkCaptureEnabled?: boolean) => void;
   /**
    * Append a unique query parameter to the dynamic import URL so Node.js
    * treats it as a new module. Required by persistent processes (UI workers)
@@ -1526,7 +1603,7 @@ async function runSuiteContext(
             multiDevice && d._traceDeviceId ? `[${d._traceDeviceId}] ${msg}` : msg;
           for (const d of devices) {
             try {
-              const res = await d._startNetworkCapture({ requireIsolation: multiDevice });
+              const res = await d._startNetworkCapture({ requireIsolation: multiDevice, httpPorts: traceConfig.networkHttpPorts });
               if (res.success) networkCapturingDevices.add(d);
               if (!res.success && res.errorMessage) {
                 _warnCaptureOnce('Network capture disabled', forDevice(d, res.errorMessage));
@@ -1612,6 +1689,8 @@ async function runSuiteContext(
         ...suiteFixtures,
         request: requestContext,
       };
+      const mapNetworkEntries = createNetworkMapper();
+      let stopLiveNetwork = async (): Promise<void> => {};
       let testFixtureTeardown: (() => Promise<void>) | undefined;
       let allFixtures: Record<string, unknown> = baseFixtures;
 
@@ -1627,6 +1706,35 @@ async function runSuiteContext(
           if (attempt === 0 && fullName !== announced) {
             if (opts.onTestStart) await opts.onTestStart(fullName, { policy });
             opts.reporter?.onTestStart?.(fullName, opts.testFilePath, { project: opts.projectName });
+          }
+
+          opts.onNetworkEntries?.([], traceConfig.network);
+          if (traceCollector && opts.onNetworkEntries) {
+            const liveCollector = traceCollector;
+            const latestByDevice = new Map<Device, RawNetworkEntries>();
+            const unsupported = new Set<Device>();
+            stopLiveNetwork = startLiveNetwork(async () => {
+              if (traceConfig.network) {
+                await Promise.all(networkDrainDevices().map(async (d) => {
+                  if (unsupported.has(d)) return;
+                  try {
+                    const res = await d._snapshotNetworkCapture();
+                    if (!res.success) throw new Error(res.errorMessage);
+                    latestByDevice.set(d, filterEntriesByHosts(res.entries, {
+                      allow: traceConfig.networkHosts, deny: traceConfig.networkIgnoreHosts,
+                    }));
+                  } catch (err) {
+                    if (isAbortError(err) || opts.abortSignal?.aborted) return;
+                    if ((err as { code?: number }).code === 12) unsupported.add(d);
+                    _warnCaptureOnce('Live network snapshot unavailable', err instanceof Error ? err.message : String(err));
+                  }
+                }));
+              }
+              return mapNetworkEntries(
+                [...latestByDevice].map(([d, entries]) => ({ deviceId: d._traceDeviceId, entries })),
+                liveCollector.events, requestContext.getNetworkEntries(),
+              );
+            }, (entries) => opts.onNetworkEntries?.(entries, traceConfig.network), opts.abortSignal);
           }
 
           // Replay beforeAll events into this test's trace so they appear in
@@ -1901,7 +2009,8 @@ async function runSuiteContext(
               await testFixtureTeardown();
             }
           } finally {
-            // Ensure request fixture is cleaned up even if teardown throws
+            // Finish any read before draining capture or changing test attribution.
+            await stopLiveNetwork();
             requestContext.dispose();
           }
         }
@@ -1962,10 +2071,8 @@ async function runSuiteContext(
         // once after the file so soft-reset tests do not churn device routing.
         // Each device's daemon runs its own proxy with its own index space,
         // so entries are collected per device and re-indexed when merged.
-        type RawEntries = Awaited<ReturnType<Device['_stopNetworkCapture']>>['entries'];
-        const rawNetworkByDevice: Array<{ deviceId?: string; entries: RawEntries }> = [];
+        const rawNetworkByDevice: DeviceNetworkEntries = [];
         if (traceConfig.network) {
-          const { filterEntriesByHosts } = await import('./trace/filter-hosts.js');
           for (const d of networkDrainDevices()) {
             try {
               const res = await d._stopNetworkCapture({ keepRunning: true });
@@ -2045,80 +2152,13 @@ async function runSuiteContext(
         const collector = primary.tracing._stopManaged();
         setActiveTraceCollector(null);
 
-        // Map network entries, associating each with the closest preceding action
-        let networkEntries: NetworkEntry[] | undefined;
-        if (rawNetworkByDevice.length > 0 && collector) {
-          // Build sorted list of action timestamps with their indices
-          const actionTimestamps = collector.events
-            .filter((e): e is import('./trace/types.js').ActionTraceEvent | import('./trace/types.js').AssertionTraceEvent =>
-              e.type === 'action' || e.type === 'assertion')
-            // `timestamp` is the step's completion time; a request the step
-            // itself triggers (tap → fetch) starts before that, so anchor on
-            // when the step began. Falls back to completion for events that
-            // carry no start time.
-            .map((e) => ({ timestamp: e.startTime ?? e.timestamp, actionIndex: e.actionIndex, deviceId: e.deviceId }));
-
-          // A request is anchored to the latest step that started before it
-          // — on the device that made it. Group members interleave in the
-          // shared index space, so a global walk would hang bob's request off
-          // alice's step whenever hers was the more recent one. A device with
-          // no steps of its own (or an unlabelled entry) falls back to the
-          // whole list.
-          const findActionIndex = (startTimeMs: number, deviceId: string | undefined): number => {
-            const own = deviceId ? actionTimestamps.filter((a) => a.deviceId === deviceId) : [];
-            const candidates = own.length > 0 ? own : actionTimestamps;
-            let best = 0;
-            for (const a of candidates) {
-              if (a.timestamp <= startTimeMs) {
-                best = a.actionIndex;
-              }
-            }
-            return best;
-          };
-
-          networkEntries = rawNetworkByDevice.flatMap(({ deviceId, entries }) => entries.map((e) => ({ deviceId, e }))).map(({ deviceId, e }, i) => {
-            const requestHeaders = e.requestHeadersJson ? JSON.parse(e.requestHeadersJson) : {};
-            const responseHeaders = e.responseHeadersJson ? JSON.parse(e.responseHeadersJson) : {};
-            return {
-              index: i,
-              ...(deviceId ? { deviceId } : {}),
-              actionIndex: findActionIndex(e.startTimeMs, deviceId),
-              startTime: e.startTimeMs,
-              endTime: e.startTimeMs + e.durationMs,
-              method: e.method,
-              url: e.url,
-              status: e.statusCode,
-              contentType: e.contentType,
-              requestSize: e.requestSize,
-              responseSize: e.responseSize,
-              duration: e.durationMs,
-              requestHeaders,
-              responseHeaders,
-              requestBody: decodeHttpBody(e.requestBody, requestHeaders),
-              responseBody: decodeHttpBody(e.responseBody, responseHeaders),
-              routeAction: e.routeAction
-                ? e.routeAction as import('./trace/types.js').NetworkEntry['routeAction']
-                : undefined,
-            };
-          });
-
-        }
-
-        // Merge API request fixture network entries (test-level HTTP calls)
-        const apiEntries = requestContext.getNetworkEntries();
-        if (apiEntries.length > 0) {
-          const deviceEntries = networkEntries ?? [];
-          const offset = deviceEntries.length;
-          const mappedApiEntries = apiEntries.map((e, i) => ({
-            ...e,
-            index: offset + i,
-          }));
-          networkEntries = [...deviceEntries, ...mappedApiEntries];
-        }
+        const networkEntries = mapNetworkEntries(
+          rawNetworkByDevice, collector?.events ?? [], requestContext.getNetworkEntries(),
+        );
 
         // Notify UI mode with the full set of network entries (device + API)
         if (networkEntries && opts.onNetworkEntries) {
-          opts.onNetworkEntries(networkEntries);
+          opts.onNetworkEntries(networkEntries, traceConfig.network);
         }
         if (collector) {
           const retain = shouldRetain(traceConfig.mode, status === 'passed', attempt);

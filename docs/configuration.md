@@ -137,6 +137,9 @@ interface TraceConfig {
                                  // (gRPC, ADB/simctl, device events) into the
                                  // trace, shown under the `daemon` source
                                  // (default: false; --verbose for debug detail)
+  networkHttpPorts?: number[];   // Android: additional cleartext HTTP/1.1 or HTTP/2 ports.
+                                 // Defaults still include HTTP 80 and HTTPS 443.
+                                 // Firebase emulators: [8080, 9099, 5001, 9199].
   networkHosts?: string[];       // Hostname allowlist (glob patterns). When set,
                                  // only entries whose host matches a pattern are
                                  // kept in the trace archive.

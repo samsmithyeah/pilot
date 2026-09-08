@@ -509,7 +509,7 @@ function App() {
     startTime: 0,
     endTime: viewedTestNode?.duration ?? 0,
     device: { serial: testDeviceSerial, isEmulator: deviceIsEmulator },
-    traceConfig: { screenshots: true, snapshots: true, sources: true, network: true, deviceLogs: false, daemonLogs: false },
+    traceConfig: { screenshots: true, snapshots: true, sources: true, network: currentTrace?.networkCaptureEnabled ?? true, deviceLogs: false, daemonLogs: false },
     actionCount: liveActionCount,
     screenshotCount: screenshots.size,
     error: viewedTestNode?.error,
@@ -521,7 +521,7 @@ function App() {
     appResetScope: viewedIsolation?.appResetScope,
     appState: viewedIsolation?.appState,
     devices: viewedGroupDevices,
-  }), [viewedTestName, viewedTestFile, viewedTestNode, viewedTestProject, isRunning, liveActionCount, screenshots.size, testDeviceSerial, deviceIsEmulator, tapsmithVersion, viewedIsolation, viewedGroupDevices]);
+  }), [viewedTestName, viewedTestFile, viewedTestNode, viewedTestProject, isRunning, liveActionCount, screenshots.size, testDeviceSerial, deviceIsEmulator, tapsmithVersion, viewedIsolation, viewedGroupDevices, currentTrace?.networkCaptureEnabled]);
 
   // Prefer a real completed event at this index; fall back to a synthesized
   // one from the in-flight slot so ScreenshotPanel can render the before-
@@ -1100,14 +1100,14 @@ function App() {
         if (!key) break;
         setTestTraces((prev) => {
           const { data, map } = getOrCreateTrace(key, prev);
-          const networkBodies = new Map(data.networkBodies);
+          const networkBodies = new Map<string, Uint8Array>();
           if (msg.bodies) {
             for (const [path, b64] of Object.entries(msg.bodies)) {
               networkBodies.set(path, base64ToBytes(b64));
             }
           }
           const next = new Map(map);
-          next.set(key, { ...data, network: msg.entries, networkBodies });
+          next.set(key, { ...data, network: msg.entries, networkBodies, networkCaptureEnabled: msg.networkCaptureEnabled ?? data.networkCaptureEnabled });
           return next;
         });
         break;

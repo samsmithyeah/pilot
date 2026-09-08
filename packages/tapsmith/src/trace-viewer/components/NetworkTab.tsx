@@ -30,7 +30,8 @@ const NETWORK_STYLES = `
   .net-list { flex: 1; min-width: 0; overflow: auto; }
   .net-list.with-detail { flex: 0 0 42%; border-right: 1px solid var(--color-border); }
 
-  .net-table { width: 100%; border-collapse: collapse; font-size: 11px; table-layout: fixed; }
+  .net-table { width: 100%; min-width: 800px; border-collapse: collapse; font-size: 11px; table-layout: fixed; }
+  .net-list.with-detail .net-table { min-width: 420px; }
   .net-table th { text-align: left; padding: 4px 8px; color: var(--color-text-muted); border-bottom: 1px solid var(--color-border); cursor: pointer; user-select: none; white-space: nowrap; font-weight: 600; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; background: var(--color-bg); position: sticky; top: 0; z-index: 1; }
   .net-table th:hover { color: var(--color-text-secondary); }
   .net-sort-indicator { margin-left: 4px; font-size: 9px; }
@@ -49,8 +50,8 @@ const NETWORK_STYLES = `
   .net-status-dot.spending { background: var(--color-text-faintest); }
 
   .net-name-cell { display: flex; align-items: center; min-width: 0; }
-  .net-name { overflow: hidden; text-overflow: ellipsis; font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace; color: var(--color-text-secondary); }
-  .net-domain { color: var(--color-text-faintest); margin-left: 6px; font-size: 10px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; }
+  .net-name { flex-shrink: 0; max-width: 50%; overflow: hidden; text-overflow: ellipsis; font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace; color: var(--color-text-secondary); }
+  .net-domain { color: var(--color-text-faintest); margin-left: 6px; font-size: 10px; flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
   .net-method { font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace; font-size: 10px; font-weight: 700; color: var(--color-text-muted); }
   .net-method.get { color: var(--color-accent); }
@@ -82,6 +83,9 @@ const NETWORK_STYLES = `
   .net-route-continued { background: #eab30822; color: #ca8a04; border: 1px solid #eab30844; }
   .net-route-fetched { background: #3b82f622; color: #3b82f6; border: 1px solid #3b82f644; }
   .net-route-passthrough { background: #6b728022; color: #6b7280; border: 1px solid #6b728044; }
+
+  .net-streaming-badge { color: var(--color-accent); border: 1px solid var(--color-accent); }
+  .net-streaming-note { color: var(--color-text-muted); margin-bottom: 10px; }
 
   /* Detail panel */
   .net-detail { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--color-bg-secondary); overflow: hidden; }
@@ -138,6 +142,7 @@ function injectStyles() {
 // ─── Types ───
 
 interface Props {
+  networkCaptureEnabled?: boolean
   entries: NetworkEntry[]
   bodies: Map<string, Uint8Array>
   /**
@@ -257,6 +262,16 @@ function formatDuration(ms: number): string {
   return `${(ms / 1000).toFixed(2)} s`;
 }
 
+function entryDuration(entry: NetworkEntry): string {
+  return formatDuration(entry.duration) + (entry.inFlight ? ' so far' : '');
+}
+
+function streamingBadge(entry: NetworkEntry): preact.JSX.Element | null {
+  return entry.inFlight
+    ? <span class="net-route-badge net-streaming-badge" title="Stream was still open at capture time">Streaming</span>
+    : null;
+}
+
 function isJsonContentType(contentType: string): boolean {
   return contentType.toLowerCase().includes('json');
 }
@@ -285,7 +300,7 @@ function routeBadge(routeAction?: string): preact.JSX.Element | null {
 
 // ─── Component ───
 
-export function NetworkTab({ entries, bodies, deviceNames }: Props) {
+export function NetworkTab({ entries, bodies, deviceNames, networkCaptureEnabled }: Props) {
   injectStyles();
 
   const showDevices = !!deviceNames && deviceNames.length > 1;
@@ -380,7 +395,7 @@ export function NetworkTab({ entries, bodies, deviceNames }: Props) {
     return (
       <div class="no-content" data-testid="no-content">
         No network requests captured
-        <div class="no-content-note">Enable network capture in your trace config to record HTTP requests.</div>
+        {networkCaptureEnabled === false && <div class="no-content-note">Enable network capture in your trace config to record HTTP requests.</div>}
       </div>
     );
   }
@@ -548,6 +563,7 @@ export function NetworkTab({ entries, bodies, deviceNames }: Props) {
                       <div class="net-name-cell">
                         <span class={statusDotClass(entry)} />
                         <span class="net-name" title={entry.url}>{name}</span>
+                        {streamingBadge(entry)}
                         {!selected && domain && <span class="net-domain" title={domain}>{domain}</span>}
                         {routeBadge(entry.routeAction)}
                       </div>
@@ -565,7 +581,7 @@ export function NetworkTab({ entries, bodies, deviceNames }: Props) {
                     </td>
                     {!selected && <td class="net-type">{shortenContentType(entry.contentType) || '—'}</td>}
                     {!selected && <td class="net-size">{formatSize(entry.responseSize)}</td>}
-                    <td class="net-duration">{formatDuration(entry.duration)}</td>
+                    <td class="net-duration">{entryDuration(entry)}</td>
                     {!selected && (
                       <td class="net-waterfall-cell">
                         <Waterfall entry={entry} extent={timeExtent} />
@@ -650,6 +666,9 @@ function DetailPanel({ entry, bodies, tab, onTab, onClose, extent }: DetailPanel
         <button class="net-detail-close" onClick={onClose} title="Close" aria-label="Close">{'\u2715'}</button>
       </div>
       <div class="net-detail-body" data-testid="net-detail-body">
+        {entry.inFlight && <div class="net-streaming-note">
+          Streaming — still open at capture time. This snapshot shows the headers and body bytes captured so far.
+        </div>}
         {tab === 'headers' && <HeadersTab entry={entry} />}
         {tab === 'payload' && <PayloadTab entry={entry} body={requestBody} />}
         {tab === 'response' && <ResponseTab entry={entry} body={responseBody} />}
@@ -673,14 +692,14 @@ function HeadersTab({ entry }: { entry: NetworkEntry }) {
           <span class="net-summary-key">Status Code</span>
           <span class={`net-summary-value s${bucket}`}>
             {entry.routeAction === 'aborted' ? 'ABORTED' : (entry.status || '(pending)')}
-            {routeBadge(entry.routeAction)}
+            {routeBadge(entry.routeAction)}{streamingBadge(entry)}
           </span>
           {entry.contentType && <>
             <span class="net-summary-key">Content-Type</span>
             <span class="net-summary-value">{entry.contentType}</span>
           </>}
           <span class="net-summary-key">Duration</span>
-          <span class="net-summary-value">{formatDuration(entry.duration)}</span>
+          <span class="net-summary-value">{entryDuration(entry)}</span>
           <span class="net-summary-key">Request Size</span>
           <span class="net-summary-value">{formatSize(entry.requestSize)}</span>
           <span class="net-summary-key">Response Size</span>
@@ -718,7 +737,7 @@ function HeadersGrid({ headers }: { headers: Record<string, string> }) {
 
 function PayloadTab({ entry, body }: { entry: NetworkEntry; body: Uint8Array | undefined }) {
   if (!body || body.length === 0) {
-    return <div class="net-empty-inline">No request payload</div>;
+    return <div class="net-empty-inline">{entry.inFlight ? 'No request payload captured yet' : 'No request payload'}</div>;
   }
   return (
     <BodyViewer
@@ -732,7 +751,7 @@ function PayloadTab({ entry, body }: { entry: NetworkEntry; body: Uint8Array | u
 
 function ResponseTab({ entry, body }: { entry: NetworkEntry; body: Uint8Array | undefined }) {
   if (!body || body.length === 0) {
-    return <div class="net-empty-inline">No response body{entry.routeAction === 'aborted' ? ' (aborted)' : ''}</div>;
+    return <div class="net-empty-inline">{entry.inFlight ? 'No response body captured yet' : 'No response body'}{entry.routeAction === 'aborted' ? ' (aborted)' : ''}</div>;
   }
   return (
     <BodyViewer
@@ -828,7 +847,7 @@ function TimingTab({ entry, extent }: { entry: NetworkEntry; extent: { min: numb
   const startedAt = entry.startTime - extent.min;
   const rows = [
     { label: 'Queued', left: 0, width: (startedAt / total) * 100, value: `${formatDuration(startedAt)} waited` },
-    { label: 'Request', left: (startedAt / total) * 100, width: (entry.duration / total) * 100, value: formatDuration(entry.duration) },
+    { label: 'Request', left: (startedAt / total) * 100, width: (entry.duration / total) * 100, value: entryDuration(entry) },
   ];
   return (
     <>
@@ -852,8 +871,8 @@ function TimingTab({ entry, extent }: { entry: NetworkEntry; extent: { min: numb
           <span class="net-summary-key">Started</span>
           <span class="net-summary-value">{formatDuration(startedAt)} after first request</span>
           <span class="net-summary-key">Duration</span>
-          <span class="net-summary-value">{formatDuration(entry.duration)}</span>
-          <span class="net-summary-key">Finished</span>
+          <span class="net-summary-value">{entryDuration(entry)}</span>
+          <span class="net-summary-key">{entry.inFlight ? 'Snapshot taken' : 'Finished'}</span>
           <span class="net-summary-value">{formatDuration(entry.endTime - extent.min)} after first request</span>
         </div>
       </div>

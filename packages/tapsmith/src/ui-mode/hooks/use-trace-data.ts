@@ -23,6 +23,7 @@ export interface TestTraceData {
   hierarchies: Map<string, string>;
   sources: Map<string, string>;
   network: NetworkEntry[];
+  networkCaptureEnabled?: boolean;
   /** Raw network request/response body bytes keyed by path (e.g.
    * `network/res-0.bin`). Kept as bytes rather than a decoded string because
    * binary payloads — notably gRPC/protobuf — cannot survive a UTF-8 decode:

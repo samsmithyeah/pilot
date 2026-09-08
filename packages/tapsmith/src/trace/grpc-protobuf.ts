@@ -17,7 +17,7 @@
  * for services the table doesn't cover.
  *
  * Truncation is normal, not exceptional: capture caps stored bodies (1 MB) and
- * long-lived streams are recorded at teardown, so a captured body routinely
+ * long-lived streams are snapshotted while still open, so a captured body routinely
  * ends mid-frame. Every function here degrades to a partial result instead of
  * failing, and reports what it could not read.
  */
@@ -779,7 +779,7 @@ export function decodeBodyForDisplay(
           : '';
       out.push(
         `── truncated: ${framing.trailingBytes} trailing bytes${missing}\n` +
-          `   (capture caps stored bodies, and streams are recorded at teardown)\n`,
+          `   (capture caps stored bodies, and open streams are snapshotted before completion)\n`,
       );
     }
     const plural = total === 1 ? '' : 's';

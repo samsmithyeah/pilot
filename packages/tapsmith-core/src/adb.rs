@@ -1109,22 +1109,17 @@ fn parse_has_default_route(output: &str) -> bool {
 }
 
 /// Set up iptables rules to transparently redirect HTTP (80) and HTTPS (443)
-/// traffic through the proxy port. Returns `true` on success.
+/// traffic, plus configured cleartext HTTP ports, through the proxy port.
+/// Returns `true` on success.
 ///
 /// Uses a dedicated chain (`TAPSMITH_REDIRECT`) for easy identification and
 /// cleanup. Traffic destined for `127.0.0.1` is excluded to prevent redirect
 /// loops (the proxy is reached via `adb reverse` on loopback).
-pub async fn setup_iptables_redirect(serial: &str, proxy_port: u16) -> bool {
+pub async fn setup_iptables_redirect(serial: &str, proxy_port: u16, http_ports: &[u16]) -> bool {
     // Clean up any stale chain from a prior crash
     cleanup_iptables_redirect(serial).await;
 
-    let commands = [
-        format!("iptables -t nat -N {IPTABLES_CHAIN}"),
-        format!("iptables -t nat -A {IPTABLES_CHAIN} -d 127.0.0.0/8 -j RETURN"),
-        format!("iptables -t nat -A {IPTABLES_CHAIN} -p tcp --dport 80 -j REDIRECT --to-port {proxy_port}"),
-        format!("iptables -t nat -A {IPTABLES_CHAIN} -p tcp --dport 443 -j REDIRECT --to-port {proxy_port}"),
-        format!("iptables -t nat -I OUTPUT -j {IPTABLES_CHAIN}"),
-    ];
+    let commands = iptables_redirect_commands(proxy_port, http_ports);
 
     if !apply_iptables_commands(serial, &commands).await {
         return false;
@@ -1155,6 +1150,22 @@ pub async fn setup_iptables_redirect(serial: &str, proxy_port: u16) -> bool {
 
     info!(%serial, proxy_port, "iptables transparent redirect configured");
     true
+}
+
+fn iptables_redirect_commands(proxy_port: u16, http_ports: &[u16]) -> Vec<String> {
+    let mut ports = vec![80, 443];
+    ports.extend_from_slice(http_ports);
+    ports.sort_unstable();
+    ports.dedup();
+    let mut commands = vec![
+        format!("iptables -t nat -N {IPTABLES_CHAIN}"),
+        format!("iptables -t nat -A {IPTABLES_CHAIN} -d 127.0.0.0/8 -j RETURN"),
+    ];
+    for port in ports {
+        commands.push(format!("iptables -t nat -A {IPTABLES_CHAIN} -p tcp --dport {port} -j REDIRECT --to-port {proxy_port}"));
+    }
+    commands.push(format!("iptables -t nat -I OUTPUT -j {IPTABLES_CHAIN}"));
+    commands
 }
 
 async fn apply_iptables_commands(serial: &str, commands: &[String]) -> bool {
@@ -1221,6 +1232,23 @@ pub async fn cleanup_iptables_redirect(serial: &str) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn capture_ports_keep_defaults_and_loopback_exclusion() {
+        let commands = super::iptables_redirect_commands(45678, &[8080, 9099, 8080, 80]);
+        assert!(commands[1].contains("127.0.0.0/8 -j RETURN"));
+        for port in [80, 443, 8080, 9099] {
+            assert_eq!(
+                commands
+                    .iter()
+                    .filter(|c| c.contains(&format!("--dport {port} ")))
+                    .count(),
+                1
+            );
+        }
+        assert!(commands.last().unwrap().contains("-I OUTPUT"));
+        assert_eq!(commands.len(), 7);
+    }
+
     use super::*;
 
     // ─── Keyguard state ───
