@@ -23,6 +23,7 @@ export interface TestTraceData {
   hierarchies: Map<string, string>;
   sources: Map<string, string>;
   network: NetworkEntry[];
+  networkCaptureEnabled?: boolean;
   /** Raw network request/response body bytes keyed by path (e.g.
    * `network/res-0.bin`). Kept as bytes rather than a decoded string because
    * binary payloads — notably gRPC/protobuf — cannot survive a UTF-8 decode:
@@ -223,10 +224,11 @@ export function emptyTraceData(filePath?: string): TestTraceData {
 export function getOrCreateTrace(
   testFullName: string,
   traces: Map<string, TestTraceData>,
+  filePath?: string,
 ): { data: TestTraceData; map: Map<string, TestTraceData> } {
   const existing = traces.get(testFullName);
   if (existing) return { data: existing, map: traces };
-  const data = emptyTraceData();
+  const data = emptyTraceData(filePath);
   const map = new Map(traces);
   map.set(testFullName, data);
   return { data, map };

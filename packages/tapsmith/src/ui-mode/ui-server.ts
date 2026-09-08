@@ -1,3 +1,4 @@
+import { NetworkReplayBuffer } from './network-replay.js';
 /**
  * UI mode server.
  *
@@ -332,13 +333,11 @@ export async function startUIServer(
   const testResults = new Map<string, UITestResultEntry>();
   const traceBuffer: TraceEventMessage[] = [];
   const sourceBuffer = new Map<string, SourceMessage>();
-  const networkBuffer: NetworkMessage[] = [];
+  const networkBuffer = new NetworkReplayBuffer(2000);
   const mcpToolCallBuffer: McpToolCallMessage[] = [];
   const MAX_TRACE_BUFFER = 5000;
-  const MAX_NETWORK_BUFFER = 2000;
   const MAX_MCP_BUFFER = 200;
   let traceBufferFull = false;
-  let networkBufferFull = false;
 
   function markRunStarted(): void {
     isRunning = true;
@@ -366,8 +365,7 @@ export async function startUIServer(
     traceBuffer.length = 0;
     traceBufferFull = false;
     sourceBuffer.clear();
-    networkBuffer.length = 0;
-    networkBufferFull = false;
+    networkBuffer.clear();
   }
 
   function markRunEnded(): void {
@@ -2372,6 +2370,7 @@ function wireStatus(status: TestResultEntry['status']): TestNodeStatus {
               const traceMsg: TraceEventMessage = {
                 type: 'trace-event',
                 testFullName: worker.currentTest ?? '',
+                filePath: worker.currentFile?.filePath,
                 workerId: worker.id,
                 projectName: worker.currentFile?.projectName,
                 event: msg.event,
@@ -2395,11 +2394,8 @@ function wireStatus(status: TestResultEntry['status']): TestNodeStatus {
               break;
             }
             case 'network': {
-              const networkMsg: NetworkMessage = { type: 'network', testFullName: worker.currentTest ?? '', projectName: worker.currentFile?.projectName, entries: msg.entries, bodies: msg.bodies };
-              if (!networkBufferFull) {
-              if (networkBuffer.length >= MAX_NETWORK_BUFFER) networkBufferFull = true;
-              else networkBuffer.push(networkMsg);
-            }
+              const networkMsg: NetworkMessage = { type: 'network', filePath: worker.currentFile?.filePath, testFullName: worker.currentTest ?? '', projectName: worker.currentFile?.projectName, entries: msg.entries, bodies: msg.bodies, bodyMode: msg.bodyMode, networkCaptureEnabled: msg.networkCaptureEnabled };
+              networkBuffer.add(networkMsg);
               broadcast(networkMsg);
               break;
             }
@@ -4256,7 +4252,7 @@ function wireStatus(status: TestResultEntry['status']): TestNodeStatus {
     for (const sourceMsg of sourceBuffer.values()) {
       ws.send(JSON.stringify(sourceMsg));
     }
-    for (const networkMsg of networkBuffer) {
+    for (const networkMsg of networkBuffer.values()) {
       ws.send(JSON.stringify(networkMsg));
     }
 

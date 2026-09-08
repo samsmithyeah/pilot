@@ -229,7 +229,7 @@ export interface TestStartMessage {
 
 export interface TestStatusMessage {
   type: 'test-status'
-  /** Test full name (unique within a run). */
+  /** Test full name (unique within its file). */
   fullName: string
   filePath: string
   status: TestNodeStatus
@@ -256,6 +256,8 @@ export interface FileStatusMessage {
 
 export interface TraceEventMessage {
   type: 'trace-event'
+  /** Absolute test file path. Absent on older servers. */
+  filePath?: string
   /** The full name of the test this event belongs to. */
   testFullName: string
   /** Worker that produced this trace event (multi-worker mode only). */
@@ -392,8 +394,15 @@ export interface SourceMessage {
   content: string
 }
 
+/** Full current entry list, with either complete bodies or changed bodies. */
 export interface NetworkMessage {
   type: 'network'
+  /** Absolute test file path. Absent on older servers. */
+  filePath?: string
+  /** Effective network capture setting for this test; absent for older workers. */
+  networkCaptureEnabled?: boolean
+  /** Omitted for full snapshots, including reconnect replay. */
+  bodyMode?: 'patch'
   testFullName: string
   /** Project the test belongs to. Used to scope trace storage in multi-device
    * configs so the same test under multiple projects doesn't collide. */
@@ -1006,6 +1015,10 @@ export interface UIWorkerSourceMessage {
 /** UI worker → server: network entries. */
 export interface UIWorkerNetworkMessage {
   type: 'network'
+  /** Effective network capture setting for this test; absent for older workers. */
+  networkCaptureEnabled?: boolean
+  /** Omitted for full snapshots, including reconnect replay. */
+  bodyMode?: 'patch'
   workerId: number
   entries: import('../trace/types.js').NetworkEntry[]
   bodies?: Record<string, string>

@@ -35,7 +35,7 @@ import {
 import { createActionProgressMessenger } from '../action-progress-renderer.js';
 import { isAbortError } from '../abort.js';
 import type { AnyTraceEvent } from '../trace/types.js';
-import { encodeNetworkBodies } from './encode-bodies.js';
+import { createNetworkBodyEncoder } from './encode-bodies.js';
 import { streamSourcesForEvent } from './source-stream.js';
 import type {
   UIWorkerMessage,
@@ -379,6 +379,7 @@ async function runFileWithRecovery(
 
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
+      const encodeBodies = createNetworkBodyEncoder();
       const suite = await runTestFile(filePath, {
         config: cfg,
         devices: runDevices(projectUseOptions),
@@ -404,9 +405,10 @@ async function runFileWithRecovery(
         projectUseOptions,
         projectName,
         testFilter,
-        onNetworkEntries: (entries) => {
-          const { entries: safe, bodies } = encodeNetworkBodies(entries);
-          send({ type: 'network', workerId, entries: safe, bodies });
+        onNetworkEntries: (entries, networkCaptureEnabled) => {
+          for (const { entries: safe, bodies } of encodeBodies(entries)) {
+            send({ type: 'network', workerId, entries: safe, bodies, bodyMode: 'patch', networkCaptureEnabled });
+          }
         },
       });
 

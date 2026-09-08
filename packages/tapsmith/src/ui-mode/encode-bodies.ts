@@ -37,21 +37,47 @@ function encodeBody(buf: Buffer, label: 'request' | 'response'): string {
 /** Strip Buffer bodies off each entry and produce a parallel bodies map.
  * Entries whose bodies exceed `MAX_IPC_BODY_BYTES` get a marker payload
  * rather than their raw bytes. */
-export function encodeNetworkBodies(entries: readonly NetworkEntry[]): EncodedBodies {
+function encodeNetworkBodies(entries: readonly NetworkEntry[], previous: Map<string, Buffer>): EncodedBodies {
   const bodies: Record<string, string> = {};
   const safe: Array<NetworkEntry & { requestBody?: undefined; responseBody?: undefined }> = entries.map((e) => {
     const copy = { ...e, requestBody: undefined, responseBody: undefined };
     if (e.requestBody && e.requestBody.length > 0) {
       const p = `network/req-${e.index}.bin`;
-      bodies[p] = encodeBody(e.requestBody, 'request');
+      if (previous.get(p) !== e.requestBody) bodies[p] = encodeBody(e.requestBody, 'request');
       copy.requestBodyPath = p;
     }
     if (e.responseBody && e.responseBody.length > 0) {
       const p = `network/res-${e.index}.bin`;
-      bodies[p] = encodeBody(e.responseBody, 'response');
+      if (previous.get(p) !== e.responseBody) bodies[p] = encodeBody(e.responseBody, 'response');
       copy.responseBodyPath = p;
     }
     return copy;
   });
   return { entries: safe, bodies };
+}
+
+/** Per worker file run. Empty snapshots reset identity across tests and retries. */
+export function createNetworkBodyEncoder(): (entries: readonly NetworkEntry[]) => Iterable<EncodedBodies> {
+  let previous = new Map<string, Buffer>();
+  return function* (entries) {
+    const encoded = encodeNetworkBodies(entries, previous);
+    previous = new Map();
+    for (const e of entries) {
+      if (e.requestBody?.length) previous.set(`network/req-${e.index}.bin`, e.requestBody);
+      if (e.responseBody?.length) previous.set(`network/res-${e.index}.bin`, e.responseBody);
+    }
+    // A decoded body may be larger than the daemon's compressed-byte budget.
+    // Bound aggregate base64 bytes per IPC/WebSocket message as well.
+    const budget = 8 * 1024 * 1024;
+    let bodies: Record<string, string> = {};
+    let size = 0;
+    for (const [path, body] of Object.entries(encoded.bodies)) {
+      if (size + body.length > budget && size > 0) {
+        yield { entries: encoded.entries, bodies };
+        bodies = {}; size = 0;
+      }
+      bodies[path] = body; size += body.length;
+    }
+    yield { entries: encoded.entries, bodies };
+  };
 }

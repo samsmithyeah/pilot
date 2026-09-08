@@ -410,6 +410,10 @@ export interface TraceConfig {
    * syntax as `networkHosts`.
    */
   networkPassthroughHosts?: string[]
+  /** Additional cleartext HTTP/1.1 or HTTP/2 ports to capture on Android.
+   * Ports 80 and 443 are always included. For Firebase emulators, use
+   * [8080, 9099, 5001, 9199]. Requires a rootable Android device. */
+  networkHttpPorts?: number[]
   /** Whether to stream device logs (Android logcat / iOS simulator syslog). Default: true. */
   deviceLogs: boolean
   /** Whether to stream the tapsmith-core daemon's own logs into the trace. Default: false. */
@@ -498,7 +502,10 @@ export interface NetworkEntry {
   actionIndex: number
   /** Timestamp of request start. */
   startTime: number
-  /** Timestamp of response end. */
+  /** Start of this test's observation when the request began before this test.
+   * Original timestamps, duration, sizes and bodies remain cumulative. */
+  observedStartTime?: number
+  /** Timestamp of response end, or snapshot time when inFlight. */
   endTime: number
   /** HTTP method. */
   method: string
@@ -512,8 +519,10 @@ export interface NetworkEntry {
   requestSize: number
   /** Response size in bytes. */
   responseSize: number
-  /** Duration in ms. */
+  /** Duration in ms (elapsed so far when inFlight). */
   duration: number
+  /** Open at capture time. Bodies are frozen, cumulative snapshots, capped at 1 MiB each. */
+  inFlight?: boolean
   /** Path to request body file in archive (if large). */
   requestBodyPath?: string
   /** Path to response body file in archive (if large). */

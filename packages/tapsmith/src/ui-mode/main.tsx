@@ -1,3 +1,5 @@
+import { traceKey, parseTraceKey, TraceIdentityRegistry } from './trace-identity.js';
+import { mergeNetworkBodies } from './network-bodies.js';
 import './fonts.css';
 import { render } from 'preact';
 import { useState, useCallback, useMemo, useRef, useEffect } from 'preact/hooks';
@@ -304,11 +306,7 @@ function App() {
     return sep === -1 ? afterProject : afterProject.slice(sep + 2);
   };
 
-  // Composite key for trace storage. Trace data is stored per (project, test)
-  // so the same test running under multiple projects (multi-device configs)
-  // doesn't collide on a single map entry.
-  const traceKey = (projectName: string | undefined, fullName: string): string =>
-    `${projectName ?? ''}::${fullName}`;
+  const traceIdentitiesRef = useRef(new TraceIdentityRegistry());
 
   // Get the currently viewed test's trace data.
   // Only show trace data when a test is explicitly selected in the tree.
@@ -322,9 +320,6 @@ function App() {
     }
     return null;
   }, [tree.selectedTestId]);
-
-  const viewedTestNameRef = useRef(viewedTestName);
-  viewedTestNameRef.current = viewedTestName;
 
   const viewedTestFile = useMemo(() => {
     if (tree.selectedTestId) {
@@ -356,7 +351,9 @@ function App() {
     () => (tree.selectedTestId ? extractProject(tree.selectedTestId) : undefined),
     [tree.selectedTestId],
   );
-  const viewedTraceKey = viewedTestName ? traceKey(viewedTestProject, viewedTestName) : null;
+  const viewedTraceKey = viewedTestName ? traceKey(viewedTestProject, viewedTestName, viewedTestFile) : null;
+  const viewedTraceKeyRef = useRef(viewedTraceKey);
+  viewedTraceKeyRef.current = viewedTraceKey;
   const currentTrace = viewedTraceKey && viewedTestNode?.type === 'test' ? testTraces.get(viewedTraceKey) : undefined;
   // Sort by start time (timestamp - duration) so concurrent actions
   // (e.g. route handlers firing during a tap) appear in start-time order
@@ -509,7 +506,7 @@ function App() {
     startTime: 0,
     endTime: viewedTestNode?.duration ?? 0,
     device: { serial: testDeviceSerial, isEmulator: deviceIsEmulator },
-    traceConfig: { screenshots: true, snapshots: true, sources: true, network: true, deviceLogs: false, daemonLogs: false },
+    traceConfig: { screenshots: true, snapshots: true, sources: true, network: currentTrace?.networkCaptureEnabled ?? true, deviceLogs: false, daemonLogs: false },
     actionCount: liveActionCount,
     screenshotCount: screenshots.size,
     error: viewedTestNode?.error,
@@ -521,7 +518,7 @@ function App() {
     appResetScope: viewedIsolation?.appResetScope,
     appState: viewedIsolation?.appState,
     devices: viewedGroupDevices,
-  }), [viewedTestName, viewedTestFile, viewedTestNode, viewedTestProject, isRunning, liveActionCount, screenshots.size, testDeviceSerial, deviceIsEmulator, tapsmithVersion, viewedIsolation, viewedGroupDevices]);
+  }), [viewedTestName, viewedTestFile, viewedTestNode, viewedTestProject, isRunning, liveActionCount, screenshots.size, testDeviceSerial, deviceIsEmulator, tapsmithVersion, viewedIsolation, viewedGroupDevices, currentTrace?.networkCaptureEnabled]);
 
   // Prefer a real completed event at this index; fall back to a synthesized
   // one from the in-flight slot so ScreenshotPanel can render the before-
@@ -684,6 +681,7 @@ function App() {
   const handleMessage = useCallback((msg: ServerMessage) => {
     switch (msg.type) {
       case 'test-tree':
+        traceIdentitiesRef.current.setTree(msg.files);
         treeRef.current.setTestTree(msg.files);
         break;
       case 'run-state':
@@ -703,10 +701,11 @@ function App() {
         // on them still shows their actions and status.
         if (msg.testFilter) {
           // Running a single test — clear only the trace for this exact
-          // (project, test) tuple. Without the project scope we'd wipe the
+          // (project, file, test) tuple. Without the project scope we'd wipe the
           // sibling project's copy of the same test from a previous run.
           setTestTraces((prev) => {
-            const targetKey = traceKey(msg.projectName, msg.testFilter!);
+            const targetKey = traceIdentitiesRef.current.resolve(msg.projectName, msg.testFilter!, msg.filePath);
+            if (!targetKey) return prev;
             const old = prev.get(targetKey);
             if (!old) return prev;
             revokeTraceScreenshots(old);
@@ -722,7 +721,7 @@ function App() {
             const next = new Map<string, TestTraceData>();
             for (const [k, data] of prev) {
               const matchesFile = data.filePath === msg.filePath;
-              const matchesProject = !msg.projectName || k.startsWith(`${msg.projectName}::`);
+              const matchesProject = !msg.projectName || parseTraceKey(k).projectName === msg.projectName;
               if (matchesFile && matchesProject) {
                 revokeTraceScreenshots(data);
               } else {
@@ -801,7 +800,7 @@ function App() {
         });
         break;
       case 'test-start': {
-        const key = traceKey(msg.projectName, msg.fullName);
+        const key = traceIdentitiesRef.current.register(msg.projectName, msg.fullName, msg.filePath);
         // Track which worker ran this test
         if (msg.workerId != null) {
           testWorkerMapRef.current.set(key, msg.workerId);
@@ -842,7 +841,7 @@ function App() {
         activeTestRef.current = key;
 
         // Only reset pin if the user is viewing this test (or no test selected)
-        if (!viewedTestNameRef.current || viewedTestNameRef.current === msg.fullName) {
+        if (!viewedTraceKeyRef.current || viewedTraceKeyRef.current === key) {
           setPinnedIndex(0);
           setHoveredIndex(null);
         }
@@ -868,7 +867,7 @@ function App() {
         break;
       }
       case 'test-status': {
-        const statusKey = traceKey(msg.projectName, msg.fullName);
+        const statusKey = traceIdentitiesRef.current.register(msg.projectName, msg.fullName, msg.filePath);
         if (msg.workerId != null) {
           testWorkerMapRef.current.set(statusKey, msg.workerId);
         }
@@ -925,10 +924,8 @@ function App() {
         treeRef.current.updateFileStatus(msg.filePath, msg.status, msg.projectName);
         break;
       case 'trace-event': {
-        const testName = msg.testFullName || (activeTestRef.current ?? '').split('::').slice(1).join('::');
-        if (!testName) break;
         const key = msg.testFullName
-          ? traceKey(msg.projectName, msg.testFullName)
+          ? traceIdentitiesRef.current.resolve(msg.projectName, msg.testFullName, msg.filePath)
           : (activeTestRef.current ?? '');
         if (!key) break;
         if (msg.workerId != null) {
@@ -960,7 +957,7 @@ function App() {
         }
 
         setTestTraces((prev) => {
-          const { data, map } = getOrCreateTrace(key, prev);
+          const { data, map } = getOrCreateTrace(key, prev, parseTraceKey(key).filePath);
 
           // Always store before-screenshot/hierarchy at action-XXX-before so
           // the screenshot panel can display device state during execution.
@@ -1071,7 +1068,7 @@ function App() {
         // runs ahead of the row position by the reserved-slot count, so
         // subtract pinDelta (0 for the test's own events).
         if (isVisibleRow && key === activeTestRef.current
-          && (!viewedTestNameRef.current || viewedTestNameRef.current === testName)) {
+          && (!viewedTraceKeyRef.current || viewedTraceKeyRef.current === key)) {
           setPinnedIndex(ev.actionIndex - (hookShift?.pinDelta ?? 0));
         }
         break;
@@ -1095,19 +1092,20 @@ function App() {
         break;
       case 'network': {
         const key = msg.testFullName
-          ? traceKey(msg.projectName, msg.testFullName)
+          ? traceIdentitiesRef.current.resolve(msg.projectName, msg.testFullName, msg.filePath)
           : (activeTestRef.current ?? '');
         if (!key) break;
         setTestTraces((prev) => {
-          const { data, map } = getOrCreateTrace(key, prev);
-          const networkBodies = new Map(data.networkBodies);
+          const { data, map } = getOrCreateTrace(key, prev, parseTraceKey(key).filePath);
+          const updates = new Map<string, Uint8Array>();
           if (msg.bodies) {
             for (const [path, b64] of Object.entries(msg.bodies)) {
-              networkBodies.set(path, base64ToBytes(b64));
+              updates.set(path, base64ToBytes(b64));
             }
           }
           const next = new Map(map);
-          next.set(key, { ...data, network: msg.entries, networkBodies });
+          const networkBodies = mergeNetworkBodies(msg.entries, data.networkBodies, updates, msg.bodyMode === 'patch');
+          next.set(key, { ...data, network: msg.entries, networkBodies, networkCaptureEnabled: msg.networkCaptureEnabled ?? data.networkCaptureEnabled });
           return next;
         });
         break;
@@ -1452,7 +1450,7 @@ function App() {
     if (sep !== -1) {
       // Test or suite node — clear its specific trace
       const fullName = stripped.slice(sep + 2);
-      const key = traceKey(projectName, fullName);
+      const key = traceKey(projectName, fullName, stripped.slice(0, sep));
       setTestTraces((prev) => {
         const old = prev.get(key);
         if (!old) return prev;
@@ -1468,7 +1466,7 @@ function App() {
         const next = new Map<string, TestTraceData>();
         for (const [k, data] of prev) {
           const matchesFile = data.filePath === stripped;
-          const matchesProject = !projectName || k.startsWith(`${projectName}::`);
+          const matchesProject = !projectName || parseTraceKey(k).projectName === projectName;
           if (matchesFile && matchesProject) {
             revokeTraceScreenshots(data);
             changed = true;

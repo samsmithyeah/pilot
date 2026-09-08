@@ -447,7 +447,68 @@ describe('generated trace archive', () => {
     expect(archive.actions.every((a) => !a.hasScreenshotBefore && !a.hasHierarchyBefore)).toBe(true);
   });
 
-  it('writes captured network entries to network.json with their bodies as separate members', async () => {
+  it('publishes growing snapshots before the test finishes, then drains once with stable identities', async () => {
+    const log: CaptureLog = { screenshots: [], hierarchies: [] };
+    let bodyRunning = false;
+    let released = false;
+    let release!: () => void;
+    const liveReceived = new Promise<void>((resolve) => { release = resolve; });
+    const raw = (captureId: string, body: string, inFlight: boolean) => ({
+      captureId, method: 'POST', url: 'https://example.com/Listen', statusCode: 200,
+      contentType: 'text/plain', requestSize: 0, responseSize: body.length,
+      startTimeMs: Date.now(), durationMs: 10, requestHeadersJson: '{}', responseHeadersJson: '{}',
+      requestBody: Buffer.alloc(0), responseBody: Buffer.from(body), isHttps: true, inFlight,
+    });
+    const reply = (entries: ReturnType<typeof raw>[]) => ({ requestId: '1', success: true, errorMessage: '', entries });
+    let reads = 0;
+    const snapshotNetworkCapture = vi.fn(async () => {
+      if (!bodyRunning) return reply([]);
+      reads++;
+      return reply(reads === 1 ? [raw('1', 'partial', true)] : [raw('2', 'second', false), raw('1', 'partial grown', true)]);
+    });
+    const stopNetworkCapture = vi.fn(async () => reply([raw('2', 'second', false), raw('1', 'complete', false)]));
+    const client = makeCapturingClient(log, { snapshotNetworkCapture, stopNetworkCapture });
+    const device = new Device(client, { package: 'com.example.app' });
+    const published: NetworkEntry[][] = [];
+    let drainsWhileRunning = -1;
+    pushContext();
+    tapsmithTest('live network', async () => {
+      bodyRunning = true;
+      await liveReceived;
+      drainsWhileRunning = stopNetworkCapture.mock.calls.length;
+      bodyRunning = false;
+    });
+    const ctx = popContext();
+    const result = await runSuiteContext(ctx, '', [], [], makeOpts(device, {
+      timeout: 5000,
+      trace: { mode: 'on', screenshots: false, snapshots: false, sources: false, network: true, networkHttpPorts: [8080, 9099], deviceLogs: false },
+    }, {
+      onNetworkEntries: (entries, enabled) => {
+        expect(enabled).toBe(true);
+        published.push(entries);
+        if (bodyRunning && entries.some((e) => e.responseBody?.toString() === 'partial grown')) {
+          released = true;
+          release();
+        }
+      },
+    }));
+    expect(result.tests[0].error?.message).toBeUndefined();
+    expect(client.startNetworkCapture).toHaveBeenCalledWith({ requireIsolation: false, httpPorts: [8080, 9099] });
+    expect(released).toBe(true);
+    expect(drainsWhileRunning).toBe(0);
+    expect(stopNetworkCapture).toHaveBeenCalledTimes(1);
+    const first = published.find((entries) => entries.length === 1)![0];
+    const final = published.at(-1)!;
+    expect(first.inFlight).toBe(true);
+    expect(final).toHaveLength(2);
+    expect(final.find((e) => e.responseBody?.toString() === 'complete')?.index).toBe(first.index);
+    expect(final.every((e) => !e.inFlight)).toBe(true);
+    const archive = readArchive(result.tests[0].tracePath!);
+    expect(archive.network).toHaveLength(2);
+    expect(Buffer.from(archive.files[`network/res-${first.index}.bin`]).toString()).toBe('complete');
+  });
+
+  it.each([false, true])('preserves captured network entries and bodies (inFlight=%s)', async (inFlight) => {
     const requestBody = Buffer.from(JSON.stringify({ q: 'tapsmith' }));
     const responseJson = JSON.stringify({ items: ['a', 'b'] });
     const gzipped = zlib.gzipSync(Buffer.from(responseJson));
@@ -500,6 +561,7 @@ describe('generated trace archive', () => {
           responseBody: gzipped,
           isHttps: true,
           routeAction: 'continued',
+          inFlight,
         },
         {
           method: 'GET',
@@ -560,6 +622,8 @@ describe('generated trace archive', () => {
       duration: 12,
       routeAction: 'continued',
     });
+    expect(search.inFlight).toBe(inFlight || undefined);
+    expect(ping.inFlight).toBeUndefined();
     // Transient body buffers must not be serialized into the JSON — they go in
     // their own members, referenced by path.
     expect('requestBody' in search).toBe(false);
@@ -578,8 +642,8 @@ describe('generated trace archive', () => {
     expect(archive.files['network/req-1.bin']).toBeUndefined();
     expect(archive.files['network/res-1.bin']).toBeUndefined();
 
-    // Each entry is attributed to the action in flight when it started, so the
-    // Network tab filters correctly per step.
+    // Each entry retains the action association in archive metadata. The
+    // Network tab currently displays requests independently of trace steps.
     const secondAction = archive.actions[1];
     expect(secondAction.action).toBe('inputText');
     expect(search.actionIndex).toBe(secondAction.actionIndex);
@@ -661,6 +725,44 @@ describe('generated trace archive', () => {
     expect(bobTap.action).toBe('tapXY');
     expect(entry.actionIndex).toBe(bobTap.actionIndex);
     expect(entry.actionIndex).not.toBe(archive.actions[2].actionIndex);
+  });
+
+  it('anchors requests to the latest eligible action start when actions finish out of order', async () => {
+    let entered!: () => void;
+    const slowStarted = new Promise<void>((resolve) => { entered = resolve; });
+    let release!: () => void;
+    const slowGate = new Promise<void>((resolve) => { release = resolve; });
+    let requestStart = 0;
+    const log: CaptureLog = { screenshots: [], hierarchies: [] };
+    const device = new Device(makeCapturingClient(log, {
+      tapXY: vi.fn(async () => { entered(); await slowGate; return successResponse(); }),
+      stopNetworkCapture: vi.fn(async () => ({ success: true, errorMessage: '', entries: [{
+        captureId: 'request', method: 'GET', url: 'http://test/overlap', statusCode: 200,
+        contentType: '', requestSize: 0, responseSize: 0, startTimeMs: requestStart, durationMs: 1,
+        requestHeadersJson: '{}', responseHeadersJson: '{}', requestBody: Buffer.alloc(0),
+        responseBody: Buffer.alloc(0), isHttps: false, routeAction: '',
+      }] })),
+    }), { package: 'com.example.app' });
+    pushContext();
+    tapsmithTest('overlapping actions', async () => {
+      const slow = device.tapXY(1, 2);
+      await slowStarted;
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        await device.inputText('later action');
+        requestStart = Date.now();
+      } finally { release(); }
+      await slow;
+    });
+    const ctx = popContext();
+    const result = await runSuiteContext(ctx, '', [], [], makeOpts(device, {
+      trace: { mode: 'on', screenshots: false, snapshots: false, sources: false, network: true, deviceLogs: false },
+    }));
+    expect(result.tests[0].status).toBe('passed');
+    const archive = readArchive(result.tests[0].tracePath!);
+    expect(archive.actions.map((a) => a.action)).toEqual(['inputText', 'tapXY']);
+    expect(archive.actions[0].startTime).toBeGreaterThan(archive.actions[1].startTime!);
+    expect(archive.network[0].actionIndex).toBe(archive.actions[0].actionIndex);
   });
 
   it('omits network.json entirely when nothing was captured', async () => {

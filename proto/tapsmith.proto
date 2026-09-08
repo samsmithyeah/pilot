@@ -86,6 +86,7 @@ service TapsmithService {
   // ─── Network Capture (PILOT-164) ───
   rpc StartNetworkCapture(StartNetworkCaptureRequest) returns (StartNetworkCaptureResponse);
   rpc StopNetworkCapture(StopNetworkCaptureRequest) returns (StopNetworkCaptureResponse);
+  rpc SnapshotNetworkCapture(SnapshotNetworkCaptureRequest) returns (SnapshotNetworkCaptureResponse);
 
   // ─── Physical iOS device network capture (PILOT-185) ───
   // Generates a `.mobileconfig` profile that the user installs on a
@@ -803,6 +804,8 @@ message StartNetworkCaptureRequest {
   // every process on the Mac. Set by the runner for multi-device groups, where
   // entries are labelled with the capturing device's name.
   bool require_isolation = 2;
+  // Additional cleartext HTTP/1.1 or HTTP/2 ports to intercept on Android.
+  repeated uint32 http_ports = 3;
 }
 
 message StartNetworkCaptureResponse {
@@ -818,6 +821,27 @@ message StopNetworkCaptureRequest {
   // proxy/routing configuration. The caller must later call StopNetworkCapture
   // with keep_running=false to restore device proxy state.
   bool keep_running = 2;
+}
+
+// Read current capture without draining entries or changing proxy/routing state.
+message SnapshotNetworkCaptureRequest {
+  string request_id = 1;
+  repeated CapturedBodyVersion known_bodies = 2;
+  // Opt in to omitted unchanged bodies and bounded body transfer per poll.
+  bool incremental_bodies = 3;
+}
+
+message CapturedBodyVersion {
+  string capture_id = 1;
+  uint32 request_body_size = 2;
+  uint32 response_body_size = 3;
+}
+
+message SnapshotNetworkCaptureResponse {
+  string request_id = 1;
+  bool success = 2;
+  repeated CapturedNetworkEntry entries = 3;
+  string error_message = 4;
 }
 
 message CapturedNetworkEntry {
@@ -837,6 +861,14 @@ message CapturedNetworkEntry {
   // How this request was handled by a route: "mocked", "aborted",
   // "continued", "fetched", or "" (no route matched / passthrough).
   string route_action = 14;
+  // Still open at capture time: bodies, sizes and duration are a snapshot so far.
+  bool in_flight = 15;
+  // Stable for the lifetime of a proxy, including open -> completed transitions.
+  string capture_id = 16;
+  // Retain the prior body when true. False + empty bytes clears the body.
+  // Omission may mean unchanged bytes or transfer deferred to a later poll.
+  bool request_body_omitted = 17;
+  bool response_body_omitted = 18;
 }
 
 message StopNetworkCaptureResponse {

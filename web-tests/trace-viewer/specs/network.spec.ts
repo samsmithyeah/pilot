@@ -371,6 +371,47 @@ test.describe("Network tab", () => {
       await expect(network.detailBody).toContainText("target_id: 2")
     })
 
+    test("marks an open stream and decodes messages before a partial frame", async ({ viewer, detailTabs, network }) => {
+      const response = new Uint8Array([
+        ...grpcFrame(protoNested(2, protoVarint(1, 1))),
+        0, 0, 0, 0, 4, 0x12,
+      ])
+      await viewer.open({
+        events: [actionEvent({ actionIndex: 0, action: "tap" })],
+        network: [{ ...grpcEntry(), inFlight: true, duration: 120, responseBodyPath: "network/res-0.bin" }],
+        networkBodies: { "network/req-0.bin": LISTEN_REQUEST, "network/res-0.bin": response },
+      })
+      await detailTabs.select("Network")
+      await expect(network.rows).toHaveCount(1)
+      await expect(network.row("Listen")).toContainText("Streaming")
+      await expect(network.row("Listen")).toContainText("120 ms so far")
+      await expect(network.row("Listen").getByText("Listen", { exact: true })).toBeInViewport()
+      await expect(network.row("Listen").getByText("Streaming", { exact: true })).toBeInViewport()
+      await network.selectRow("Listen")
+      await network.openDetailTab("Response")
+      await expect(network.detailBody).toContainText("still open at capture time")
+      await expect(network.bodyInfo).toContainText("ListenResponse")
+      await expect(network.detailBody).toContainText("target_change_type: ADD")
+      await expect(network.detailBody).toContainText("truncated:")
+      await expect(network.detailBody).toContainText("declares 4 bytes, 1 present")
+      await network.openDetailTab("Timing")
+      await expect(network.detailBody).toContainText("Snapshot taken")
+      await expect(network.detailBody).not.toContainText("Finished")
+      await network.openDetailTab("Payload")
+      await expect(network.detailBody).toContainText("database:")
+    })
+
+    test("explains a streaming response with no DATA yet", async ({ viewer, detailTabs, network }) => {
+      await viewer.open({
+        events: [actionEvent({ actionIndex: 0, action: "tap" })],
+        network: [{ ...grpcEntry(), inFlight: true }],
+      })
+      await detailTabs.select("Network")
+      await network.selectRow("Listen")
+      await network.openDetailTab("Response")
+      await expect(network.detailBody).toContainText("No response body captured yet")
+    })
+
     test("can switch between the decoded view and the raw bytes", async ({
       viewer,
       detailTabs,
@@ -426,3 +467,50 @@ test.describe("Network tab", () => {
     })
   })
 })
+
+for (const enabled of [true, false]) {
+  test(`empty trace network hint reflects capture config (${enabled})`, async ({ viewer, detailTabs, page }) => {
+    await viewer.open({
+      network: [],
+      metadata: { traceConfig: { screenshots: false, snapshots: false, sources: false, network: enabled, deviceLogs: false, daemonLogs: false } },
+    })
+    await detailTabs.select("Network")
+    await expect(detailTabs.noContent).toContainText("No network requests captured")
+    await expect(page.getByText("Enable network capture in your trace config to record HTTP requests.")).toHaveCount(enabled ? 0 : 1)
+  })
+}
+
+for (const inFlight of [true, false]) {
+  test(`distinguishes an inherited request's lifetime from this test (${inFlight ? 'open' : 'completed'})`, async ({ viewer, detailTabs, network, page }) => {
+    const start = 1_700_000_000_000
+    const observedStartTime = start + 42 * 60_000
+    const inherited = {
+      ...networkEntry({ index: 0, url: 'http://test/Listen', contentType: 'text/plain' }),
+      startTime: start, observedStartTime, endTime: observedStartTime + 10_000,
+      duration: 42 * 60_000 + 10_000, inFlight,
+    }
+    const fresh = {
+      ...networkEntry({ index: 1, url: 'http://test/fresh', duration: 20_000 }),
+      startTime: observedStartTime + 2000, endTime: observedStartTime + 22_000,
+    }
+    await viewer.open({ network: [inherited, fresh] })
+    await detailTabs.select('Network')
+    await expect(network.row('Listen')).toContainText('Started before this test')
+    await expect(network.row('Listen')).toContainText('10.00 s')
+    await expect(network.row('Listen').getByText('Started before this test', { exact: true })).toBeInViewport()
+    await expect(network.row('fresh')).not.toContainText('Started before this test')
+    await network.columnHeaders.filter({ hasText: /^Time/ }).click()
+    await expect(network.rows.first()).toContainText('fresh')
+    const inheritedBar = await network.row('Listen').locator('.net-waterfall-bar').boundingBox()
+    const freshBar = await network.row('fresh').locator('.net-waterfall-bar').boundingBox()
+    expect(inheritedBar!.width).toBeLessThan(freshBar!.width)
+    await network.selectRow('Listen')
+    await network.openDetailTab('Timing')
+    await expect(network.detailBody).toContainText('Observed during this test')
+    await expect(network.detailBody).toContainText(inFlight ? 'Stream age' : 'Total request duration')
+    await expect(network.detailBody).toContainText('42 min 10 s')
+    await expect(network.detailBody).toContainText(new Date(start).toISOString())
+    await expect(network.detailBody).toContainText('bodies and byte counts are cumulative')
+    await expect(page.getByText('Started before this test', { exact: true })).toBeInViewport()
+  })
+}

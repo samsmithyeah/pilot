@@ -957,10 +957,11 @@ export class TapsmithGrpcClient {
 
   // ── Trace Support (PILOT-85) ──
 
-  async startNetworkCapture(options?: { requireIsolation?: boolean }): Promise<{ success: boolean; proxyPort: number; errorMessage: string }> {
+  async startNetworkCapture(options?: { requireIsolation?: boolean; httpPorts?: number[] }): Promise<{ success: boolean; proxyPort: number; errorMessage: string }> {
     return this.call('startNetworkCapture', {
       requestId: requestId(),
       requireIsolation: options?.requireIsolation ?? false,
+      httpPorts: options?.httpPorts ?? [],
     });
   }
 
@@ -981,6 +982,10 @@ export class TapsmithGrpcClient {
       responseBody: Buffer;
       isHttps: boolean;
       routeAction: string;
+      inFlight: boolean;
+      captureId?: string;
+      requestBodyOmitted?: boolean;
+      responseBodyOmitted?: boolean;
     }>;
     errorMessage: string;
   }> {
@@ -991,6 +996,10 @@ export class TapsmithGrpcClient {
       requestId: requestId(),
       keepRunning: options?.keepRunning ?? false,
     }, 30_000, { bypassAbort: true });
+  }
+
+  async snapshotNetworkCapture(knownBodies: Array<{ captureId: string; requestBodySize: number; responseBodySize: number }> = []): ReturnType<TapsmithGrpcClient['stopNetworkCapture']> {
+    return this.call('snapshotNetworkCapture', { requestId: requestId(), knownBodies, incrementalBodies: true }, 10_000);
   }
 
   // ── Video Recording (PILOT-114) ──

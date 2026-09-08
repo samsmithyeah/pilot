@@ -738,6 +738,32 @@ HTTPS is decrypted using an auto-generated CA certificate installed on the devic
 
 Captured requests appear in the trace viewer's **Network tab** alongside screenshots, view hierarchy snapshots, and console output.
 
+In UI mode, the Network panel refreshes about every 500 ms during a test. Each refresh replaces the previous snapshot; open HTTP/2 streams keep their row and update their captured bodies and sizes as data arrives. The final trace includes the last cumulative snapshot. The empty-panel capture hint appears only when network capture is disabled in the trace configuration.
+
+### Local Firebase emulators and custom HTTP ports
+
+On a rootable Android emulator, add the local services' cleartext ports to your
+trace configuration:
+
+```typescript
+trace: {
+  mode: 'on',
+  network: true,
+  networkHttpPorts: [8080, 9099, 5001, 9199],
+}
+```
+
+Ports 80 and 443 remain included. The extra ports support HTTP/1.1 and HTTP/2
+prior knowledge (h2c), which Firestore uses on its emulator port. For these
+transparent cleartext HTTP/1.1 and h2c connections, Tapsmith dials Android's `10.0.2.2` host alias as host loopback while preserving the original
+host and port in captured URLs. This translation applies only to Android
+emulators; TLS and forward-proxy connections do not translate the alias. Open Firestore listeners appear with live, cumulative body snapshots.
+Start capture before opening the connection, or restart the app during the test;
+connections that were already open cannot be redirected retroactively.
+
+`networkHttpPorts` configures Android's transparent redirect; it requires
+iptables support and is for **cleartext HTTP ports**, not additional TLS ports.
+
 ### HTTP/2, gRPC, and passthrough connections
 
 Capture decrypts and records both **HTTP/1.1** and **HTTP/2** traffic when the client accepts Tapsmith's MITM certificate. Most mobile HTTP clients (URLSession, OkHttp, fetch/axios) offer both protocols during the TLS handshake; the proxy negotiates HTTP/1.1 with them (server preference) and captures normally.
@@ -778,14 +804,16 @@ A body with more than a few messages is led by a per-kind summary, because a lon
 
 Unknown services fall back to numbers rather than guessing. Repeated fields are marked `[]` so a single-element list is not mistaken for a scalar, compressed messages are listed but not inflated (the codec lives in `grpc-encoding`), and a body truncated by the capture cap says how much is missing.
 
-**A body only exists once the RPC finishes.** A stream still open when the test ends leaves **no entry in the trace at all** — not even the `CONNECT ... passthrough` row a tunnelled connection leaves — so a long-lived `Listen` is routinely absent from the Network tab even though it was decrypted and captured. Whether you see the decoded body above therefore depends on the app tearing its listener down inside the test, which is not something a test can rely on. To assert on such a call, use `device.waitForRequest()`, which fires when the stream opens (see the HTTP/2 specifics below).
+**Open streams are visible too.** A long-lived `Listen` appears in the Network tab marked **Streaming**, with the request and response headers and body bytes captured so far. Complete gRPC messages decode normally; a final incomplete frame is labelled truncated. The HTTP status is the response's header status, not proof that the RPC finished; `grpc-status` only appears if the server has sent it.
+
+Each test takes a **frozen, cumulative snapshot** when its capture ends. A stream spanning several tests appears once in each test's trace, with its original start time, elapsed duration and all bytes captured since it opened (up to 1 MiB per direction). Requests that began before the test are labelled **Started before this test**. Their Time column and waterfall show only the period observed during the current test. The Timing detail retains the original start timestamp and shows **Stream age** (or **Total request duration** after completion) separately from **Observed during this test**. Bodies and byte counts remain cumulative, and the detail panel states this explicitly. Later snapshots may contain more messages; earlier traces do not change. When the stream closes, the next capture contains one completed row, with no duplicate streaming row. Bodies remain capped per open stream, and cancelled stream tasks release their capture buffers.
 
 For any other HTTP/2-capable host that rejects the certificate — including Firestore on Android when the CA only reached the *user* trust store — Tapsmith detects the rejection and tunnels later connections for the same SNI. The rejection is recognised both when the client sends a TLS alert (`unknown_ca`, `bad_certificate`) and when it simply tears the connection down without one — gRPC-C++/BoringSSL stacks abort with a connection reset rather than a decodable alert, so this abrupt-close case is treated as a rejection once it repeats for a host. The app continues to work, and the trace shows a single `CONNECT` row marked `passthrough`, but the encrypted requests inside are not available to `device.route()`, `device.waitForRequest()`, `device.waitForResponse()`, or the trace viewer.
 
 A few HTTP/2 specifics to be aware of:
 
 - **Long-lived channels are opened once per app process.** gRPC clients (Firestore included) multiplex every call over a single h2 connection. If the app was already running when your test started, that connection already exists and nothing new crosses the proxy, so `waitForRequest`/`waitForResponse` never fire and `route()` handlers never match -- capture looks broken while working correctly. Relaunch the app inside the test (`device.launchApp(...)`) so the channel is opened during the window you are waiting on.
-- **Streaming / long-lived calls** (e.g. Firestore `Listen`) are forwarded incrementally and only appear in the trace once the stream closes -- a never-ending server stream stays open and is recorded at teardown. Assert on the *request* event, which fires when the stream opens; a `waitForResponse` on a stream that never ends will time out.
+- **Streaming / long-lived calls** (e.g. Firestore `Listen`) are forwarded incrementally and appear in the trace even while open, with a **Streaming** marker and a snapshot of their partial bodies. Assert on the *request* event, which fires when the stream opens; a `waitForResponse` on a stream that never ends will time out.
 - Captured HTTP/2 header names are lowercase (that's how HTTP/2 sends them on the wire).
 - Request/response **bodies in the trace are capped** (~1 MB), but the full stream is always forwarded to the app.
 
