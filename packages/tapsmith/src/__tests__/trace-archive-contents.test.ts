@@ -642,8 +642,8 @@ describe('generated trace archive', () => {
     expect(archive.files['network/req-1.bin']).toBeUndefined();
     expect(archive.files['network/res-1.bin']).toBeUndefined();
 
-    // Each entry is attributed to the action in flight when it started, so the
-    // Network tab filters correctly per step.
+    // Each entry retains the action association in archive metadata. The
+    // Network tab currently displays requests independently of trace steps.
     const secondAction = archive.actions[1];
     expect(secondAction.action).toBe('inputText');
     expect(search.actionIndex).toBe(secondAction.actionIndex);
@@ -725,6 +725,44 @@ describe('generated trace archive', () => {
     expect(bobTap.action).toBe('tapXY');
     expect(entry.actionIndex).toBe(bobTap.actionIndex);
     expect(entry.actionIndex).not.toBe(archive.actions[2].actionIndex);
+  });
+
+  it('anchors requests to the latest eligible action start when actions finish out of order', async () => {
+    let entered!: () => void;
+    const slowStarted = new Promise<void>((resolve) => { entered = resolve; });
+    let release!: () => void;
+    const slowGate = new Promise<void>((resolve) => { release = resolve; });
+    let requestStart = 0;
+    const log: CaptureLog = { screenshots: [], hierarchies: [] };
+    const device = new Device(makeCapturingClient(log, {
+      tapXY: vi.fn(async () => { entered(); await slowGate; return successResponse(); }),
+      stopNetworkCapture: vi.fn(async () => ({ success: true, errorMessage: '', entries: [{
+        captureId: 'request', method: 'GET', url: 'http://test/overlap', statusCode: 200,
+        contentType: '', requestSize: 0, responseSize: 0, startTimeMs: requestStart, durationMs: 1,
+        requestHeadersJson: '{}', responseHeadersJson: '{}', requestBody: Buffer.alloc(0),
+        responseBody: Buffer.alloc(0), isHttps: false, routeAction: '',
+      }] })),
+    }), { package: 'com.example.app' });
+    pushContext();
+    tapsmithTest('overlapping actions', async () => {
+      const slow = device.tapXY(1, 2);
+      await slowStarted;
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        await device.inputText('later action');
+        requestStart = Date.now();
+      } finally { release(); }
+      await slow;
+    });
+    const ctx = popContext();
+    const result = await runSuiteContext(ctx, '', [], [], makeOpts(device, {
+      trace: { mode: 'on', screenshots: false, snapshots: false, sources: false, network: true, deviceLogs: false },
+    }));
+    expect(result.tests[0].status).toBe('passed');
+    const archive = readArchive(result.tests[0].tracePath!);
+    expect(archive.actions.map((a) => a.action)).toEqual(['inputText', 'tapXY']);
+    expect(archive.actions[0].startTime).toBeGreaterThan(archive.actions[1].startTime!);
+    expect(archive.network[0].actionIndex).toBe(archive.actions[0].actionIndex);
   });
 
   it('omits network.json entirely when nothing was captured', async () => {

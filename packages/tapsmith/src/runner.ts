@@ -200,7 +200,7 @@ function createNetworkMapper(testStartTime: number): (
     return index;
   };
   return async (rawNetworkByDevice, events, apiEntries) => {
-    // Build sorted list of action timestamps with their indices
+    // Collect action start times and indices; completion order may differ.
     const actionTimestamps = events
       .filter((e): e is import('./trace/types.js').ActionTraceEvent | import('./trace/types.js').AssertionTraceEvent =>
         e.type === 'action' || e.type === 'assertion')
@@ -220,9 +220,11 @@ function createNetworkMapper(testStartTime: number): (
       const own = deviceId ? actionTimestamps.filter((a) => a.deviceId === deviceId) : [];
       const candidates = own.length > 0 ? own : actionTimestamps;
       let best = 0;
+      let bestTimestamp = -Infinity;
       for (const a of candidates) {
-        if (a.timestamp <= startTimeMs) {
+        if (a.timestamp <= startTimeMs && a.timestamp >= bestTimestamp) {
           best = a.actionIndex;
+          bestTimestamp = a.timestamp;
         }
       }
       return best;

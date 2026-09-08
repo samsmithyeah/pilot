@@ -1,7 +1,8 @@
+import type { NetworkMessage } from '../../protocol.js'
 import { test, expect } from "../fixtures.js"
 import { GESTURES_FILE } from "../messages/scenarios.js"
 import { NetworkPane } from "../../panes/network.pane.js"
-import { networkEntry } from "../../trace-viewer/trace-builder.js"
+import { actionEvent, networkEntry } from "../../trace-viewer/trace-builder.js"
 
 const FULL_NAME = "Gestures screen > double tap registers double tap gesture"
 const HINT = "Enable network capture in your trace config to record HTTP requests."
@@ -92,4 +93,65 @@ test('keeps inherited request timing across live updates, completion and reruns'
   snapshot(testStart + 30_000, testStart + 31_000, true)
   await expect(network.row('Listen')).toContainText('1.00 s')
   await expect(network.row('Listen')).not.toContainText('6.00 s')
+})
+
+test('isolates same-named tests across files during interleaved updates, replay and reruns', async ({ ui, explorer, detailTabs, actions, page }) => {
+  const { fileNode, projectNode } = await import('../messages/tree.js')
+  const { idleSeed } = await import('../messages/scenarios.js')
+  const { NetworkReplayBuffer } = await import('../../../packages/tapsmith/dist/ui-mode/network-replay.js')
+  const files = ['/repo/a.test.ts', '/repo/b.test.ts']
+  const tree = [projectNode('android', files.map((file) => fileNode(file, [{ name: 'smoke' }])))]
+  ui.seed(idleSeed(tree))
+  await ui.open()
+  await explorer.expandAll()
+  const buffer = new NetworkReplayBuffer(10)
+  const traces = files.map((filePath, i) => ({
+    type: 'trace-event' as const, filePath, projectName: 'android', testFullName: 'smoke', workerId: i,
+    event: actionEvent({ actionIndex: 0, action: i === 0 ? 'tapXY' : 'inputText' }),
+  }))
+  const statuses = files.map((filePath, i) => ({
+    type: 'test-status' as const, filePath, projectName: 'android', fullName: 'smoke', workerId: i, status: 'passed' as const,
+  }))
+  const sendNetwork = (i: number, body?: string) => {
+    const message: NetworkMessage = {
+      type: 'network' as const, filePath: files[i], projectName: 'android', testFullName: 'smoke', bodyMode: 'patch' as const,
+      entries: [{ ...networkEntry({ index: 0, url: `http://test/file-${i}`, contentType: 'text/plain' }), responseBodyPath: 'network/res-0.bin' }],
+      bodies: body === undefined ? {} : { 'network/res-0.bin': Buffer.from(body).toString('base64') },
+    }
+    buffer.add(message)
+    ui.send(message)
+  }
+  ui.send({ type: 'run-start', fileCount: 2 })
+  for (let i = 0; i < 2; i++) {
+    ui.send({ type: 'test-start', filePath: files[i], projectName: 'android', fullName: 'smoke', workerId: i })
+    ui.send(traces[i])
+    sendNetwork(i, `body from file ${i}`)
+  }
+  sendNetwork(0)
+  const network = new NetworkPane(page)
+  const inspect = async (i: number) => {
+    await explorer.node('smoke').nth(i).click()
+    await detailTabs.select('Network')
+    await expect(network.rows).toHaveCount(1)
+    await network.selectRow(`file-${i}`)
+    await network.openDetailTab('Response')
+    await expect(network.detailBody).toContainText(`body from file ${i}`)
+    await expect(network.detailBody).not.toContainText(`body from file ${1 - i}`)
+    await expect(actions.items).toHaveCount(1)
+    await expect(actions.items.first()).toContainText(i === 0 ? 'tapXY' : 'inputText')
+  }
+  await inspect(0)
+  await inspect(1)
+  ui.seed([...idleSeed(tree), ...statuses, ...traces, ...buffer.values()])
+  await page.reload()
+  await explorer.expandAll()
+  await inspect(0)
+  await inspect(1)
+  ui.send({ type: 'run-start', fileCount: 1, filePath: files[0], testFilter: 'smoke', projectName: 'android' })
+  ui.send({ type: 'test-start', filePath: files[0], fullName: 'smoke', projectName: 'android', workerId: 0 })
+  ui.send({ type: 'network', filePath: files[0], testFullName: 'smoke', projectName: 'android', bodyMode: 'patch', entries: [], bodies: {} })
+  await inspect(1)
+  await explorer.node('smoke').nth(0).click()
+  await detailTabs.select('Network')
+  await expect(network.rows).toHaveCount(0)
 })

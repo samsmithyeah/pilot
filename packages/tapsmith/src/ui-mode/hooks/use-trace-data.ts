@@ -224,10 +224,11 @@ export function emptyTraceData(filePath?: string): TestTraceData {
 export function getOrCreateTrace(
   testFullName: string,
   traces: Map<string, TestTraceData>,
+  filePath?: string,
 ): { data: TestTraceData; map: Map<string, TestTraceData> } {
   const existing = traces.get(testFullName);
   if (existing) return { data: existing, map: traces };
-  const data = emptyTraceData();
+  const data = emptyTraceData(filePath);
   const map = new Map(traces);
   map.set(testFullName, data);
   return { data, map };
