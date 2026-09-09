@@ -176,10 +176,10 @@ const STALE_SNAPSHOT_SIGNATURE = 'is stale (UI changed)';
 
 /**
  * How long the non-waiting visibility probes (`isVisible`/`isHidden`) keep
- * re-probing through *unreliable* ticks (stale snapshot, transient agent
- * fault) before surfacing the fault. Short and independent of the handle's
- * timeout: a probe never waits for the element itself, only for a trustworthy
- * answer about it. See `_probeOnce`.
+ * re-probing through fast-failing *unreliable* ticks (stale snapshot, momentary
+ * agent command fault) before answering. Measured from the first such failure,
+ * capped by the handle's own timeout, and short: a probe never waits for the
+ * element itself, only for a trustworthy answer about it. See `_probeOnce`.
  */
 const PROBE_RETRY_WINDOW_MS = 2000;
 const PROBE_RETRY_POLL_MS = 250;
@@ -2069,19 +2069,26 @@ export class ElementHandle {
    * the non-waiting probe. Strict mode still applies — an ambiguous selector
    * throws rather than reporting the first match's state.
    *
-   * Two budgets are deliberately decoupled:
-   * - Each `findElements` call gets the handle's full timeout as its command
-   *   deadline (0 → the daemon default), exactly as `find()`/`count()` do, so
-   *   a slow-but-healthy hierarchy dump on a starved CI emulator completes
-   *   rather than timing out against an artificially short read budget.
-   * - Only an *unreliable* tick is re-probed — a stale mid-re-render
-   *   snapshot, an agent command timeout, or a momentary agent command
-   *   failure carries no information about presence, so it must not be
-   *   misreported as absence. That retry window is short and fixed
-   *   ({@link PROBE_RETRY_WINDOW_MS}), not the handle's timeout: the probe
-   *   promises not to wait, and a fault that outlives the window surfaces its
-   *   real error (so session-level recovery patterns still match) instead of
-   *   blocking for the 30s the probe exists to avoid.
+   * Each read gets the handle's full timeout as its command deadline (0 → the
+   * daemon default), exactly as `find()`/`count()` do, so a slow-but-healthy
+   * hierarchy dump on a starved CI emulator completes rather than timing out
+   * against an artificially short read budget. Consequently an agent command
+   * timeout means the agent did not answer within that whole deadline — a
+   * probe does not grant it a second one; it throws at once.
+   *
+   * What IS retried is a *fast-failing unreliable tick*, which carries no
+   * information about presence: a stale mid-re-render snapshot or a momentary
+   * agent command failure (`findElements failed: …`). Re-probing runs for a
+   * short window measured from the first such failure and capped by the
+   * handle timeout ({@link PROBE_RETRY_WINDOW_MS}) — bounding the retries,
+   * never the read. When the window closes:
+   * - a stall of *only* stale ticks resolves as not found, matching how every
+   *   other reader in this file classifies a stale snapshot (`find()` reports
+   *   "not found" after one, `waitFor` "did not reach state") — a screen that
+   *   never stops re-rendering yields the not-found answer, not a raw agent
+   *   error that no recovery pattern recognises;
+   * - a stall involving a real agent fault surfaces that fault (so
+   *   session-level recovery patterns still match).
    */
   private async _probeOnce(): Promise<ElementInfo | undefined> {
     // A handle from all() carries the snapshot it was created from, which
@@ -2092,26 +2099,35 @@ export class ElementHandle {
     const probeHandle = this._options.resolvedElementsPromise
       ? ElementHandle._cloneWithTimeout(this, this._timeoutMs)
       : this;
-    const deadline = Date.now() + PROBE_RETRY_WINDOW_MS;
-    let lastTransientErr: Error | undefined;
+    // 0 is the explicit single-shot opt-out (as in _strictResolve): no retries.
+    const retryWindowMs = this._timeoutMs === 0 ? 0 : Math.min(PROBE_RETRY_WINDOW_MS, this._timeoutMs);
+    let deadline: number | undefined; // opened by the first unreliable tick
+    let lastFault: Error | undefined; // most recent NON-stale transient fault
     while (true) {
       try {
         return probeHandle._hasModifiers()
           ? await probeHandle._resolveOne()
           : await probeHandle._findOneStrict(this._timeoutMs);
       } catch (err) {
-        // Stale snapshots are classed as pollable not-found elsewhere, but for
-        // a probe they are an unreliable tick, not a confirmed miss — check
-        // them before the not-found class.
-        if (isStaleSnapshotError(err) || isRetryableResolutionError(err)) {
-          lastTransientErr = err as Error;
+        // The read's own deadline is already the handle timeout — a probe
+        // does not spend a second one.
+        if (isTransientAgentError(err)) throw err;
+        if (isStaleSnapshotError(err)) {
+          // Unreliable tick, not a confirmed miss — but classed as pollable
+          // not-found elsewhere, so it must be recognised before that class.
+        } else if (isRetryableResolutionError(err)) {
+          lastFault = err as Error;
         } else if (isPollableNotFoundError(err)) {
           return undefined;
         } else {
           throw err;
         }
       }
-      if (Date.now() + PROBE_RETRY_POLL_MS > deadline) throw lastTransientErr;
+      if (deadline === undefined) deadline = Date.now() + retryWindowMs;
+      if (Date.now() + PROBE_RETRY_POLL_MS > deadline) {
+        if (lastFault) throw lastFault;
+        return undefined; // stale-only stall ⇒ not found, like find()/waitFor
+      }
       await sleep(PROBE_RETRY_POLL_MS, this._client._getAbortSignal?.());
     }
   }

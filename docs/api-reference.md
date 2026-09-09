@@ -867,6 +867,15 @@ for (const item of items) {
 }
 ```
 
+The returned handles carry the snapshot they were resolved from, so reading and acting on the batch
+does not re-query the device for every element: `find()`, `getText()`, `isEnabled()`, `isChecked()`,
+`isEditable()`, `inputValue()` and actions address the element captured by `all()`. Checks of
+*current* state re-query the device by index instead — `expect(items[i])` assertions,
+`waitFor()`, `isVisible()` and `isHidden()` — so they reflect what is on screen now, like Playwright's
+snapshot-free `all()`. If the list changes between `all()` and the check (an item is removed, say), the
+two groups can answer about different elements; call `all()` again after a change that reorders the
+list, or use `.nth(i)` for a handle that always resolves live.
+
 ### Waiting
 
 #### `elementHandle.waitFor(options?): Promise<void>`
@@ -1118,9 +1127,11 @@ if (!(await device.getByRole("button", { name: "Enable notifications" }).isVisib
 
 Strict mode still applies: a selector that matches more than one element throws a
 `StrictModeViolationError`. A single call takes as long as one hierarchy read on the device (it never
-polls for the element); a transient device or agent fault is retried for a couple of seconds and then
-throws, so an infrastructure failure is never reported as "not visible". A handle obtained from
-`all()` re-queries the device rather than answering from the snapshot it was created from.
+polls for the element). A momentary device or agent fault is retried for up to a couple of seconds
+(capped by the handle's timeout) and then throws, so an infrastructure failure is never reported as
+"not visible"; a hierarchy that stays stale (mid re-render) for the whole window is treated as not
+found, exactly as `find()` and `waitFor()` classify a stale snapshot. A handle obtained from `all()`
+re-queries the device rather than answering from the snapshot it was created from (see `all()`).
 
 Only `isVisible()` and `isHidden()` are non-waiting. `isEnabled()`, `isChecked()` and `isEditable()`
 follow Playwright too: they wait for the element to be present and throw if it never appears, so a
