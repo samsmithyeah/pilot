@@ -162,7 +162,8 @@ npx tapsmith test --ui
 - [Network Interception](docs/network.md) -- mocking, modifying, and capturing HTTP traffic
 - [WebView Testing](docs/webview.md) -- testing hybrid apps with WebView contexts
 - [Trace Viewer](docs/trace-viewer.md) -- recording and inspecting step-by-step traces
-- [Watch and UI Mode](docs/watch-and-ui-mode.md) -- fast iteration with `--watch` and `--ui`
+- [UI Mode](docs/ui-mode.md) -- interactive test authoring and debugging with `--ui`
+- [Watch Mode](docs/watch-mode.md) -- fast iteration with `--watch`
 - [Parallel Execution and Sharding](docs/parallel-and-sharding.md) -- multi-device parallelism and CI sharding
 - [Debugging](docs/debugging.md) -- diagnosing failures, common errors, flaky test mitigation
 
@@ -179,6 +180,17 @@ npx tapsmith test --ui
 - [iOS Network Capture](docs/ios-network-capture.md) -- HTTPS capture setup for simulators
 - [iOS Physical Device Network Capture](docs/ios-physical-device-network-tracing.md) -- HTTPS capture on real devices
 
+## Contributing
+
+Bug reports, documentation fixes and code are all welcome -- see
+[CONTRIBUTING.md](CONTRIBUTING.md) for development setup and conventions.
+
+Commits need a [Developer Certificate of Origin](DCO) sign-off (`git commit -s`). It
+certifies you have the right to submit the patch; it is not a CLA, and you keep your
+copyright.
+
 ## License
 
 Apache-2.0
+
+Contributions are accepted under the same licence.

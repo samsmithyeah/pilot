@@ -92,8 +92,11 @@ jobs:
           CUR: ${{ steps.version.outputs.current }}
         run: |
           BRANCH="release/v$NEW"
-          git config user.name "tapsmith-release[bot]"
-          git config user.email "tapsmith-release@users.noreply.github.com"
+          # Use GitHub's recognised bot identity for generated version bumps so
+          # the DCO app applies its standard bot exemption. A made-up [bot] name
+          # is not a GitHub Bot account and would still require a human sign-off.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -b "$BRANCH"
           git commit -am "Release v$NEW"
           # Pushed over SSH (deploy key) so CI's push trigger runs on the branch.

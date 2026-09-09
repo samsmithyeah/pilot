@@ -6,8 +6,6 @@ changelog:
     labels:
       - release
       - ignore-for-release
-    authors:
-      - tapsmith-release[bot]
   categories:
     - title: 🚀 Features
       labels: [enhancement, feature]
