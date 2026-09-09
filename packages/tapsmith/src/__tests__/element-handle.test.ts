@@ -838,45 +838,70 @@ describe('isVisible()', () => {
     expect(findElements).toHaveBeenCalledTimes(1);
   });
 
-  it('throws a descriptive error — never a silent answer — when only stale snapshots come back (review follow-up)', async () => {
-    // An animating spinner is exactly what produces stale snapshots; a silent
-    // "hidden" would take the ready branch. Fail loudly, with guidance, and
-    // without leaking the raw agent string as the headline.
+  it('re-probes stale snapshots until the handle timeout and reads the element once a tick lands (review follow-up)', async () => {
+    // Stale = the screen is busy (animating spinner). That is normal, so —
+    // like find()/waitFor — keep re-probing for the handle timeout, not the
+    // short fault window; the element IS there and gets read between frames.
+    let calls = 0;
+    const findElements = vi.fn(async (): Promise<FindElementsResponse> =>
+      ++calls < 12
+        ? { requestId: '1', elements: [], errorMessage: 'Element is stale (UI changed): null' }
+        : makeFindElementsResponse([makeElementInfo({ visible: true })]));
+    const client = makeMockClient({ findElements });
+    const handle = new ElementHandle(client, _text('Spinner'), 10_000);
+    const start = Date.now();
+    expect(await handle.isVisible()).toBe(true);
+    expect(calls).toBe(12);
+    // ~11 retry gaps of 250ms: well past the 2s fault window, well short of the timeout.
+    expect(Date.now() - start).toBeGreaterThan(2000);
+  });
+
+  it('throws a descriptive error — never a silent answer — when the hierarchy never settles (review follow-up)', async () => {
+    // A silent "hidden" would take the ready branch on exactly the screen that
+    // produces stale snapshots. Fail loudly, with what happened and guidance,
+    // and without the raw agent string as the headline.
     const findElements = vi.fn(async (): Promise<FindElementsResponse> => ({
       requestId: '1', elements: [], errorMessage: 'Element is stale (UI changed): null',
     }));
     const client = makeMockClient({ findElements });
     const handle = new ElementHandle(client, _text('Spinner'), 600);
-    const start = Date.now();
     const err = await handle.isHidden().catch((e) => e);
     expect(err).toBeInstanceOf(Error);
     expect(err.message).toMatch(/Could not read the state of .*Spinner/);
-    expect(err.message).toMatch(/kept changing \(stale snapshot\) for 600ms/);
+    // Reports what happened (attempts + elapsed), not a budget.
+    expect(err.message).toMatch(/kept changing \(stale snapshot\) across (2|3|4) reads over \d+ms/);
     expect(err.message).toMatch(/not\.toBeVisible\(\) or waitFor\(\)/);
-    // Retried within the (capped) window before giving up.
-    expect(findElements.mock.calls.length).toBeGreaterThan(2);
-    expect(Date.now() - start).toBeLessThan(3000);
+    expect(findElements.mock.calls.length).toBe(Number(err.message.match(/across (\d+) reads/)![1]));
   });
 
-  it('surfaces a real agent fault even when the stall also contained stale ticks (review follow-up)', async () => {
+  it('surfaces a fault that persists, after the short fault window — even if stale ticks preceded it (review follow-up)', async () => {
     let calls = 0;
     const findElements = vi.fn(async (): Promise<FindElementsResponse> => ({
       requestId: '1', elements: [],
-      errorMessage: ++calls % 2 ? 'Element is stale (UI changed): null' : 'UiAutomation not connected',
+      errorMessage: ++calls <= 2 ? 'Element is stale (UI changed): null' : 'UiAutomation not connected',
     }));
     const client = makeMockClient({ findElements });
-    await expect(new ElementHandle(client, _text('X'), 600).isVisible())
+    const start = Date.now();
+    await expect(new ElementHandle(client, _text('X'), 30_000).isVisible())
       .rejects.toThrow(/findElements failed: UiAutomation not connected/);
+    // Stale ticks (~0.5s) + fault window (2s): nowhere near the 30s timeout.
+    expect(Date.now() - start).toBeLessThan(5000);
   });
 
-  it('gives each read the full handle timeout as its command deadline (slow-but-healthy agent)', async () => {
-    // The retry window is short, but a single hierarchy dump on a starved CI
-    // emulator must not be cut off by it: the RPC budget is the handle's own.
-    const findElements = vi.fn(async () => makeFindElementsResponse([makeElementInfo({ visible: true })]));
+  it('a later stale tick clears a momentary fault, so stale churn reports churn — not the recovered fault (review follow-up)', async () => {
+    // Convention shared with _strictResolve/_waitForEnabled/waitFor: a
+    // definitive agent answer drops the remembered fault. Otherwise a
+    // long-gone "Not connected to agent" blip could trigger session-level
+    // recovery for a device that was merely animating.
+    let calls = 0;
+    const findElements = vi.fn(async (): Promise<FindElementsResponse> => ({
+      requestId: '1', elements: [],
+      errorMessage: ++calls === 1 ? 'Not connected to agent' : 'Element is stale (UI changed): null',
+    }));
     const client = makeMockClient({ findElements });
-    const handle = new ElementHandle(client, _text('X'), 30_000);
-    expect(await handle.isVisible()).toBe(true);
-    expect(findElements).toHaveBeenCalledWith(expect.anything(), 30_000);
+    const err = await new ElementHandle(client, _text('X'), 600).isVisible().catch((e) => e);
+    expect(err.message).toMatch(/Could not read the state of/);
+    expect(err.message).not.toMatch(/Not connected to agent/);
   });
 
   it('re-queries the device for a handle from all() instead of answering from the cached snapshot (review follow-up)', async () => {
@@ -918,7 +943,7 @@ describe('isVisible()', () => {
       requestId: '1', elements: [], errorMessage: 'Element is stale (UI changed): null',
     }));
     await expect(new ElementHandle(makeMockClient({ findElements: stale }), _text('X'), 0).isVisible())
-      .rejects.toThrow(/kept changing \(stale snapshot\) for 0ms/);
+      .rejects.toThrow(/a single read returned a stale snapshot .* timeout is 0ms, so it was not retried/);
     expect(stale).toHaveBeenCalledTimes(1);
 
     const fault = vi.fn(async (): Promise<FindElementsResponse> => ({
@@ -1201,6 +1226,19 @@ describe('nth()', () => {
     });
     const handle = new ElementHandle(client, _role('listitem'), 300);
     await expect(handle.nth(-4).find()).rejects.toThrow(/nth\(-4\)/);
+  });
+
+  it('does not quote a stale element count in the deadline error once later ticks stopped confirming it (review follow-up)', async () => {
+    // Tick 1: three items (nth(5) misses "found 3"); every later tick is stale.
+    let calls = 0;
+    const findElements = vi.fn(async (): Promise<FindElementsResponse> =>
+      ++calls === 1
+        ? makeFindElementsResponse(threeItems)
+        : { requestId: '1', elements: [], errorMessage: 'Element is stale (UI changed): null' });
+    const client = makeMockClient({ findElements });
+    const err = await new ElementHandle(client, _role('listitem'), 600).nth(5).find().catch((e) => e);
+    expect(err.message).toMatch(/was not found after waiting 600ms/);
+    expect(err.message).not.toMatch(/found 3/);
   });
 
   it('tap() on nth handle uses resolved element selector', async () => {

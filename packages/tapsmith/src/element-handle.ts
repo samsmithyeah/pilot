@@ -176,12 +176,12 @@ const STALE_SNAPSHOT_SIGNATURE = 'is stale (UI changed)';
 
 /**
  * How long the non-waiting visibility probes (`isVisible`/`isHidden`) keep
- * re-probing through fast-failing *unreliable* ticks (stale snapshot, momentary
- * agent command fault) before answering. Measured from the first such failure,
- * capped by the handle's own timeout, and short: a probe never waits for the
- * element itself, only for a trustworthy answer about it. See `_probeOnce`.
+ * re-probing after a momentary agent command *fault* before surfacing it.
+ * Measured from the first fault, capped by the handle's own timeout, and
+ * short: a real infrastructure error should not be hidden for 30s. (Stale
+ * snapshots are NOT bounded by this — see `_probeOnce`.)
  */
-const PROBE_RETRY_WINDOW_MS = 2000;
+const PROBE_FAULT_RETRY_WINDOW_MS = 2000;
 const PROBE_RETRY_POLL_MS = 250;
 
 function isPollableNotFoundError(err: unknown): boolean {
@@ -940,7 +940,8 @@ export class ElementHandle {
           // answered, so drop any earlier transient timeout.
           lastTransientErr = undefined;
           if (!isPollableNotFoundError(err)) throw err;
-          if (err instanceof Error && err.message.startsWith('nth(')) lastPositionalMiss = err;
+          // Keep the diagnostic honest: only the most recent tick's count.
+          lastPositionalMiss = err instanceof Error && err.message.startsWith('nth(') ? err : undefined;
         }
       }
       if (Date.now() >= deadline) {
@@ -2099,21 +2100,28 @@ export class ElementHandle {
    * timeout means the agent did not answer within that whole deadline — a
    * probe does not grant it a second one; it throws at once.
    *
-   * What IS retried is a *fast-failing unreliable tick*, which carries no
-   * information about presence: a stale mid-re-render snapshot or a momentary
-   * agent command failure (`findElements failed: …`). Re-probing runs for a
-   * short window measured from the first such failure and capped by the
-   * handle timeout ({@link PROBE_RETRY_WINDOW_MS}) — bounding the retries,
-   * never the read. When the window closes:
-   * - a stall involving a real agent fault surfaces that fault (so
-   *   session-level recovery patterns still match);
-   * - a stall of *only* stale ticks throws a descriptive error rather than
-   *   answering. Answering would be a lie in the case that matters most — an
-   *   animating spinner is exactly what produces stale snapshots, and a
-   *   silent "hidden" would take the ready branch. It is not the raw agent
-   *   string either: the message says the hierarchy could not be read and
-   *   points at the polling forms (`expect(...).not.toBeVisible()`,
-   *   `waitFor`) that can wait out the churn.
+   * Two kinds of *unreliable tick* — a read that carries no information about
+   * presence — are re-probed, on different budgets:
+   *
+   * - A **stale snapshot** (the UI changed mid-read) means the screen is busy,
+   *   which is normal: an animating spinner or a re-rendering list. It is
+   *   re-probed until the handle timeout, as `find()`/`waitFor`/assertions do,
+   *   so an element that IS there gets read once a tick lands between frames.
+   *   That does not break the probe's promise — it never waits for the
+   *   element to *appear*, only for a readable snapshot to answer from. If the
+   *   hierarchy never settles, a descriptive error (reads attempted, time
+   *   elapsed, and the polling forms to use instead) is thrown rather than an
+   *   answer: a silent "hidden" would take the ready branch on exactly the
+   *   screen that produces stale snapshots.
+   * - A **momentary agent command fault** (`findElements failed: …`) is a real
+   *   infrastructure error, so it is re-probed only briefly
+   *   ({@link PROBE_FAULT_RETRY_WINDOW_MS} from the first fault, capped by the
+   *   handle timeout) and then surfaced unchanged, so session-level recovery
+   *   patterns still match. As in `_strictResolve`, a later definitive answer
+   *   from the agent — including a stale tick — clears the remembered fault,
+   *   so a long-recovered blip is never reported as the cause of a stall.
+   *
+   * `timeout: 0` is the explicit single-shot opt-out: one read, no retries.
    */
   private async _probeOnce(): Promise<ElementInfo | undefined> {
     // A handle from all() carries the snapshot it was created from, which
@@ -2124,11 +2132,14 @@ export class ElementHandle {
     const probeHandle = this._options.resolvedElementsPromise
       ? ElementHandle._cloneWithTimeout(this, this._timeoutMs)
       : this;
-    // 0 is the explicit single-shot opt-out (as in _strictResolve): no retries.
-    const retryWindowMs = this._timeoutMs === 0 ? 0 : Math.min(PROBE_RETRY_WINDOW_MS, this._timeoutMs);
-    let deadline: number | undefined; // opened by the first unreliable tick
-    let lastFault: Error | undefined; // most recent NON-stale transient fault
+    const start = Date.now();
+    const staleDeadline = start + this._timeoutMs;
+    const faultWindowMs = Math.min(PROBE_FAULT_RETRY_WINDOW_MS, this._timeoutMs);
+    let faultDeadline: number | undefined; // opened by the first fault
+    let lastFault: Error | undefined; // most recent fault, cleared by any later definitive tick
+    let attempts = 0;
     while (true) {
+      attempts++;
       try {
         return probeHandle._hasModifiers()
           ? await probeHandle._resolveOne()
@@ -2138,26 +2149,35 @@ export class ElementHandle {
         // does not spend a second one.
         if (isTransientAgentError(err)) throw err;
         if (isStaleSnapshotError(err)) {
-          // Unreliable tick, not a confirmed miss — but classed as pollable
-          // not-found elsewhere, so it must be recognised before that class.
+          // A definitive (if unusable) answer from the agent: the earlier
+          // fault, if any, has recovered. Recognised before the not-found
+          // class, which would otherwise swallow it as a confirmed miss.
+          lastFault = undefined;
         } else if (isRetryableResolutionError(err)) {
           lastFault = err as Error;
+          if (faultDeadline === undefined) faultDeadline = Date.now() + faultWindowMs;
         } else if (isPollableNotFoundError(err)) {
           return undefined;
         } else {
           throw err;
         }
       }
-      if (deadline === undefined) deadline = Date.now() + retryWindowMs;
-      if (Date.now() + PROBE_RETRY_POLL_MS > deadline) {
+      const now = Date.now();
+      if (lastFault && faultDeadline !== undefined && now + PROBE_RETRY_POLL_MS > faultDeadline) {
+        throw lastFault;
+      }
+      if (now + PROBE_RETRY_POLL_MS > staleDeadline) {
         if (lastFault) throw lastFault;
+        const elapsed = now - start;
+        const detail = attempts === 1
+          ? `a single read returned a stale snapshot (the UI changed mid-read) and timeout is ${this._timeoutMs}ms, so it was not retried`
+          : `the UI hierarchy kept changing (stale snapshot) across ${attempts} reads over ${elapsed}ms`;
         throw new Error(
-          `Could not read the state of ${this._describe()}: the UI hierarchy kept changing ` +
-            `(stale snapshot) for ${retryWindowMs}ms. Use expect(locator).toBeVisible() / ` +
-            `.not.toBeVisible() or waitFor(), which poll until the screen settles.`,
+          `Could not read the state of ${this._describe()}: ${detail}. ` +
+            `Use expect(locator).toBeVisible() / .not.toBeVisible() or waitFor(), which poll until the screen settles.`,
         );
       }
-      await sleep(PROBE_RETRY_POLL_MS, this._client._getAbortSignal?.());
+      await sleep(Math.min(PROBE_RETRY_POLL_MS, Math.max(1, staleDeadline - now)), this._client._getAbortSignal?.());
     }
   }
 
