@@ -1103,9 +1103,9 @@ const label = await device.locator({ id: "status_label" }).getText();
 
 Check whether this element is visible on screen **right now**.
 
-Like Playwright's `locator.isVisible()`, this does **not** auto-wait: it resolves immediately with the
-current state, and returns `false` when no element matches. That makes it safe to branch on presence.
-To wait for an element to become visible, use `expect(locator).toBeVisible()` or `waitFor()`.
+Like Playwright's `locator.isVisible()`, this does **not** wait for the element to appear: it reads the
+current state and returns `false` when no element matches, so it is safe to branch on presence. To
+wait for an element to become visible, use `expect(locator).toBeVisible()` or `waitFor()`.
 
 ```typescript
 const visible = await device.getByText("Error", { exact: true }).isVisible();
@@ -1117,14 +1117,18 @@ if (!(await device.getByRole("button", { name: "Enable notifications" }).isVisib
 ```
 
 Strict mode still applies: a selector that matches more than one element throws a
-`StrictModeViolationError`. A persistent device or agent fault also throws, so an infrastructure
-failure is never reported as "not visible".
+`StrictModeViolationError`. A device or agent fault is retried for a couple of seconds and then
+throws, so an infrastructure failure is never reported as "not visible".
+
+Only `isVisible()` and `isHidden()` are non-waiting. `isEnabled()`, `isChecked()` and `isEditable()`
+follow Playwright too: they wait for the element to be present and throw if it never appears, so a
+negative answer always describes a real element.
 
 #### `elementHandle.isHidden(): Promise<boolean>`
 
 The opposite of `isVisible()`: `true` when the element is not visible **or** does not exist. Does not
-auto-wait. To wait for an element to disappear, use `expect(locator).not.toBeVisible()` or
-`waitFor({ state: "hidden" })`.
+wait for the element to appear or disappear. To wait for an element to go away, use
+`expect(locator).not.toBeVisible()` or `waitFor({ state: "hidden" })`.
 
 ```typescript
 if (await device.getByText("Loading…").isHidden()) {
@@ -1134,8 +1138,8 @@ if (await device.getByText("Loading…").isHidden()) {
 
 #### `elementHandle.isEnabled(): Promise<boolean>`
 
-Check whether this element is currently enabled (interactive). Does not auto-wait; returns `false`
-when the element is absent (same contract as `isVisible()`).
+Check whether this element is enabled (interactive). Waits for the element to be present (up to the
+handle's timeout) and throws if it never appears.
 
 ```typescript
 const enabled = await device.getByRole("button", { name: "Submit" }).isEnabled();
@@ -1143,8 +1147,8 @@ const enabled = await device.getByRole("button", { name: "Submit" }).isEnabled()
 
 #### `elementHandle.isChecked(): Promise<boolean>`
 
-Check whether this checkbox, switch, or radio button is currently in the checked state. Does not
-auto-wait; returns `false` when the element is absent (same contract as `isVisible()`).
+Check whether this checkbox, switch, or radio button is in the checked state. Waits for the element to
+be present (up to the handle's timeout) and throws if it never appears.
 
 ```typescript
 const checked = await device.getByRole("switch", { name: "Notifications" }).isChecked();
@@ -1152,8 +1156,8 @@ const checked = await device.getByRole("switch", { name: "Notifications" }).isCh
 
 #### `elementHandle.isEditable(): Promise<boolean>`
 
-Check whether this element is currently an editable input field (text field role and enabled). Does
-not auto-wait; returns `false` when the element is absent (same contract as `isVisible()`).
+Check whether this element is an editable input field (text field role and enabled). Waits for the
+element to be present (up to the handle's timeout) and throws if it never appears.
 
 ```typescript
 const editable = await device.getByRole("textfield", { name: "Email" }).isEditable();

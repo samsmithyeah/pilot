@@ -678,10 +678,12 @@ describe('getText()', () => {
   });
 });
 
-// ─── Boolean state probes: non-waiting (PILOT-287) ───
-// isVisible/isEnabled/isChecked/isEditable resolve the CURRENT state once and
-// report `false` for an absent element — they never auto-wait and never throw
-// "not found". Auto-waiting belongs to expect(...).toBeVisible() / waitFor().
+// ─── Visibility probes: non-waiting (PILOT-287) ───
+// isVisible/isHidden resolve the CURRENT state once and answer for an absent
+// element (false / true) — they never wait for the element and never throw
+// "not found". Waiting belongs to expect(...).toBeVisible() / waitFor(). The
+// other state readers (isEnabled/isChecked/isEditable) keep Playwright's
+// find-then-read contract and DO wait, then throw when absent.
 
 describe('isVisible()', () => {
   it('returns visibility from found element', async () => {
@@ -790,6 +792,42 @@ describe('isVisible()', () => {
     const handle = new ElementHandle(client, _text('X'), 600);
     await expect(handle.isVisible()).rejects.toThrow(/findElements failed: UiAutomation not connected/);
   });
+
+  it('bounds the transient-fault retry window independently of the handle timeout (review follow-up)', async () => {
+    // A 30s handle timeout must not turn a persistently faulting agent into a
+    // 30s stall — the probe promises not to wait. It re-probes briefly, then
+    // surfaces the real error.
+    const findElements = vi.fn(async (): Promise<FindElementsResponse> => ({
+      requestId: '1', elements: [], errorMessage: 'UiAutomation not connected',
+    }));
+    const client = makeMockClient({ findElements });
+    const handle = new ElementHandle(client, _text('X'), 30_000);
+    const start = Date.now();
+    await expect(handle.isVisible()).rejects.toThrow(/findElements failed/);
+    const elapsed = Date.now() - start;
+    expect(elapsed).toBeGreaterThanOrEqual(1500);
+    expect(elapsed).toBeLessThan(5000);
+  });
+
+  it('gives each read the full handle timeout as its command deadline (slow-but-healthy agent)', async () => {
+    // The retry window is short, but a single hierarchy dump on a starved CI
+    // emulator must not be cut off by it: the RPC budget is the handle's own.
+    const findElements = vi.fn(async () => makeFindElementsResponse([makeElementInfo({ visible: true })]));
+    const client = makeMockClient({ findElements });
+    const handle = new ElementHandle(client, _text('X'), 30_000);
+    expect(await handle.isVisible()).toBe(true);
+    expect(findElements).toHaveBeenCalledWith(expect.anything(), 30_000);
+  });
+
+  it('works with timeout: 0 — one read on the daemon default deadline, no artificial 1ms budget (review follow-up)', async () => {
+    const findElements = vi.fn(async () => makeFindElementsResponse([]));
+    const client = makeMockClient({ findElements });
+    const handle = new ElementHandle(client, _text('Absent'), 0);
+    expect(await handle.isVisible()).toBe(false);
+    expect(findElements).toHaveBeenCalledTimes(1);
+    // 0 is passed through: the daemon treats it as "use the default deadline".
+    expect(findElements).toHaveBeenCalledWith(expect.anything(), 0);
+  });
 });
 
 describe('isHidden()', () => {
@@ -870,12 +908,14 @@ describe('isEnabled()', () => {
     expect(await handle.isEnabled()).toBe(false);
   });
 
-  it('returns false immediately when the element is absent (PILOT-287)', async () => {
+  it('waits for the element and throws when it never appears (Playwright contract, unlike isVisible)', async () => {
+    // A negative answer must describe a real element: absence is an error, not
+    // "not enabled", or a broken screen would read as a disabled control.
     const findElements = vi.fn(async () => makeFindElementsResponse([]));
     const client = makeMockClient({ findElements });
-    const handle = new ElementHandle(client, _text('Absent'), 20_000);
-    expect(await handle.isEnabled()).toBe(false);
-    expect(findElements).toHaveBeenCalledTimes(1);
+    const handle = new ElementHandle(client, _text('Absent'), 600);
+    await expect(handle.isEnabled()).rejects.toThrow(/was not found after waiting 600ms/);
+    expect(findElements.mock.calls.length).toBeGreaterThan(1);
   });
 });
 
@@ -2275,12 +2315,10 @@ describe('isChecked()', () => {
     expect(await handle.isChecked()).toBe(false);
   });
 
-  it('returns false immediately when the element is absent (PILOT-287)', async () => {
-    const findElements = vi.fn(async () => makeFindElementsResponse([]));
-    const client = makeMockClient({ findElements });
-    const handle = new ElementHandle(client, _text('Switch'), 20_000);
-    expect(await handle.isChecked()).toBe(false);
-    expect(findElements).toHaveBeenCalledTimes(1);
+  it('waits for the element and throws when it never appears (Playwright contract, unlike isVisible)', async () => {
+    const client = makeMockClient({ findElements: vi.fn(async () => makeFindElementsResponse([])) });
+    const handle = new ElementHandle(client, _text('Switch'), 600);
+    await expect(handle.isChecked()).rejects.toThrow(/was not found after waiting 600ms/);
   });
 });
 
@@ -2529,12 +2567,24 @@ describe('isEditable', () => {
     expect(await handle.isEditable()).toBe(false);
   });
 
-  it('returns false immediately when the element is absent (PILOT-287)', async () => {
-    const findElements = vi.fn(async () => makeFindElementsResponse([]));
+  it('waits for the element and throws when it never appears (Playwright contract, unlike isVisible)', async () => {
+    const client = makeMockClient({ findElements: vi.fn(async () => makeFindElementsResponse([])) });
+    const handle = new ElementHandle(client, _text('Email'), 600);
+    await expect(handle.isEditable()).rejects.toThrow(/was not found after waiting 600ms/);
+  });
+
+  it('waits through a screen transition before reading (regression guard for e2e is-editable)', async () => {
+    // Right after a navigation tap the field may not be in the tree yet; the
+    // reader must auto-wait rather than take a single-shot snapshot.
+    let calls = 0;
+    const findElements = vi.fn(async () =>
+      ++calls < 3
+        ? makeFindElementsResponse([])
+        : makeFindElementsResponse([makeElementInfo({ role: 'textfield', enabled: true })]));
     const client = makeMockClient({ findElements });
-    const handle = new ElementHandle(client, _text('Email'), 20_000);
-    expect(await handle.isEditable()).toBe(false);
-    expect(findElements).toHaveBeenCalledTimes(1);
+    const handle = new ElementHandle(client, _text('Email'), 5000);
+    expect(await handle.isEditable()).toBe(true);
+    expect(calls).toBe(3);
   });
 });
 
@@ -3304,7 +3354,7 @@ describe('action trace lifecycle (PILOT-244)', () => {
   const actionEvents = (h: TraceHarness): ActionTraceEvent[] =>
     h.collector.events.filter((e): e is ActionTraceEvent => e.type === 'action');
 
-  it('records a boolean state probe under its own name with the resolved state, not as a failed find (PILOT-287)', async () => {
+  it('records a visibility probe under its own name with the resolved state, not as a failed find (PILOT-287)', async () => {
     const h = makeTraceHarness();
     const client = makeMockClient({ findElements: vi.fn(async () => makeFindElementsResponse([])) });
     const handle = new ElementHandle(client, _text('Absent'), 20_000, { traceCapture: h.traceCapture });

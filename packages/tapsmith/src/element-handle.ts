@@ -174,6 +174,16 @@ function boundsContain(
  */
 const STALE_SNAPSHOT_SIGNATURE = 'is stale (UI changed)';
 
+/**
+ * How long the non-waiting visibility probes (`isVisible`/`isHidden`) keep
+ * re-probing through *unreliable* ticks (stale snapshot, transient agent
+ * fault) before surfacing the fault. Short and independent of the handle's
+ * timeout: a probe never waits for the element itself, only for a trustworthy
+ * answer about it. See `_probeOnce`.
+ */
+const PROBE_RETRY_WINDOW_MS = 2000;
+const PROBE_RETRY_POLL_MS = 250;
+
 function isPollableNotFoundError(err: unknown): boolean {
   // A strict mode violation means the selector DID resolve — to too many
   // elements. Retrying cannot fix ambiguity; it must propagate immediately.
@@ -1956,17 +1966,17 @@ export class ElementHandle {
   /**
    * Returns whether the element is currently visible on screen.
    *
-   * Does **not** auto-wait (PILOT-287): resolves with the element's state
-   * right now, and with `false` when no element matches — like Playwright's
-   * `locator.isVisible()`, so it can be used as a presence branch
-   * (`if (!(await x.isVisible())) …`). To wait for visibility use
+   * Does **not** wait for the element to appear (PILOT-287): reads the state
+   * right now, and reports `false` when no element matches — like
+   * Playwright's `locator.isVisible()`, so it can be used as a presence
+   * branch (`if (!(await x.isVisible())) …`). To wait for visibility use
    * `expect(locator).toBeVisible()` or `waitFor()`.
    *
    * Still throws on a strict mode violation (the selector matched more than
    * one element) and on a persistent device/agent fault.
    */
   async isVisible(): Promise<boolean> {
-    return this._probeState('isVisible', 'Visible', (info) => info.visible, false);
+    return this._probeVisibility('isVisible', 'Visible', false);
   }
 
   /**
@@ -1974,75 +1984,74 @@ export class ElementHandle {
    * {@link isVisible}: `true` when no element matches or the match is not
    * visible.
    *
-   * Does not auto-wait: resolves immediately with the current state. To wait
-   * for an element to disappear use `expect(locator).not.toBeVisible()` or
+   * Does not wait for the element to appear or disappear. To wait for an
+   * element to go away use `expect(locator).not.toBeVisible()` or
    * `waitFor({ state: 'hidden' })`.
    */
   async isHidden(): Promise<boolean> {
-    return this._probeState('isHidden', 'Hidden', (info) => !info.visible, true);
+    return this._probeVisibility('isHidden', 'Hidden', true);
   }
 
   /**
-   * Returns whether the element is currently enabled (interactive).
+   * Returns whether the element is enabled (interactive).
    *
-   * Does not auto-wait: resolves immediately, `false` when the element is
-   * absent. See {@link isVisible} for the contract shared by the boolean
-   * state probes.
+   * Like Playwright's `locator.isEnabled()` this waits for the element to be
+   * present (up to the handle's timeout) and throws if it never appears —
+   * only {@link isVisible}/{@link isHidden} are non-waiting presence probes.
    */
   async isEnabled(): Promise<boolean> {
-    return this._probeState('isEnabled', 'Enabled', (info) => info.enabled, false);
+    const info = await this.find();
+    return info.enabled;
   }
 
   /**
-   * Returns whether this checkbox, switch, or radio button is currently
-   * checked.
+   * Returns whether this checkbox, switch, or radio button is checked.
    *
-   * Does not auto-wait: resolves immediately, `false` when the element is
-   * absent. See {@link isVisible} for the contract shared by the boolean
-   * state probes.
+   * Waits for the element to be present (up to the handle's timeout) and
+   * throws if it never appears, like Playwright's `locator.isChecked()`.
    */
   async isChecked(): Promise<boolean> {
-    return this._probeState('isChecked', 'Checked', (info) => info.checked, false);
+    const info = this._hasModifiers() ? await this._resolveOne() : await this.find();
+    return info.checked;
   }
 
   /**
    * Returns whether the element is an editable input (text field role and
    * enabled).
    *
-   * Does not auto-wait: resolves immediately, `false` when the element is
-   * absent. See {@link isVisible} for the contract shared by the boolean
-   * state probes.
+   * Waits for the element to be present (up to the handle's timeout) and
+   * throws if it never appears, like Playwright's `locator.isEditable()`.
    */
   async isEditable(): Promise<boolean> {
-    return this._probeState('isEditable', 'Editable', (info) => info.role === 'textfield' && info.enabled, false);
+    const info = await this.find();
+    return info.role === 'textfield' && info.enabled;
   }
 
   /**
-   * @internal — Shared implementation of the boolean state probes
-   * (`isVisible`/`isHidden`/`isEnabled`/`isChecked`/`isEditable`), PILOT-287.
+   * @internal — Shared implementation of the non-waiting visibility probes
+   * `isVisible`/`isHidden` (PILOT-287).
    *
-   * Unlike `find()` these must never auto-wait for the element to appear:
-   * one of their two outcomes naturally subsumes absence (`absentResult` —
-   * `false` for every probe except `isHidden`), and callers use them to
-   * branch on presence. So the element is resolved exactly once — a genuine
-   * miss reads `absentResult` immediately instead of costing the full timeout
-   * and throwing. (`getText()`/`inputValue()` keep the find-then-read
-   * contract: there is no sensible string for an absent element.)
+   * Unlike `find()` these must never wait for the element to appear: callers
+   * use them to branch on presence, and absence has a definite answer
+   * (`absentResult`: `false` for isVisible, `true` for isHidden). So the
+   * element is resolved once — a genuine miss reads `absentResult` at once
+   * instead of costing the full timeout and throwing.
+   *
+   * The other state readers (`isEnabled`/`isChecked`/`isEditable`,
+   * `getText`/`inputValue`) keep Playwright's find-then-read contract: they
+   * wait for the element and throw when it never appears, so a negative
+   * result always describes a real element rather than a missing one.
    *
    * Traced under the probe's own name so a trace shows e.g. `isVisible →
    * Visible: false` rather than a failed `find`.
    */
-  private async _probeState(
-    action: string,
-    label: string,
-    read: (info: ElementInfo) => boolean,
-    absentResult: boolean,
-  ): Promise<boolean> {
+  private async _probeVisibility(action: string, label: string, absentResult: boolean): Promise<boolean> {
     this._emitQueryStarted(action);
     const start = Date.now();
     try {
       const info = await this._probeOnce();
-      const result = info === undefined ? absentResult : read(info);
+      const visible = info?.visible ?? false;
+      const result = absentResult ? !visible : visible;
       await this._traceQuery(action, `${label}: ${result}`, Date.now() - start, info?.bounds);
       return result;
     } catch (err) {
@@ -2060,22 +2069,26 @@ export class ElementHandle {
    * the non-waiting probe. Strict mode still applies — an ambiguous selector
    * throws rather than reporting the first match's state.
    *
-   * The only thing retried is an *unreliable* tick: a stale mid-re-render
-   * snapshot, a slow-but-alive agent, or a momentary agent command failure
-   * carries no information about presence, so — exactly as `exists()` does —
-   * it is re-probed within the handle's timeout budget rather than being
-   * misreported as absence. If the fault persists for the whole budget the
-   * real error surfaces (so session-level recovery patterns still match).
+   * Two budgets are deliberately decoupled:
+   * - Each `findElements` call gets the handle's full timeout as its command
+   *   deadline (0 → the daemon default), exactly as `find()`/`count()` do, so
+   *   a slow-but-healthy hierarchy dump on a starved CI emulator completes
+   *   rather than timing out against an artificially short read budget.
+   * - Only an *unreliable* tick is re-probed — a stale mid-re-render
+   *   snapshot, an agent command timeout, or a momentary agent command
+   *   failure carries no information about presence, so it must not be
+   *   misreported as absence. That retry window is short and fixed
+   *   ({@link PROBE_RETRY_WINDOW_MS}), not the handle's timeout: the probe
+   *   promises not to wait, and a fault that outlives the window surfaces its
+   *   real error (so session-level recovery patterns still match) instead of
+   *   blocking for the 30s the probe exists to avoid.
    */
   private async _probeOnce(): Promise<ElementInfo | undefined> {
-    const deadline = Date.now() + this._timeoutMs;
-    const RETRY_POLL_MS = 250;
+    const deadline = Date.now() + PROBE_RETRY_WINDOW_MS;
     let lastTransientErr: Error | undefined;
     while (true) {
       try {
-        // Floor at 1ms — the daemon treats a 0 timeout as "use the 30s default".
-        const budget = Math.max(1, deadline - Date.now());
-        return this._hasModifiers() ? await this._resolveOne() : await this._findOneStrict(budget);
+        return this._hasModifiers() ? await this._resolveOne() : await this._findOneStrict(this._timeoutMs);
       } catch (err) {
         // Stale snapshots are classed as pollable not-found elsewhere, but for
         // a probe they are an unreliable tick, not a confirmed miss — check
@@ -2088,8 +2101,8 @@ export class ElementHandle {
           throw err;
         }
       }
-      if (Date.now() + RETRY_POLL_MS >= deadline) throw lastTransientErr;
-      await sleep(RETRY_POLL_MS, this._client._getAbortSignal?.());
+      if (Date.now() + PROBE_RETRY_POLL_MS > deadline) throw lastTransientErr;
+      await sleep(PROBE_RETRY_POLL_MS, this._client._getAbortSignal?.());
     }
   }
 
