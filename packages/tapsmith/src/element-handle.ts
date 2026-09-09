@@ -1953,24 +1953,129 @@ export class ElementHandle {
     return info.text;
   }
 
+  /**
+   * Returns whether the element is currently visible on screen.
+   *
+   * Does **not** auto-wait (PILOT-287): resolves with the element's state
+   * right now, and with `false` when no element matches — like Playwright's
+   * `locator.isVisible()`, so it can be used as a presence branch
+   * (`if (!(await x.isVisible())) …`). To wait for visibility use
+   * `expect(locator).toBeVisible()` or `waitFor()`.
+   *
+   * Still throws on a strict mode violation (the selector matched more than
+   * one element) and on a persistent device/agent fault.
+   */
   async isVisible(): Promise<boolean> {
-    const info = await this.find();
-    return info.visible;
+    return this._probeState('isVisible', 'Visible', (info) => info.visible);
   }
 
+  /**
+   * Returns whether the element is currently enabled (interactive).
+   *
+   * Does not auto-wait: resolves immediately, `false` when the element is
+   * absent. See {@link isVisible} for the contract shared by the boolean
+   * state probes.
+   */
   async isEnabled(): Promise<boolean> {
-    const info = await this.find();
-    return info.enabled;
+    return this._probeState('isEnabled', 'Enabled', (info) => info.enabled);
   }
 
+  /**
+   * Returns whether this checkbox, switch, or radio button is currently
+   * checked.
+   *
+   * Does not auto-wait: resolves immediately, `false` when the element is
+   * absent. See {@link isVisible} for the contract shared by the boolean
+   * state probes.
+   */
   async isChecked(): Promise<boolean> {
-    const info = this._hasModifiers() ? await this._resolveOne() : await this.find();
-    return info.checked;
+    return this._probeState('isChecked', 'Checked', (info) => info.checked);
   }
 
+  /**
+   * Returns whether the element is an editable input (text field role and
+   * enabled).
+   *
+   * Does not auto-wait: resolves immediately, `false` when the element is
+   * absent. See {@link isVisible} for the contract shared by the boolean
+   * state probes.
+   */
   async isEditable(): Promise<boolean> {
-    const info = await this.find();
-    return info.role === 'textfield' && info.enabled;
+    return this._probeState('isEditable', 'Editable', (info) => info.role === 'textfield' && info.enabled);
+  }
+
+  /**
+   * @internal — Shared implementation of the boolean state probes
+   * (`isVisible`/`isEnabled`/`isChecked`/`isEditable`), PILOT-287.
+   *
+   * Unlike `find()` these must never auto-wait for the element to appear:
+   * their `false` case naturally subsumes absence, and callers use them to
+   * branch on presence. So the element is resolved exactly once — a genuine
+   * miss reads `false` immediately instead of costing the full timeout and
+   * throwing. (`getText()`/`inputValue()` keep the find-then-read contract:
+   * there is no sensible string for an absent element.)
+   *
+   * Traced under the probe's own name so a trace shows e.g. `isVisible →
+   * Visible: false` rather than a failed `find`.
+   */
+  private async _probeState(
+    action: string,
+    label: string,
+    read: (info: ElementInfo) => boolean,
+  ): Promise<boolean> {
+    this._emitQueryStarted(action);
+    const start = Date.now();
+    try {
+      const info = await this._probeOnce();
+      const result = info !== undefined && read(info);
+      await this._traceQuery(action, `${label}: ${result}`, Date.now() - start, info?.bounds);
+      return result;
+    } catch (err) {
+      await this._traceQueryFailed(action, err, Date.now() - start);
+      throw err;
+    }
+  }
+
+  /**
+   * @internal — Resolve the element's CURRENT state without waiting for it to
+   * appear: `undefined` when nothing matches right now.
+   *
+   * Both agents answer `findElements` in a single shot (no on-device wait),
+   * and `_resolveOne()` is likewise a single-tick resolution, so one call is
+   * the non-waiting probe. Strict mode still applies — an ambiguous selector
+   * throws rather than reporting the first match's state.
+   *
+   * The only thing retried is an *unreliable* tick: a stale mid-re-render
+   * snapshot, a slow-but-alive agent, or a momentary agent command failure
+   * carries no information about presence, so — exactly as `exists()` does —
+   * it is re-probed within the handle's timeout budget rather than being
+   * misreported as absence. If the fault persists for the whole budget the
+   * real error surfaces (so session-level recovery patterns still match).
+   */
+  private async _probeOnce(): Promise<ElementInfo | undefined> {
+    const deadline = Date.now() + this._timeoutMs;
+    const RETRY_POLL_MS = 250;
+    let lastTransientErr: Error | undefined;
+    while (true) {
+      try {
+        // Floor at 1ms — the daemon treats a 0 timeout as "use the 30s default".
+        const budget = Math.max(1, deadline - Date.now());
+        return this._hasModifiers() ? await this._resolveOne() : await this._findOneStrict(budget);
+      } catch (err) {
+        // Stale snapshots are classed as pollable not-found elsewhere, but for
+        // a probe they are an unreliable tick, not a confirmed miss — check
+        // them before the not-found class.
+        if (isStaleSnapshotError(err) || isRetryableResolutionError(err)) {
+          lastTransientErr = err as Error;
+        } else if (isPollableNotFoundError(err)) {
+          return undefined;
+        } else {
+          throw err;
+        }
+      }
+      if (Date.now() + RETRY_POLL_MS >= deadline) throw lastTransientErr;
+      await sleep(RETRY_POLL_MS, this._client._getAbortSignal?.());
+    }
   }
 
   async inputValue(): Promise<string> {
