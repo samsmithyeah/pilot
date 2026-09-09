@@ -1126,13 +1126,14 @@ if (!(await device.getByRole("button", { name: "Enable notifications" }).isVisib
 ```
 
 Strict mode still applies: a selector that matches more than one element throws a
-`StrictModeViolationError`. A single call takes as long as one hierarchy read on the device (it never
-polls for the element). Infrastructure problems are never reported as a visibility answer: an agent
+`StrictModeViolationError`. On a settled screen a call takes as long as one hierarchy read on the
+device (it never polls for the element). Infrastructure problems are never reported as a visibility answer: an agent
 that does not respond within the read throws at once, and a momentary agent fault is retried for up to
 a couple of seconds (capped by the handle's timeout) and then thrown. A stale mid-re-render snapshot
 just means the screen is busy, so — like `find()` and `waitFor()` — it is re-read until the handle's
-timeout; if the hierarchy never settles (a screen that never stops animating) a descriptive error is
-thrown, pointing at `expect(locator).toBeVisible()` / `.not.toBeVisible()` and `waitFor()`. A handle
+timeout; if the hierarchy never settles (a screen that never stops animating) the call costs the full
+timeout and then throws a descriptive error, pointing at `expect(locator).toBeVisible()` /
+`.not.toBeVisible()` and `waitFor()`, rather than guessing an answer. A handle
 obtained from `all()` re-queries the device rather than answering from the snapshot it was created
 from (see `all()`).
 
@@ -2728,7 +2729,7 @@ Close the WebView connection. Usually called via `device.native()` instead.
 
 Lazy reference to an element within a WebView, created by `webview.locator()` or the `webview.getBy*` methods. Supports actions and assertions.
 
-**Actions & queries (strict):** `click()`, `fill(value)`, `textContent()`, `innerHTML()`, `inputValue()`, `getAttribute(name)`, `isVisible()`
+**Actions & queries (strict):** `click()`, `fill(value)`, `textContent()`, `innerHTML()`, `inputValue()`, `getAttribute(name)`, `isVisible()`, `isHidden()` (both single-read, no auto-wait, as on `ElementHandle`)
 
 **Narrowing & multi-element (strict-mode exempt):**
 

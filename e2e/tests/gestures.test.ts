@@ -95,12 +95,17 @@ describe("Gestures screen", () => {
   })
 
   // PILOT-287: the visibility probes must not wait for the element. An absent
-  // element answers at once instead of spending the action timeout and
-  // throwing — so the value assertions alone catch a regression (the pre-fix
-  // code threw here), and no wall-clock bound is needed.
+  // element answers at once instead of spending the action timeout (30s) and
+  // throwing. The value assertions catch a regression to the pre-fix throw;
+  // the wall-clock bound catches a regression to a silent poll-to-deadline
+  // (which would still return the right values, 60s later). Two reads on a
+  // settled screen take well under a second even on a starved CI emulator, so
+  // 15s is generous headroom while still a quarter of a poll-to-deadline.
   test("isVisible/isHidden answer for an absent element without waiting", async ({ device }) => {
     const absent = device.getByText("Definitely not on this screen", { exact: true })
+    const start = Date.now()
     expect(await absent.isVisible()).toBe(false)
     expect(await absent.isHidden()).toBe(true)
+    expect(Date.now() - start).toBeLessThan(15_000)
   })
 })

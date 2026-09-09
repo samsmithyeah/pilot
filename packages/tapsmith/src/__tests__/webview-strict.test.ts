@@ -226,6 +226,30 @@ describe('WebView strict mode (PILOT-227)', () => {
     });
   });
 
+  describe('isHidden()', () => {
+    it('is the negation of isVisible for a single match', async () => {
+      const { handle } = makeHandle([{ text: 'A', visible: false }]);
+      expect(await handle.getByText('A').isHidden()).toBe(true);
+      expect(await handle.getByText('A').isVisible()).toBe(false);
+    });
+
+    it('returns true when nothing matches', async () => {
+      const { handle } = makeHandle([]);
+      expect(await handle.getByText('A').isHidden()).toBe(true);
+    });
+
+    it('is strict: an ambiguous locator throws rather than reporting the first match', async () => {
+      const { handle } = makeHandle([{ text: 'A' }, { text: 'A' }]);
+      await expect(handle.getByText('A').isHidden()).rejects.toThrow('strict mode violation');
+    });
+
+    it('honours positional narrowing', async () => {
+      const { handle } = makeHandle([{ text: 'A', visible: false }, { text: 'A', visible: true }]);
+      expect(await handle.getByText('A').first().isHidden()).toBe(true);
+      expect(await handle.getByText('A').last().isHidden()).toBe(false);
+    });
+  });
+
   describe('assertions', () => {
     it('toBeVisible() throws a strict violation on an ambiguous locator', async () => {
       const { handle } = makeHandle([{ text: 'A' }, { text: 'A' }]);

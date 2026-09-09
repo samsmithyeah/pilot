@@ -1054,6 +1054,11 @@ export class ElementHandle {
     const POLL_MS = 250;
     let everFound = false;
     let lastTransientErr: Error | undefined;
+    // The most recent positional miss (`nth(i): expected at least …`), kept so
+    // the deadline error still says WHICH index was short and by how much —
+    // the same diagnostic _strictResolve gives `type()`, so `nth(5).tap()`
+    // does not fail with a worse message than `nth(5).type()`.
+    let lastPositionalMiss: Error | undefined;
     while (true) {
       try {
         // Floor at 1ms — the daemon treats a 0 timeout as "use the 30s
@@ -1066,6 +1071,7 @@ export class ElementHandle {
         // transient timeout so a genuine "not found"/"disabled" isn't reported
         // as an infra error at the deadline.
         lastTransientErr = undefined;
+        lastPositionalMiss = undefined;
         if (el) {
           everFound = true;
           if (el.enabled) {
@@ -1093,15 +1099,18 @@ export class ElementHandle {
           // so the user sees the real cause, not "Element not found after Nms".
           lastTransientErr = undefined;
           if (!isPollableNotFoundError(err)) throw err;
+          // Keep the diagnostic honest: only the most recent tick's count.
+          lastPositionalMiss = err instanceof Error && err.message.startsWith('nth(') ? err : undefined;
         }
       }
       if (Date.now() >= deadline) {
         if (lastTransientErr) throw lastTransientErr;
         const desc = this._describe();
+        const detail = lastPositionalMiss ? ` (${lastPositionalMiss.message})` : '';
         throw new Error(
           everFound
             ? `Element ${desc} is disabled after waiting ${timeoutMs}ms`
-            : `Element ${desc} was not found after waiting ${timeoutMs}ms`,
+            : `Element ${desc} was not found after waiting ${timeoutMs}ms${detail}`,
         );
       }
       const sleepMs = Math.min(POLL_MS, Math.max(0, deadline - Date.now()));
@@ -1206,6 +1215,10 @@ export class ElementHandle {
         // for unmodified ones.
         const { element } = await this._strictResolve();
         if (!element) {
+          // Unreachable: with a non-zero timeout _strictResolve either returns
+          // an element or throws at its deadline (`was not found after
+          // waiting`). The optional type exists for its timeout-0 early
+          // return, handled above. Kept as a narrowing guard only.
           throw new Error(`Element not found: ${this._describe()}`);
         }
         result = element;
@@ -1997,9 +2010,16 @@ export class ElementHandle {
    *
    * Still throws on a strict mode violation (the selector matched more than
    * one element) and on a persistent device/agent fault.
+   *
+   * "Does not wait" means no waiting for the element: a call costs one
+   * hierarchy read on a settled screen. A read that lands mid-re-render
+   * (stale snapshot) is re-read, for up to the handle's timeout, until one
+   * lands between frames — so on a screen that never stops changing (a
+   * permanent spinner) a call can take the full timeout and then throws a
+   * descriptive error instead of guessing. Use the polling forms there.
    */
   async isVisible(): Promise<boolean> {
-    return this._probeVisibility('isVisible', 'Visible', /* negate */ false);
+    return this._probeVisibility('isVisible');
   }
 
   /**
@@ -2010,9 +2030,13 @@ export class ElementHandle {
    * Does not wait for the element to appear or disappear. To wait for an
    * element to go away use `expect(locator).not.toBeVisible()` or
    * `waitFor({ state: 'hidden' })`.
+   *
+   * Same caveats as {@link isVisible}: strict mode applies, a persistent
+   * device fault throws, and a screen that never stops re-rendering costs the
+   * handle's timeout and then throws rather than answering `true`.
    */
   async isHidden(): Promise<boolean> {
-    return this._probeVisibility('isHidden', 'Hidden', /* negate */ true);
+    return this._probeVisibility('isHidden');
   }
 
   /**
@@ -2057,7 +2081,7 @@ export class ElementHandle {
    * Unlike `find()` these must never wait for the element to appear: callers
    * use them to branch on presence, and absence has a definite answer — an
    * absent element is not visible, so isVisible → `false` and isHidden (its
-   * exact negation, `negate`) → `true`. The element is resolved once; a
+   * exact negation) → `true`. The element is resolved once; a
    * genuine miss answers at once instead of costing the full timeout and
    * throwing.
    *
@@ -2069,17 +2093,17 @@ export class ElementHandle {
    * Traced under the probe's own name so a trace shows e.g. `isVisible →
    * Visible: false` rather than a failed `find`.
    */
-  private async _probeVisibility(action: string, label: string, negate: boolean): Promise<boolean> {
-    this._emitQueryStarted(action);
+  private async _probeVisibility(probe: 'isVisible' | 'isHidden'): Promise<boolean> {
+    this._emitQueryStarted(probe);
     const start = Date.now();
     try {
       const info = await this._probeOnce();
       const visible = info !== undefined && info.visible; // absent ⇒ not visible
-      const result = negate ? !visible : visible;
-      await this._traceQuery(action, `${label}: ${result}`, Date.now() - start, info?.bounds);
+      const result = probe === 'isHidden' ? !visible : visible;
+      await this._traceQuery(probe, `${probe === 'isHidden' ? 'Hidden' : 'Visible'}: ${result}`, Date.now() - start, info?.bounds);
       return result;
     } catch (err) {
-      await this._traceQueryFailed(action, err, Date.now() - start);
+      await this._traceQueryFailed(probe, err, Date.now() - start);
       throw err;
     }
   }
@@ -2093,16 +2117,19 @@ export class ElementHandle {
    * the non-waiting probe. Strict mode still applies — an ambiguous selector
    * throws rather than reporting the first match's state.
    *
-   * The first read gets the handle's full timeout as its command deadline
-   * (0 → the daemon default), like `count()`, so a slow-but-healthy hierarchy
-   * dump on a starved CI emulator completes rather than timing out against an
-   * artificially short read budget (`_strictResolve` instead caps each tick
-   * at 250ms and relies on retrying the resulting agent timeouts). Later
-   * re-reads are capped at the time left before the loop deadline, so the
-   * whole call stays within one handle timeout instead of overrunning to two.
-   * An agent command timeout therefore means the agent did not answer within
-   * the budget it was given — a probe does not grant it a second one; it
-   * throws at once.
+   * The first read gets the handle's full timeout as its command deadline,
+   * like `count()`, so a slow-but-healthy hierarchy dump on a starved CI
+   * emulator completes rather than timing out against an artificially short
+   * read budget (`_strictResolve` instead caps each tick at 250ms and relies
+   * on retrying the resulting agent timeouts). Re-reads get what is left of
+   * the timeout, and stop once less than two poll intervals remain — one to
+   * wait, one as the smallest read budget worth issuing — so the whole call
+   * stays within one handle timeout and the last read is never a 1ms one
+   * that could only time out. The budget is applied on every handle shape
+   * ({@link _readOnce} re-times modified handles as `_resolveForWaitTick`
+   * does). An agent command timeout therefore means the agent did not answer
+   * within the budget it was given — a probe does not grant it a second one;
+   * it throws at once.
    *
    * Two kinds of *unreliable tick* — a read that carries no information about
    * presence — are re-probed, on different budgets:
@@ -2126,16 +2153,13 @@ export class ElementHandle {
    *   so a long-recovered blip is never reported as the cause of a stall.
    *
    * `timeout: 0` is the explicit single-shot opt-out: one read, no retries.
+   * That read is issued with a 0 deadline, which the daemon maps to its
+   * default command deadline — the same as `count()` at timeout 0. A 1ms
+   * floor (what the poll loops use for their *final* tick) would make the
+   * only read time out on every real device, so the opt-out disables the
+   * retries, not the read.
    */
   private async _probeOnce(): Promise<ElementInfo | undefined> {
-    // A handle from all() carries the snapshot it was created from, which
-    // `_resolveOne` short-circuits on — fine for acting on the batch, wrong for
-    // a probe that promises the state *right now* (a tap on rows[0] may have
-    // changed rows[1]). Re-query by index instead, exactly as the assertion and
-    // waitFor poll ticks do (_cloneWithTimeout drops the cached resolution).
-    const probeHandle = this._options.resolvedElementsPromise
-      ? ElementHandle._cloneWithTimeout(this, this._timeoutMs)
-      : this;
     const start = Date.now();
     const staleDeadline = start + this._timeoutMs;
     const faultWindowMs = Math.min(PROBE_FAULT_RETRY_WINDOW_MS, this._timeoutMs);
@@ -2149,9 +2173,7 @@ export class ElementHandle {
     let readBudget = this._timeoutMs;
     while (true) {
       try {
-        return probeHandle._hasModifiers()
-          ? await probeHandle._resolveOne()
-          : await probeHandle._findOneStrict(readBudget);
+        return await this._readOnce(readBudget);
       } catch (err) {
         // The read already had the whole budget available to it — a probe
         // does not grant a second one.
@@ -2177,24 +2199,61 @@ export class ElementHandle {
       if (lastFault && faultDeadline !== undefined && now + PROBE_RETRY_POLL_MS > faultDeadline) {
         throw lastFault;
       }
-      if (now + PROBE_RETRY_POLL_MS > staleDeadline) {
+      // Stop while a re-read can still be meaningful: one poll gap, then at
+      // least a poll interval's worth of read budget (the per-tick budget the
+      // waiting loops grant). Anything shorter would only time out — and be
+      // thrown as an infra error on a screen that was merely animating.
+      const remaining = staleDeadline - now;
+      if (remaining < 2 * PROBE_RETRY_POLL_MS) {
         if (lastFault) throw lastFault;
         const reads = staleReads + faultReads;
-        const faults = faultReads ? ` (plus ${faultReads} momentary agent fault${faultReads === 1 ? '' : 's'} that cleared)` : '';
-        const detail = reads === 1
-          ? `a single read returned a stale snapshot (the UI changed mid-read) and timeout is ${this._timeoutMs}ms, so it was not retried`
-          : `the UI hierarchy kept changing (stale snapshot) across ${staleReads} reads over ${now - start}ms${faults}`;
+        const faults = faultReads
+          ? ` (plus ${faultReads} momentary agent fault${faultReads === 1 ? '' : 's'} that cleared)`
+          : '';
+        let detail: string;
+        if (reads === 1) {
+          // One stale read and no room for another. Say WHY there is no room:
+          // either the caller opted out (timeout 0) or the read itself used
+          // the budget up — not "the timeout is too short".
+          const why = this._timeoutMs === 0
+            ? 'timeout is 0 (single-shot), so it was not retried'
+            : `it took ${now - start}ms, and the ${Math.max(0, remaining)}ms left of the ${this._timeoutMs}ms timeout ` +
+              `is not enough for another read (a re-read needs at least ${2 * PROBE_RETRY_POLL_MS}ms)`;
+          detail = `a single read returned a stale snapshot (the UI changed mid-read); ${why}`;
+        } else {
+          detail =
+            `the UI hierarchy kept changing (stale snapshot) across ${staleReads} read${staleReads === 1 ? '' : 's'} ` +
+            `over ${now - start}ms${faults}`;
+        }
         throw new Error(
           `Could not read the state of ${this._describe()}: ${detail}. ` +
             `Use expect(locator).toBeVisible() / .not.toBeVisible() or waitFor(), which poll until the screen settles.`,
         );
       }
-      await sleep(Math.min(PROBE_RETRY_POLL_MS, Math.max(1, staleDeadline - now)), this._client._getAbortSignal?.());
-      // Cap the re-read so the call cannot overrun the handle timeout (a read
-      // issued just before the deadline would otherwise run a whole extra one).
-      // The pre-read check above guarantees at least ~250ms remain.
-      readBudget = Math.max(1, Math.min(this._timeoutMs, staleDeadline - Date.now()));
+      await sleep(PROBE_RETRY_POLL_MS, this._client._getAbortSignal?.());
+      // ≥ ~PROBE_RETRY_POLL_MS by the check above; never more than the timeout.
+      readBudget = Math.max(1, staleDeadline - Date.now());
     }
+  }
+
+  /**
+   * @internal — One read of the current hierarchy for {@link _probeOnce},
+   * bounded by `budgetMs` on every handle shape.
+   *
+   * Unmodified handles read `findElements` directly with the budget. Modified
+   * handles (`.first()`/`.nth()`/`.filter()`/`.and()`/`.or()`/scoped chains)
+   * resolve client-side through `_resolveOne`, whose reads carry the handle's
+   * OWN timeout — and an and/or operand's own, often long, one — so the tree
+   * is re-timed to the budget first, exactly as `_resolveForWaitTick` does.
+   * Otherwise a re-read issued just before the probe deadline would run a
+   * whole extra timeout. The clone also drops the `all()` snapshot cache
+   * (`_resolveOne` short-circuits on it), which a probe must not answer from:
+   * it promises the state *right now*, and a tap on `rows[0]` may have changed
+   * `rows[1]` — so it re-queries by index, as assertion and waitFor ticks do.
+   */
+  private async _readOnce(budgetMs: number): Promise<ElementInfo | undefined> {
+    if (!this._hasModifiers()) return this._findOneStrict(budgetMs);
+    return ElementHandle._cloneWithTimeout(this, budgetMs)._resolveOne();
   }
 
   async inputValue(): Promise<string> {
