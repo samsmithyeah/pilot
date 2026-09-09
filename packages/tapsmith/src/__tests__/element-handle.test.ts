@@ -793,10 +793,13 @@ describe('isVisible()', () => {
     await expect(handle.isVisible()).rejects.toThrow(/findElements failed: UiAutomation not connected/);
   });
 
-  it('bounds the transient-fault retry window independently of the handle timeout (review follow-up)', async () => {
+  it('re-probes a persistently faulting agent only for the short fixed window, not the handle timeout (review follow-up)', async () => {
     // A 30s handle timeout must not turn a persistently faulting agent into a
-    // 30s stall — the probe promises not to wait. It re-probes briefly, then
-    // surfaces the real error.
+    // 30s stall — the probe promises not to wait for the element. It re-probes
+    // briefly, then surfaces the real error. This bounds the *retries* (each
+    // mock call answers instantly, so elapsed time is the sum of the gaps);
+    // the individual read's own deadline is deliberately the handle timeout so
+    // a slow-but-healthy hierarchy dump can complete — see the next test.
     const findElements = vi.fn(async (): Promise<FindElementsResponse> => ({
       requestId: '1', elements: [], errorMessage: 'UiAutomation not connected',
     }));
@@ -817,6 +820,30 @@ describe('isVisible()', () => {
     const handle = new ElementHandle(client, _text('X'), 30_000);
     expect(await handle.isVisible()).toBe(true);
     expect(findElements).toHaveBeenCalledWith(expect.anything(), 30_000);
+  });
+
+  it('re-queries the device for a handle from all() instead of answering from the cached snapshot (review follow-up)', async () => {
+    // rows[0].tap() may change rows[1]; a probe that promises the state "right
+    // now" must not read the pre-tap snapshot all() resolved from. Assertions
+    // and waitFor already re-query by index — the probe must agree with them.
+    let calls = 0;
+    const findElements = vi.fn(async () => {
+      calls++;
+      return makeFindElementsResponse([
+        makeElementInfo({ elementId: 'a', text: 'A', visible: true }),
+        // Second query (after the "action") reports row 1 hidden.
+        makeElementInfo({ elementId: 'b', text: 'B', visible: calls === 1 }),
+      ]);
+    });
+    const client = makeMockClient({ findElements });
+    const rows = await new ElementHandle(client, _role('listitem'), 5000).all();
+    expect(calls).toBe(1);
+    expect(await rows[1].isVisible()).toBe(false);
+    expect(await rows[1].isHidden()).toBe(true);
+    expect(calls).toBe(3);
+    // The all() snapshot itself is untouched: the batch still acts on it.
+    expect((await rows[1].find()).visible).toBe(true);
+    expect(calls).toBe(3);
   });
 
   it('works with timeout: 0 — one read on the daemon default deadline, no artificial 1ms budget (review follow-up)', async () => {

@@ -1110,15 +1110,17 @@ wait for an element to become visible, use `expect(locator).toBeVisible()` or `w
 ```typescript
 const visible = await device.getByText("Error", { exact: true }).isVisible();
 
-// Presence branch — resolves at once, no timeout is spent on a missing element
+// Presence branch — answers at once, no timeout is spent on a missing element
 if (!(await device.getByRole("button", { name: "Enable notifications" }).isVisible())) {
-  return; // already enabled on this device
+  return; // no button to tap on this screen — nothing to do here
 }
 ```
 
 Strict mode still applies: a selector that matches more than one element throws a
-`StrictModeViolationError`. A device or agent fault is retried for a couple of seconds and then
-throws, so an infrastructure failure is never reported as "not visible".
+`StrictModeViolationError`. A single call takes as long as one hierarchy read on the device (it never
+polls for the element); a transient device or agent fault is retried for a couple of seconds and then
+throws, so an infrastructure failure is never reported as "not visible". A handle obtained from
+`all()` re-queries the device rather than answering from the snapshot it was created from.
 
 Only `isVisible()` and `isHidden()` are non-waiting. `isEnabled()`, `isChecked()` and `isEditable()`
 follow Playwright too: they wait for the element to be present and throw if it never appears, so a
@@ -1129,6 +1131,11 @@ negative answer always describes a real element.
 The opposite of `isVisible()`: `true` when the element is not visible **or** does not exist. Does not
 wait for the element to appear or disappear. To wait for an element to go away, use
 `expect(locator).not.toBeVisible()` or `waitFor({ state: "hidden" })`.
+
+Like Playwright's `isHidden()`, this is a strict single-element query: a selector that matches more
+than one element throws a `StrictModeViolationError`, whereas `not.toBeVisible()` and
+`waitFor({ state: "hidden" })` evaluate absence over all matches. If the selector may match several
+elements (say, two "Loading…" spinners), use those, or narrow with `.first()`/`.filter()`.
 
 ```typescript
 if (await device.getByText("Loading…").isHidden()) {

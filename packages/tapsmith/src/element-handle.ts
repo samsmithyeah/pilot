@@ -2084,11 +2084,21 @@ export class ElementHandle {
    *   blocking for the 30s the probe exists to avoid.
    */
   private async _probeOnce(): Promise<ElementInfo | undefined> {
+    // A handle from all() carries the snapshot it was created from, which
+    // `_resolveOne` short-circuits on — fine for acting on the batch, wrong for
+    // a probe that promises the state *right now* (a tap on rows[0] may have
+    // changed rows[1]). Re-query by index instead, exactly as the assertion and
+    // waitFor poll ticks do (_cloneWithTimeout drops the cached resolution).
+    const probeHandle = this._options.resolvedElementsPromise
+      ? ElementHandle._cloneWithTimeout(this, this._timeoutMs)
+      : this;
     const deadline = Date.now() + PROBE_RETRY_WINDOW_MS;
     let lastTransientErr: Error | undefined;
     while (true) {
       try {
-        return this._hasModifiers() ? await this._resolveOne() : await this._findOneStrict(this._timeoutMs);
+        return probeHandle._hasModifiers()
+          ? await probeHandle._resolveOne()
+          : await probeHandle._findOneStrict(this._timeoutMs);
       } catch (err) {
         // Stale snapshots are classed as pollable not-found elsewhere, but for
         // a probe they are an unreliable tick, not a confirmed miss — check
