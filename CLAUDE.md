@@ -93,9 +93,10 @@ what is deliberately not covered.
 GitHub Actions runs 9 parallel jobs: `proto-lint`, `typescript`, `rust`, `rust-macos`, `android`,
 `website`, `test-app`, `react-native`, `ui-web`. All must pass. See `.github/workflows/ci.yml`.
 
-The external [DCO GitHub App](https://github.com/apps/dco) checks PR sign-offs, configured by
-`.github/dco.yml` on the default branch. **Sign your commits with `git commit -s`**, including
-maintainer commits (see `CONTRIBUTING.md`). The app accepts the author or committer's sign-off,
+The external [DCO GitHub App](https://github.com/apps/dco) supplies the **DCO** check required
+by the `main` ruleset, configured by `.github/dco.yml` on the default branch.
+**Sign your commits with `git commit -s`**, including maintainer commits (see `CONTRIBUTING.md`).
+The app accepts the author or committer's sign-off,
 exempts merges and GitHub-recognised bots, and allows authors to repair their own missing
 sign-offs with individual remediation commits. Repository setup is in `.github/dco-setup.md`.
 

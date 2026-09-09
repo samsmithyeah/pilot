@@ -4,6 +4,10 @@ Tapsmith uses the external [DCO GitHub App](https://github.com/apps/dco), not a 
 workflow. The contribution policy is in [CONTRIBUTING.md](../CONTRIBUTING.md), and the
 canonical certificate is in [DCO](../DCO).
 
+The app is installed for `samsmithyeah/tapsmith`. The active `main` ruleset requires the
+**DCO** check specifically from app ID **1861**, alongside its existing PR, deletion and
+force-push protections.
+
 ## Installation and enforcement
 
 1. Install the app for **samsmithyeah/tapsmith** using **Only select repositories**.

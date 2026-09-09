@@ -48,9 +48,10 @@ it under Apache 2.0. Read the full text in [DCO](DCO) -- it's four short clauses
 what the licence already does. Sign-offs record contributors' certifications about their
 right to submit the work; they do not independently verify authorship or ownership.
 
-The [DCO GitHub App](https://github.com/apps/dco) checks pull requests for sign-offs
-matching the commit author or committer's name and email. We use its standard exceptions
-for merge commits and accounts GitHub identifies as bots. Merge conflict resolutions still
+The [DCO GitHub App](https://github.com/apps/dco) supplies the **DCO** check required by
+the `main` ruleset. It checks sign-offs matching the commit author or committer's name and
+email. We use its standard exceptions for merge commits and accounts GitHub identifies
+as bots. Merge conflict resolutions still
 need review, and should carry your sign-off when you create them. Naming an account or
 commit author `[bot]` does not qualify it for the bot exception.
 
@@ -64,13 +65,17 @@ If you forget a sign-off on your own commits, you can amend them:
 git commit --amend -s --no-edit
 git push --force-with-lease
 
-# Several commits
+# Several commits: only when every commit in origin/main..HEAD is your own
 git fetch origin
 git rebase --signoff origin/main
 git push --force-with-lease
 ```
 
-Only rewrite a branch this way when you have coordinated with anyone using its history.
+`git rebase --signoff` adds your certification to every commit it rewrites. Check the range
+after fetching, and do not use this bulk command if it includes another contributor's work.
+Preserve their authorship and existing sign-offs; ask them to repair any missing sign-off
+using their own individual remediation commit. Only rewrite a branch when you have
+coordinated with anyone using its history.
 For shared branches, the app also supports **individual remediation commits**: open the
 failed DCO check and follow its instructions to certify your own earlier commits in a
 follow-up commit. This is configured in [.github/dco.yml](.github/dco.yml); third-party
