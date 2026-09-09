@@ -238,7 +238,6 @@ const LINK_MAP = {
   'network.md': '/guides/network/',
   'webview.md': '/guides/webview/',
   'trace-viewer.md': '/guides/trace-viewer/',
-  'watch-and-ui-mode.md': '/guides/watch-mode/',
   'watch-mode.md': '/guides/watch-mode/',
   'ui-mode.md': '/guides/ui-mode/',
   'warm-reset.md': '/guides/warm-reset/',

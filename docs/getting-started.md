@@ -289,7 +289,8 @@ describe("Login flow", () => {
 - Read the [Writing Tests](writing-tests.md) guide for best practices, screen objects, and test isolation.
 - Browse the complete [API Reference](api-reference.md).
 - Configure Tapsmith for your project in the [Configuration](configuration.md) guide.
-- Set up [Watch and UI Mode](watch-and-ui-mode.md) for fast iteration during development.
+- Set up [Watch Mode](watch-mode.md) for fast iteration during development.
+- Author and debug tests interactively with [UI Mode](ui-mode.md).
 - Mock and inspect network traffic with the [Network Interception](network.md) guide.
 - Test hybrid apps with the [WebView Testing](webview.md) guide.
 - Run tests faster with the [Parallel Execution and Sharding](parallel-and-sharding.md) guide.

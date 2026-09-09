@@ -2276,7 +2276,7 @@ npx tapsmith test --watch
 npx tapsmith test -w tests/login.test.ts   # Watch a specific file
 ```
 
-See [Watch and UI Mode](watch-and-ui-mode.md) for details.
+See [Watch Mode](watch-mode.md) for details.
 
 ### `tapsmith test --ui`
 
@@ -2287,7 +2287,7 @@ npx tapsmith test --ui
 npx tapsmith test --ui --ui-port 8080   # Use a specific port
 ```
 
-See [Watch and UI Mode](watch-and-ui-mode.md) for details.
+See [UI Mode](ui-mode.md) for details.
 
 ### `tapsmith test --config <path>` / `tapsmith test -c <path>`
 
