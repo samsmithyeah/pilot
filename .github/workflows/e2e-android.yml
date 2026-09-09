@@ -350,6 +350,8 @@ jobs:
 
       - name: Run E2E tests
         working-directory: e2e
+        env:
+          TAPSMITH_DAEMON_LOG: /tmp/tapsmith-daemon-android-${{ matrix.shard }}.log
         run: |
           SERIAL=$(adb devices | grep -w device | head -1 | awk '{print $1}')
           npx tapsmith test -c tapsmith.config.android-ci.mjs \
@@ -386,6 +388,24 @@ jobs:
           node verify-trace-archive.mjs \
             -c tapsmith.config.android-ci.mjs \
             --device "$SERIAL"
+
+      # The daemon log, the agent's `am instrument` output and a logcat dump
+      # are the only record of an agent that died before the first test ran
+      # (the shard then has no results at all). Copied into tapsmith-results
+      # so the existing upload picks them up.
+      - name: Collect daemon log and logcat
+        if: always()
+        run: |
+          mkdir -p e2e/tapsmith-results
+          for log in /tmp/tapsmith-daemon-android-${{ matrix.shard }}*.log; do
+            [ -e "$log" ] || continue
+            cp "$log" e2e/tapsmith-results/
+          done
+          adb logcat -d -v time TapsmithAgent:V TapsmithSocket:V TestRunner:V \
+            AndroidRuntime:E ActivityManager:I ReactNativeJS:V '*:W' \
+            > "e2e/tapsmith-results/logcat-${{ matrix.shard }}.txt" 2>&1 || true
+          adb shell cat /data/local/tmp/tapsmith-agent.log \
+            > "e2e/tapsmith-results/am-instrument-${{ matrix.shard }}.txt" 2>/dev/null || true
 
       - name: Upload blob report
         if: always()
@@ -581,10 +601,31 @@ jobs:
         working-directory: e2e
         env:
           TAPSMITH_ANDROID_MEMBER: emulator-5556
+          TAPSMITH_DAEMON_LOG: /tmp/tapsmith-daemon-android-multi.log
         run: |
           npx tapsmith test -c tapsmith.config.android-multi-ci.mjs \
             --trace on \
             --device emulator-5554
+
+      # The daemon log, the agent's `am instrument` output and a logcat dump
+      # are the only record of an agent that died before the first test ran
+      # (the shard then has no results at all). Copied into tapsmith-results
+      # so the existing upload picks them up.
+      - name: Collect daemon log and logcat
+        if: always()
+        run: |
+          mkdir -p e2e/tapsmith-results
+          for log in /tmp/tapsmith-daemon-android-multi*.log; do
+            [ -e "$log" ] || continue
+            cp "$log" e2e/tapsmith-results/
+          done
+          for serial in $(adb devices | awk 'NR>1 && $2=="device" {print $1}'); do
+            adb -s "$serial" logcat -d -v time TapsmithAgent:V TapsmithSocket:V TestRunner:V \
+              AndroidRuntime:E ActivityManager:I ReactNativeJS:V '*:W' \
+              > "e2e/tapsmith-results/logcat-$serial.txt" 2>&1 || true
+            adb -s "$serial" shell cat /data/local/tmp/tapsmith-agent.log \
+              > "e2e/tapsmith-results/am-instrument-$serial.txt" 2>/dev/null || true
+          done
 
       - name: Upload test results
         if: always()

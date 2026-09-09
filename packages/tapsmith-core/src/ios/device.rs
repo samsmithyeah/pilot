@@ -957,33 +957,87 @@ pub async fn configure_simulator(udid: &str) {
     // Disable "Save Password?" dialog which blocks the UI during login tests.
     // The setting must be written to multiple domains because Apple has moved
     // the password autofill control across iOS versions and frameworks.
-    for domain in [
+    const AUTOFILL_DOMAINS: [&str; 4] = [
         "-g",                 // Global (pre-iOS 26)
         "com.apple.WebUI",    // WebKit credential UI (iOS 26+)
         "com.apple.Safari",   // Safari password autofill
         "com.apple.Password", // Passwords framework (iOS 26+)
-    ] {
-        // Best-effort, but bounded tightly: this loop runs inside StartAgent,
-        // and an unbounded `simctl spawn` against a wedged CoreSimulator was
-        // observed stalling agent start past its whole 240s client deadline.
-        let _ = bounded_output(
-            "simctl spawn defaults write",
-            Command::new("xcrun").args([
-                "simctl",
-                "spawn",
-                udid,
-                "defaults",
-                "write",
-                domain,
-                "AutoFillPasswords",
-                "-bool",
-                "NO",
-            ]),
-            Duration::from_secs(10),
-        )
-        .await;
+    ];
+
+    // Best-effort, but bounded: this runs inside StartAgent, and an unbounded
+    // `simctl spawn` against a wedged CoreSimulator was observed stalling
+    // agent start past its whole 240s client deadline. The domains are
+    // written concurrently so the worst case is one bound rather than four,
+    // and a write that fails or times out gets a second pass: under
+    // CoreSimulator pressure these writes hit their bound and were silently
+    // dropped, autofill stayed on, and the Keychain "Save Password?" sheet
+    // then covered the first sign-in of the run (both failing iOS shard-5
+    // runs of Sep 2026 show the timed-out writes in the daemon log).
+    let mut pending: Vec<&'static str> = AUTOFILL_DOMAINS.to_vec();
+    for pass in 1..=AUTOFILL_WRITE_PASSES {
+        let handles: Vec<_> = pending
+            .drain(..)
+            .map(|domain| {
+                let udid = udid.to_string();
+                tokio::spawn(async move { (domain, write_autofill_default(&udid, domain).await) })
+            })
+            .collect();
+        for handle in handles {
+            match handle.await {
+                Ok((_, Ok(()))) => {}
+                Ok((domain, Err(e))) => {
+                    warn!(udid, domain, pass, error = %e, "disabling password autofill failed");
+                    pending.push(domain);
+                }
+                Err(e) => warn!(udid, pass, error = %e, "autofill defaults task panicked"),
+            }
+        }
+        if pending.is_empty() {
+            break;
+        }
     }
-    debug!(udid, "Configured simulator defaults for testing");
+    if pending.is_empty() {
+        debug!(udid, "Configured simulator defaults for testing");
+    } else {
+        warn!(
+            udid,
+            domains = ?pending,
+            "password autofill could not be disabled; the Keychain \"Save Password?\" sheet may appear after a sign-in"
+        );
+    }
+}
+
+/// Bound for one `simctl spawn defaults write`. Generous enough to survive
+/// the 10-12s stalls seen on loaded CI runners, still far inside StartAgent's
+/// client deadline even across both passes.
+const AUTOFILL_DEFAULTS_TIMEOUT: Duration = Duration::from_secs(20);
+const AUTOFILL_WRITE_PASSES: u32 = 2;
+
+async fn write_autofill_default(udid: &str, domain: &str) -> Result<()> {
+    let output = bounded_output(
+        "simctl spawn defaults write",
+        Command::new("xcrun").args([
+            "simctl",
+            "spawn",
+            udid,
+            "defaults",
+            "write",
+            domain,
+            "AutoFillPasswords",
+            "-bool",
+            "NO",
+        ]),
+        AUTOFILL_DEFAULTS_TIMEOUT,
+    )
+    .await?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "defaults write exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
 }
 
 /// Shutdown a simulator.

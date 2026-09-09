@@ -83,10 +83,21 @@ fn read_timeout_for(timeout: Duration) -> Duration {
     saturating_read_timeout(timeout, read_timeout_headroom())
 }
 
-/// Short timeout used when probing whether the agent is still reachable
-/// after an empty-response EOF. We don't care about the response — only
-/// whether we can re-establish a TCP connection — so this stays tight.
-const AGENT_LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Timeout for each half (connect, then read) of a liveness probe after an
+/// empty-response EOF. The probe is a real ping round-trip, so it has to
+/// leave a busy agent time to answer, but it sits on the command hot path
+/// so it stays tight.
+const AGENT_LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Timeout for each half (connect, then read) of a handshake ping.
+const AGENT_PING_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// How long `connect_ios` keeps pinging an agent that should already be up
+/// before declaring it unreachable.
+const DEFAULT_CONNECT_READINESS: Duration = Duration::from_secs(8);
+
+/// Pause between handshake pings while waiting for an agent to answer.
+const CONNECT_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Sentinel string used by `try_send_command` to mark an empty-response
 /// failure. `anyhow::Error` does not preserve original error types across
@@ -101,29 +112,41 @@ fn is_empty_response(err: &anyhow::Error) -> bool {
         .any(|cause| cause.to_string().contains(EMPTY_RESPONSE_MARKER))
 }
 
-/// Probe the agent's socket with a fresh TCP connect on a short timeout.
-/// Returns true if we can re-establish a connection, meaning the agent
-/// process is still alive and listening — any earlier dropped connection
-/// was a stale socket, not a dead agent.
-async fn probe_agent_alive(addr: &str) -> bool {
-    tokio::time::timeout(AGENT_LIVENESS_PROBE_TIMEOUT, TcpStream::connect(addr))
+/// Probe whether the agent is alive by round-tripping a real ping on a
+/// fresh connection. Returns true only if the agent ANSWERS.
+///
+/// A bare TCP connect is not evidence of life. On Android the host port is
+/// an `adb forward`: the adb server accepts every connect itself and only
+/// then tries the device side, closing the socket when nothing listens
+/// there. A connect-only probe therefore reported a crashed or
+/// not-yet-listening agent as alive, which turned every EOF into
+/// "reconnecting" and let StartAgent reuse an agent that was gone.
+async fn probe_agent_alive(host_port: u16) -> bool {
+    ping_agent_port_with_timeout(host_port, AGENT_LIVENESS_PROBE_TIMEOUT)
         .await
-        .ok()
-        .and_then(|inner| inner.ok())
-        .is_some()
+        .is_ok()
 }
 
 pub(crate) async fn ping_agent_port(host_port: u16) -> Result<()> {
-    let addr = format!("127.0.0.1:{host_port}");
-    let mut stream = tokio::time::timeout(Duration::from_secs(3), async {
-        TcpStream::connect(&addr).await
-    })
-    .await
-    .map_err(|_| anyhow!("Timed out connecting to agent"))?
-    .context("Agent socket not reachable")?;
+    ping_agent_port_with_timeout(host_port, AGENT_PING_TIMEOUT).await
+}
 
-    // Send a simple ping
-    let ping = r#"{"command":"ping"}"#;
+/// Connect, send a `ping`, and require a non-empty reply. `timeout` bounds
+/// the connect and the read separately.
+///
+/// EOF is a failure, not a pong. Through `adb forward` the connect and the
+/// write both succeed with no agent on the device — adb closes the socket
+/// and `read_line` returns an empty line. Counting that as success declared
+/// a still-starting or dead Android agent "connected" and made the reuse
+/// check in StartAgent keep a dead agent forever.
+pub(crate) async fn ping_agent_port_with_timeout(host_port: u16, timeout: Duration) -> Result<()> {
+    let addr = format!("127.0.0.1:{host_port}");
+    let mut stream = tokio::time::timeout(timeout, TcpStream::connect(&addr))
+        .await
+        .map_err(|_| anyhow!("Timed out connecting to agent"))?
+        .context("Agent socket not reachable")?;
+
+    let ping = r#"{"id":"ping","method":"ping","params":{}}"#;
     stream.write_all(ping.as_bytes()).await?;
     stream.write_all(b"\n").await?;
     stream.flush().await?;
@@ -131,11 +154,18 @@ pub(crate) async fn ping_agent_port(host_port: u16) -> Result<()> {
     let mut reader = BufReader::new(&mut stream);
     let mut line = String::new();
 
-    tokio::time::timeout(Duration::from_secs(3), reader.read_line(&mut line))
+    tokio::time::timeout(timeout, reader.read_line(&mut line))
         .await
         .map_err(|_| anyhow!("Agent did not respond to ping"))??;
 
-    debug!("Agent ping successful");
+    if line.trim().is_empty() {
+        bail!(
+            "Agent closed the connection without answering the ping \
+             (not listening yet, or its process is gone)"
+        );
+    }
+
+    debug!(response = %line.trim(), "Agent ping successful");
     Ok(())
 }
 
@@ -237,8 +267,7 @@ async fn try_send_persistent(
             use std::io::ErrorKind::*;
             let kind = e.kind();
             if matches!(kind, ConnectionReset | ConnectionAborted | BrokenPipe) {
-                let addr = format!("127.0.0.1:{}", stream.host_port);
-                if probe_agent_alive(&addr).await {
+                if probe_agent_alive(stream.host_port).await {
                     Err(SendError::Connect(
                         anyhow!(e).context("Agent connection lost during read"),
                     ))
@@ -256,8 +285,7 @@ async fn try_send_persistent(
         Ok(Ok(_)) => {
             let line = line.trim();
             if line.is_empty() {
-                let addr = format!("127.0.0.1:{}", stream.host_port);
-                return if probe_agent_alive(&addr).await {
+                return if probe_agent_alive(stream.host_port).await {
                     Err(SendError::Connect(
                         anyhow!("{}", EMPTY_RESPONSE_MARKER)
                             .context("Agent connection dropped (empty response); reconnecting"),
@@ -1084,16 +1112,32 @@ impl AgentConnection {
     /// Establish port forwarding and verify the agent is reachable.
     /// For Android, sets up ADB port forwarding.
     /// For iOS simulators, no forwarding is needed (shared localhost).
-    pub async fn connect(&mut self, serial: &str) -> Result<()> {
-        self.connect_for_platform(serial, false).await
+    /// Connect to an Android agent whose instrumentation was launched
+    /// moments ago, giving it `readiness` to bind its socket and answer.
+    /// UIAutomator's accessibility bootstrap on a cold software-GPU CI
+    /// emulator takes tens of seconds; the loop returns as soon as the
+    /// first real pong arrives, so a fast agent pays nothing for the
+    /// headroom.
+    pub async fn connect_android_with_readiness(
+        &mut self,
+        serial: &str,
+        readiness: Duration,
+    ) -> Result<()> {
+        self.connect_for_platform(serial, false, readiness).await
     }
 
     /// Connect to an iOS agent (skip ADB port forwarding).
     pub async fn connect_ios(&mut self, serial: &str) -> Result<()> {
-        self.connect_for_platform(serial, true).await
+        self.connect_for_platform(serial, true, DEFAULT_CONNECT_READINESS)
+            .await
     }
 
-    async fn connect_for_platform(&mut self, serial: &str, ios: bool) -> Result<()> {
+    async fn connect_for_platform(
+        &mut self,
+        serial: &str,
+        ios: bool,
+        readiness: Duration,
+    ) -> Result<()> {
         self.is_ios = ios;
 
         if !ios {
@@ -1104,16 +1148,16 @@ impl AgentConnection {
         }
         // iOS simulator: agent listens on localhost directly, no forwarding needed
 
-        // Try to connect and send a ping. A freshly-launched agent can accept
-        // the launch-time socket probe yet miss the very next ping while the
-        // runner finishes initializing (observed on loaded CI runners:
-        // agent-start ping OK, handshake ping ~1s later times out) — retry
-        // briefly before declaring the agent dead.
-        let mut last_err: Option<anyhow::Error> = None;
-        for attempt in 0..4 {
-            if attempt > 0 {
-                tokio::time::sleep(Duration::from_secs(2)).await;
-            }
+        // Ping until the agent answers or `readiness` runs out. A freshly
+        // launched agent can accept the launch-time socket probe yet miss
+        // the very next ping while the runner finishes initializing
+        // (observed on loaded CI runners), and through `adb forward` an
+        // agent that has not bound its port yet answers with an immediate
+        // EOF — `ping_agent` rejects that, so this loop is what actually
+        // waits for the agent to come up.
+        let deadline = tokio::time::Instant::now() + readiness;
+        let mut attempt = 0u32;
+        let last_err = loop {
             match self.ping_agent().await {
                 Ok(_) => {
                     self.connected = true;
@@ -1121,22 +1165,29 @@ impl AgentConnection {
                     info!(
                         serial,
                         platform = if ios { "ios" } else { "android" },
+                        attempt,
                         "Connected to on-device agent"
                     );
                     return Ok(());
                 }
                 Err(e) => {
                     debug!(serial, attempt, error = %e, "agent handshake ping failed");
-                    last_err = Some(e);
+                    if tokio::time::Instant::now() >= deadline {
+                        break e;
+                    }
+                    attempt += 1;
+                    tokio::time::sleep(CONNECT_RETRY_INTERVAL).await;
                 }
             }
-        }
+        };
         if !ios {
             // Clean up the forwarding on failure
             let _ = adb::remove_forward(serial, self.host_port).await;
         }
-        let e = last_err.expect("ping loop ran at least once");
-        bail!("Agent is not responding on device {serial}: {e}. Is the agent app running?");
+        bail!(
+            "Agent is not responding on device {serial} after {}s: {last_err}. Is the agent app running?",
+            readiness.as_secs()
+        );
     }
 
     /// Disconnect and clean up port forwarding.
@@ -1311,7 +1362,7 @@ impl AgentConnection {
                 // ops like tap / type / swipe → no retry) or require the
                 // probe to observe the same agent PID / session token
                 // rather than just "something is listening on the port".
-                if is_empty_response(&e) && probe_agent_alive(&addr).await {
+                if is_empty_response(&e) && probe_agent_alive(self.host_port).await {
                     warn!("Agent returned empty response but is still reachable — treating as stale connection and retrying");
                     return Err(SendError::Connect(e.context(
                         "Agent connection dropped (empty response); reconnecting",
@@ -2195,14 +2246,24 @@ mod tests {
                 // completes successfully, then close the half-open
                 // stream without writing a response. The client's
                 // read_line will observe EOF → empty response.
-                let mut buf = [0u8; 1024];
-                while let Ok(n) = stream.read(&mut buf).await {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 1024];
+                while let Ok(n) = stream.read(&mut chunk).await {
                     if n == 0 {
                         break;
                     }
-                    if buf[..n].contains(&b'\n') {
+                    buf.extend_from_slice(&chunk[..n]);
+                    if buf.contains(&b'\n') {
                         break;
                     }
+                }
+                // The liveness probe is a real ping: answer it so the
+                // mock reads as "alive", and drop every other command
+                // unanswered so it reads as an empty response.
+                if String::from_utf8_lossy(&buf).contains("\"method\":\"ping\"") {
+                    let _ = stream
+                        .write_all(b"{\"id\":\"ping\",\"result\":{\"pong\":true}}\n")
+                        .await;
                 }
                 drop(stream);
             }
@@ -2282,17 +2343,58 @@ mod tests {
         }
     }
 
+    /// Mock agent that answers every line with a pong, like the real
+    /// agents' `ping` method.
+    fn spawn_ping_answering_agent(listener: tokio::net::TcpListener) {
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let (read_half, mut write_half) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                let mut line = String::new();
+                if reader.read_line(&mut line).await.is_ok() && !line.is_empty() {
+                    let _ = write_half
+                        .write_all(b"{\"id\":\"ping\",\"result\":{\"pong\":true}}\n")
+                        .await;
+                }
+            }
+        });
+    }
+
+    /// Mock of `adb forward` with no agent on the device side: the connect
+    /// succeeds (the adb server accepts it), the request is consumed, then
+    /// the socket closes without a byte in reply — the reader sees EOF.
+    fn spawn_accept_then_close(listener: tokio::net::TcpListener) {
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let (read_half, write_half) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                let mut line = String::new();
+                let _ = reader.read_line(&mut line).await;
+                drop(write_half);
+            }
+        });
+    }
+
     #[tokio::test]
-    async fn probe_agent_alive_returns_true_when_listener_is_up() {
+    async fn probe_agent_alive_returns_true_when_agent_answers_ping() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        // Accept in the background so the probe's connect can complete.
-        tokio::spawn(async move {
-            let _ = listener.accept().await;
-        });
+        spawn_ping_answering_agent(listener);
 
-        let addr = format!("127.0.0.1:{port}");
-        assert!(probe_agent_alive(&addr).await);
+        assert!(probe_agent_alive(port).await);
+    }
+
+    #[tokio::test]
+    async fn probe_agent_alive_returns_false_when_connect_succeeds_but_nothing_answers() {
+        // The adb-forward shape: a connect to the host port succeeds even
+        // when the device-side agent is dead, and the read then sees EOF.
+        // That must NOT count as alive — it is exactly the case where the
+        // agent needs restarting.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        spawn_accept_then_close(listener);
+
+        assert!(!probe_agent_alive(port).await);
     }
 
     #[tokio::test]
@@ -2301,8 +2403,36 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
 
-        let addr = format!("127.0.0.1:{port}");
-        assert!(!probe_agent_alive(&addr).await);
+        assert!(!probe_agent_alive(port).await);
+    }
+
+    #[tokio::test]
+    async fn ping_agent_port_succeeds_on_a_real_pong() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        spawn_ping_answering_agent(listener);
+
+        ping_agent_port(port)
+            .await
+            .expect("pong should satisfy the ping");
+    }
+
+    #[tokio::test]
+    async fn ping_agent_port_rejects_eof_without_a_reply() {
+        // Regression: this used to return Ok — `read_line` hitting EOF was
+        // treated as a pong — so StartAgent declared a not-yet-listening
+        // Android agent connected and later reused a dead one.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        spawn_accept_then_close(listener);
+
+        let err = ping_agent_port(port)
+            .await
+            .expect_err("EOF must not count as a pong");
+        assert!(
+            err.to_string().contains("without answering the ping"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

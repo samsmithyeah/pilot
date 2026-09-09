@@ -101,6 +101,47 @@ const ANDROID_DEEP_LINK_IDLE_TIMEOUT_MS: u64 = 2_000;
 const ANDROID_RENDER_READY_TIMEOUT: Duration = Duration::from_secs(10);
 const ANDROID_RENDER_READY_POLL: Duration = Duration::from_millis(250);
 
+/// How long StartAgent waits for a freshly launched Android agent to answer
+/// its first ping. UIAutomator's accessibility bootstrap on a cold
+/// software-GPU CI emulator can take tens of seconds; the wait returns on
+/// the first pong, so a healthy agent pays nothing for the headroom.
+const ANDROID_AGENT_START_READINESS: Duration = Duration::from_secs(60);
+
+/// Where StartAgent redirects the `am instrument` output on the device, so
+/// an agent that crashes before binding its socket leaves a readable trace
+/// (`INSTRUMENTATION_RESULT: shortMsg=Process crashed.` and the like).
+const ANDROID_AGENT_LOG_PATH: &str = "/data/local/tmp/tapsmith-agent.log";
+
+/// Explain why a just-launched Android agent never answered: whether its
+/// process is even alive, and what `am instrument` printed.
+async fn android_agent_start_diagnostics(serial: &str) -> String {
+    let pid = adb::shell_lenient(serial, "pidof dev.tapsmith.agent 2>/dev/null || true")
+        .await
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let tail = adb::shell_lenient(
+        serial,
+        &format!("tail -n 20 {ANDROID_AGENT_LOG_PATH} 2>/dev/null || true"),
+    )
+    .await
+    .map(|s| s.trim().to_string())
+    .unwrap_or_default();
+    let mut out = String::new();
+    if pid.is_empty() {
+        out.push_str("\nAgent process dev.tapsmith.agent is not running.");
+    } else {
+        out.push_str(&format!(
+            "\nAgent process dev.tapsmith.agent is running (pid {pid}) but did not answer."
+        ));
+    }
+    if !tail.is_empty() {
+        out.push_str(&format!(
+            "\n`am instrument` output ({ANDROID_AGENT_LOG_PATH}):\n{tail}"
+        ));
+    }
+    out
+}
+
 pub struct TapsmithServiceImpl {
     device_manager: Arc<RwLock<DeviceManager>>,
     agent: Arc<RwLock<AgentConnection>>,
@@ -3700,8 +3741,9 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                     )
                 };
 
-                // Launch in background on device
-                let bg_cmd = format!("nohup {} > /dev/null 2>&1 &", instrument_cmd);
+                // Launch in background on device, keeping the runner's output
+                // on the device for the failure diagnostics below.
+                let bg_cmd = format!("nohup {instrument_cmd} > {ANDROID_AGENT_LOG_PATH} 2>&1 &");
                 if let Err(e) = adb::shell(&serial, &bg_cmd).await {
                     error!(error = %e, "Failed to start agent instrumentation");
                     return Ok(Response::new(proto::ActionResponse {
@@ -3712,9 +3754,6 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
                         screenshot: Vec::new(),
                     }));
                 }
-
-                // Give the agent a moment to start
-                tokio::time::sleep(Duration::from_secs(2)).await;
             }
         }
 
@@ -3722,7 +3761,14 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
         let mut agent = self.agent.write().await;
         let connect_result = match platform {
             Platform::Ios => agent.connect_ios(&serial).await,
-            Platform::Android => agent.connect(&serial).await,
+            // The instrumentation was launched just above. Wait for it to
+            // actually answer: through the forwarded port a bare connect
+            // succeeds before (or without) the agent ever listening.
+            Platform::Android => {
+                agent
+                    .connect_android_with_readiness(&serial, ANDROID_AGENT_START_READINESS)
+                    .await
+            }
         };
         match connect_result {
             Ok(()) => {
@@ -3774,12 +3820,16 @@ impl proto::tapsmith_service_server::TapsmithService for TapsmithServiceImpl {
             Err(e) => {
                 error!(error = %e, "Failed to connect to agent");
                 let platform = self.require_platform().await?;
+                let mut error_message = e.to_string();
+                if platform == Platform::Android {
+                    error_message.push_str(&android_agent_start_diagnostics(&serial).await);
+                }
                 let screenshot = screenshot::capture_for_error(Some(&serial), platform).await;
                 Ok(Response::new(proto::ActionResponse {
                     request_id,
                     success: false,
                     error_type: "AGENT_CONNECTION_FAILED".to_string(),
-                    error_message: e.to_string(),
+                    error_message,
                     screenshot,
                 }))
             }

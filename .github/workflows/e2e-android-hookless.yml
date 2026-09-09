@@ -339,11 +339,31 @@ jobs:
 
       - name: Run hook-less E2E tests
         working-directory: e2e
+        env:
+          TAPSMITH_DAEMON_LOG: /tmp/tapsmith-daemon-android-hookless.log
         run: |
           SERIAL=$(adb devices | grep -w device | head -1 | awk '{print $1}')
           npx tapsmith test -c tapsmith.config.android-ci-hookless.mjs \
             --workers 1 \
             --device "$SERIAL"
+
+      # The daemon log, the agent's `am instrument` output and a logcat dump
+      # are the only record of an agent that died before the first test ran
+      # (the shard then has no results at all). Copied into tapsmith-results
+      # so the existing upload picks them up.
+      - name: Collect daemon log and logcat
+        if: always()
+        run: |
+          mkdir -p e2e/tapsmith-results
+          for log in /tmp/tapsmith-daemon-android-hookless*.log; do
+            [ -e "$log" ] || continue
+            cp "$log" e2e/tapsmith-results/
+          done
+          adb logcat -d -v time TapsmithAgent:V TapsmithSocket:V TestRunner:V \
+            AndroidRuntime:E ActivityManager:I ReactNativeJS:V '*:W' \
+            > "e2e/tapsmith-results/logcat-hookless.txt" 2>&1 || true
+          adb shell cat /data/local/tmp/tapsmith-agent.log \
+            > "e2e/tapsmith-results/am-instrument-hookless.txt" 2>/dev/null || true
 
       - name: Upload HTML report
         if: always()
