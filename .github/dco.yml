@@ -1,0 +1,9 @@
+# Configuration for https://github.com/apps/dco, read from the default branch.
+# Maintainers sign off too. The app exempts merges and GitHub-recognised bots.
+require:
+  members: true
+
+# Let authors certify their own earlier commits without rewriting shared history.
+allowRemediationCommits:
+  individual: true
+  thirdParty: false

@@ -93,6 +93,12 @@ what is deliberately not covered.
 GitHub Actions runs 9 parallel jobs: `proto-lint`, `typescript`, `rust`, `rust-macos`, `android`,
 `website`, `test-app`, `react-native`, `ui-web`. All must pass. See `.github/workflows/ci.yml`.
 
+The external [DCO GitHub App](https://github.com/apps/dco) checks PR sign-offs, configured by
+`.github/dco.yml` on the default branch. **Sign your commits with `git commit -s`**, including
+maintainer commits (see `CONTRIBUTING.md`). The app accepts the author or committer's sign-off,
+exempts merges and GitHub-recognised bots, and allows authors to repair their own missing
+sign-offs with individual remediation commits. Repository setup is in `.github/dco-setup.md`.
+
 Device E2E runs separately on every PR: `e2e-android.yml` (ubuntu + KVM emulator, 5 shards) and
 `e2e-ios.yml` (macOS simulators, 5 shards). `e2e-android-hookless.yml` covers the hook-less reset
 path (test app built without `EXPO_PUBLIC_TAPSMITH_HOOKS`) weekly, on manual dispatch, and on PRs
