@@ -76,6 +76,17 @@ class TapsmithAgentRunner: XCTestCase {
                     return true
                 }
             }
+            // Dialogs with no allow-style button — iCloud Keychain's "Save
+            // Password?" — are dismissed, per SystemDialogPolicy. Checked
+            // only after every allow label has missed, so a permission
+            // prompt is never dismissed instead of accepted.
+            for title in SystemDialogPolicy.dismissButtonLabels {
+                let button = alert.buttons[title]
+                if button.exists {
+                    button.tap()
+                    return true
+                }
+            }
             return false
         }
 

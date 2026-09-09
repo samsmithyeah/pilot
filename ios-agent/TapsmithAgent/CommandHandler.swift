@@ -402,6 +402,43 @@ class CommandHandler {
     /// We check both, but allow-style labels are only probed on
     /// SpringBoard: in the app's own hierarchy they could match ordinary
     /// in-app buttons ("Continue", "OK") and derail the test.
+    /// When the simulator-side "Save Password?" probe last ran. It costs one
+    /// extra query per first-snapshot miss, so it is rate-limited.
+    private var lastSavePasswordProbe = Date.distantPast
+    private let savePasswordProbeInterval: TimeInterval = 1.5
+
+    /// Dismiss iOS 26's iCloud Keychain "Save Password?" sheet if it is up.
+    /// Simulators do show this one system prompt after a sign-in. It is
+    /// presented inside the target app's process, so it appears in the app's
+    /// own hierarchy (an XCUIElementTypeSheet) and replaces the accessibility
+    /// tree underneath — post-login assertions then see nothing but the
+    /// sheet — and it never trips the UIInterruptionMonitor because snapshot
+    /// queries are not interactions. The daemon disables autofill with
+    /// `defaults write`, but under CoreSimulator pressure those writes time
+    /// out and the sheet comes back. Only the "Not Now" button of a sheet
+    /// titled "Save Password?" is ever tapped — scoped to the sheet so an
+    /// app that happens to render those labels itself is left alone, and a
+    /// dismissal, never a permission denial (PILOT-290). Probes at most once
+    /// per `savePasswordProbeInterval` so the miss path stays cheap.
+    @discardableResult
+    private func dismissSavePasswordSheetIfPresent() -> Bool {
+        let now = Date()
+        guard now.timeIntervalSince(lastSavePasswordProbe) >= savePasswordProbeInterval else {
+            return false
+        }
+        lastSavePasswordProbe = now
+        let sheet = app.sheets
+            .containing(.staticText, identifier: "Save Password?")
+            .firstMatch
+        guard sheet.exists else { return false }
+        let notNow = sheet.buttons["Not Now"]
+        guard notNow.exists else { return false }
+        NSLog("[SystemDialog] Dismissing iCloud Keychain 'Save Password?' sheet via Not Now")
+        notNow.tap()
+        Thread.sleep(forTimeInterval: 0.2)
+        return true
+    }
+
     @discardableResult
     private func dismissBlockingSystemDialogs() -> Bool {
         if acceptOpenInAppDialogIfPresent(timeout: 0.1) {
@@ -860,22 +897,26 @@ class CommandHandler {
                 do {
                     element = try snapshotFinder.findElement(selector)
                 } catch {
-                    // Physical devices only: before falling through to the
-                    // wait engine, check for blocking iOS system dialogs
-                    // (Save Password, Allow Notifications, etc.) that may be
-                    // covering the target — iCloud Keychain can pop up after
-                    // a sign-in tap and obscure post-login UI. If we tap one
-                    // away, try the snapshot once more before polling.
+                    // Before falling through to the wait engine, check for a
+                    // blocking iOS system dialog covering the target — iCloud
+                    // Keychain can pop up after a sign-in tap and obscure
+                    // post-login UI. If we tap one away, try the snapshot
+                    // once more before polling.
                     //
-                    // Compiled out on simulators: these dialogs rarely appear
-                    // there (prompts triggered by test interactions are
-                    // handled by the UIInterruptionMonitor), first-snapshot
-                    // misses are routine so this sweep would probe two extra
-                    // hierarchies on a hot path, and it historically denied
-                    // permission prompts here, permanently poisoning
+                    // Physical devices sweep every known dialog (Save
+                    // Password, Allow Notifications, …). Simulators only
+                    // handle the Keychain "Save Password?" sheet, the one
+                    // system prompt they do show (iOS 26): the full sweep
+                    // would probe two extra hierarchies on a hot path where
+                    // first-snapshot misses are routine, and it historically
+                    // denied permission prompts here, permanently poisoning
                     // simulator notification state (PILOT-290).
-                    #if !targetEnvironment(simulator)
-                    if dismissBlockingSystemDialogs() {
+                    #if targetEnvironment(simulator)
+                    let dismissed = dismissSavePasswordSheetIfPresent()
+                    #else
+                    let dismissed = dismissBlockingSystemDialogs()
+                    #endif
+                    if dismissed {
                         do {
                             let retried = try snapshotFinder.findElement(selector)
                             return retried.toDict()
@@ -883,7 +924,6 @@ class CommandHandler {
                             // Fall through to wait engine
                         }
                     }
-                    #endif
                     if timeout >= 1000 {
                         // Element not in current snapshot — poll with wait engine
                         element = try waitEngine.waitForElement(

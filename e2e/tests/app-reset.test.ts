@@ -18,6 +18,16 @@ describe("App reset (declared isolation)", () => {
 
   async function signIn(device: Device, loginScreen: LoginScreen) {
     await device.openDeepLink("tapsmithtest:///login")
+    // Nothing resets the app between attempts here (`appReset: "none"`), so a
+    // retry — or the next test — can reach the login route with the previous
+    // attempt's session still active, where the form is replaced by "Login
+    // successful!" and a Log out button. Sign out first so one failed attempt
+    // cannot cascade through every retry in the file.
+    const logOut = device.getByRole("button", { name: "Log out" })
+    if (await logOut.exists()) {
+      await logOut.tap()
+      await expect(loginScreen.heading).toBeVisible()
+    }
     await loginScreen.emailField.clearAndType("test@example.com")
     await loginScreen.passwordField.clearAndType("password123")
     await device.hideKeyboard()
