@@ -888,6 +888,41 @@ describe('isVisible()', () => {
     expect(Date.now() - start).toBeLessThan(5000);
   });
 
+  it('gives every momentary fault the same short grace, not just the first one (review follow-up)', async () => {
+    // Fault, then stale churn past the first fault window, then ONE more blip,
+    // then the element. The second blip must be retried (its window re-opens),
+    // not thrown at once because the first window elapsed long ago.
+    let calls = 0;
+    const findElements = vi.fn(async (): Promise<FindElementsResponse> => {
+      calls++;
+      if (calls === 1 || calls === 12) return { requestId: '1', elements: [], errorMessage: 'UiAutomation not connected' };
+      if (calls < 12) return { requestId: '1', elements: [], errorMessage: 'Element is stale (UI changed): null' };
+      return makeFindElementsResponse([makeElementInfo({ visible: true })]);
+    });
+    const client = makeMockClient({ findElements });
+    expect(await new ElementHandle(client, _text('X'), 30_000).isVisible()).toBe(true);
+    expect(calls).toBe(13);
+  });
+
+  it('caps re-reads at the time left, so the call cannot overrun the handle timeout (review follow-up)', async () => {
+    // First read: the full timeout (a slow-but-healthy dump must complete).
+    // Later reads: only what remains, else a read issued just before the
+    // deadline could run a whole extra timeout.
+    const budgets: number[] = [];
+    const findElements = vi.fn(async (_sel: unknown, budget?: number): Promise<FindElementsResponse> => {
+      budgets.push(budget!);
+      return { requestId: '1', elements: [], errorMessage: 'Element is stale (UI changed): null' };
+    });
+    const client = makeMockClient({ findElements });
+    await expect(new ElementHandle(client, _text('X'), 1000).isVisible()).rejects.toThrow(/kept changing/);
+    expect(budgets[0]).toBe(1000);
+    for (const b of budgets.slice(1)) {
+      expect(b).toBeGreaterThan(0);
+      expect(b).toBeLessThan(1000);
+    }
+    expect(budgets.at(-1)!).toBeLessThan(budgets[1]);
+  });
+
   it('a later stale tick clears a momentary fault, so stale churn reports churn — not the recovered fault (review follow-up)', async () => {
     // Convention shared with _strictResolve/_waitForEnabled/waitFor: a
     // definitive agent answer drops the remembered fault. Otherwise a
@@ -902,6 +937,9 @@ describe('isVisible()', () => {
     const err = await new ElementHandle(client, _text('X'), 600).isVisible().catch((e) => e);
     expect(err.message).toMatch(/Could not read the state of/);
     expect(err.message).not.toMatch(/Not connected to agent/);
+    // The diagnostic counts stale reads as stale reads, and says a fault occurred.
+    expect(err.message).toMatch(/across (1|2|3) reads over \d+ms \(plus 1 momentary agent fault that cleared\)/);
+    expect(Number(err.message.match(/across (\d+) reads/)![1])).toBe(calls - 1);
   });
 
   it('re-queries the device for a handle from all() instead of answering from the cached snapshot (review follow-up)', async () => {

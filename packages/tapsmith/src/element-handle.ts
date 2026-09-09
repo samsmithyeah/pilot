@@ -2093,12 +2093,16 @@ export class ElementHandle {
    * the non-waiting probe. Strict mode still applies — an ambiguous selector
    * throws rather than reporting the first match's state.
    *
-   * Each read gets the handle's full timeout as its command deadline (0 → the
-   * daemon default), exactly as `find()`/`count()` do, so a slow-but-healthy
-   * hierarchy dump on a starved CI emulator completes rather than timing out
-   * against an artificially short read budget. Consequently an agent command
-   * timeout means the agent did not answer within that whole deadline — a
-   * probe does not grant it a second one; it throws at once.
+   * The first read gets the handle's full timeout as its command deadline
+   * (0 → the daemon default), like `count()`, so a slow-but-healthy hierarchy
+   * dump on a starved CI emulator completes rather than timing out against an
+   * artificially short read budget (`_strictResolve` instead caps each tick
+   * at 250ms and relies on retrying the resulting agent timeouts). Later
+   * re-reads are capped at the time left before the loop deadline, so the
+   * whole call stays within one handle timeout instead of overrunning to two.
+   * An agent command timeout therefore means the agent did not answer within
+   * the budget it was given — a probe does not grant it a second one; it
+   * throws at once.
    *
    * Two kinds of *unreliable tick* — a read that carries no information about
    * presence — are re-probed, on different budgets:
@@ -2135,25 +2139,32 @@ export class ElementHandle {
     const start = Date.now();
     const staleDeadline = start + this._timeoutMs;
     const faultWindowMs = Math.min(PROBE_FAULT_RETRY_WINDOW_MS, this._timeoutMs);
-    let faultDeadline: number | undefined; // opened by the first fault
-    let lastFault: Error | undefined; // most recent fault, cleared by any later definitive tick
-    let attempts = 0;
+    // Opened by a fault, closed (with lastFault) by the next definitive tick,
+    // so EVERY blip gets the same short grace — not just the first one.
+    let faultDeadline: number | undefined;
+    let lastFault: Error | undefined;
+    let staleReads = 0;
+    let faultReads = 0;
+    // First read: the full handle timeout. Re-reads: what is left of it.
+    let readBudget = this._timeoutMs;
     while (true) {
-      attempts++;
       try {
         return probeHandle._hasModifiers()
           ? await probeHandle._resolveOne()
-          : await probeHandle._findOneStrict(this._timeoutMs);
+          : await probeHandle._findOneStrict(readBudget);
       } catch (err) {
-        // The read's own deadline is already the handle timeout — a probe
-        // does not spend a second one.
+        // The read already had the whole budget available to it — a probe
+        // does not grant a second one.
         if (isTransientAgentError(err)) throw err;
         if (isStaleSnapshotError(err)) {
           // A definitive (if unusable) answer from the agent: the earlier
           // fault, if any, has recovered. Recognised before the not-found
           // class, which would otherwise swallow it as a confirmed miss.
+          staleReads++;
           lastFault = undefined;
+          faultDeadline = undefined;
         } else if (isRetryableResolutionError(err)) {
+          faultReads++;
           lastFault = err as Error;
           if (faultDeadline === undefined) faultDeadline = Date.now() + faultWindowMs;
         } else if (isPollableNotFoundError(err)) {
@@ -2168,16 +2179,21 @@ export class ElementHandle {
       }
       if (now + PROBE_RETRY_POLL_MS > staleDeadline) {
         if (lastFault) throw lastFault;
-        const elapsed = now - start;
-        const detail = attempts === 1
+        const reads = staleReads + faultReads;
+        const faults = faultReads ? ` (plus ${faultReads} momentary agent fault${faultReads === 1 ? '' : 's'} that cleared)` : '';
+        const detail = reads === 1
           ? `a single read returned a stale snapshot (the UI changed mid-read) and timeout is ${this._timeoutMs}ms, so it was not retried`
-          : `the UI hierarchy kept changing (stale snapshot) across ${attempts} reads over ${elapsed}ms`;
+          : `the UI hierarchy kept changing (stale snapshot) across ${staleReads} reads over ${now - start}ms${faults}`;
         throw new Error(
           `Could not read the state of ${this._describe()}: ${detail}. ` +
             `Use expect(locator).toBeVisible() / .not.toBeVisible() or waitFor(), which poll until the screen settles.`,
         );
       }
       await sleep(Math.min(PROBE_RETRY_POLL_MS, Math.max(1, staleDeadline - now)), this._client._getAbortSignal?.());
+      // Cap the re-read so the call cannot overrun the handle timeout (a read
+      // issued just before the deadline would otherwise run a whole extra one).
+      // The pre-read check above guarantees at least ~250ms remain.
+      readBudget = Math.max(1, Math.min(this._timeoutMs, staleDeadline - Date.now()));
     }
   }
 
