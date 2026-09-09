@@ -2697,6 +2697,30 @@ describe('isEditable', () => {
     await expect(handle.isEnabled()).rejects.toThrow(/was not found after waiting 300ms/);
   });
 
+  it('timeout: 0 on an unmodified handle is one real read, not a throw without querying (pre-existing gap)', async () => {
+    // _strictResolve returns early at 0 (actions then hand the raw selector to
+    // the agent); find() used to fall through to that and throw "Element not
+    // found" with zero findElements calls.
+    const present = vi.fn(async () => makeFindElementsResponse([makeElementInfo({ enabled: false })]));
+    expect(await new ElementHandle(makeMockClient({ findElements: present }), _role('button'), 0).isEnabled()).toBe(false);
+    expect(present).toHaveBeenCalledTimes(1);
+    // 0 is passed through: the daemon treats it as "use the default deadline".
+    expect(present).toHaveBeenCalledWith(expect.anything(), 0);
+
+    const absent = vi.fn(async () => makeFindElementsResponse([]));
+    await expect(new ElementHandle(makeMockClient({ findElements: absent }), _role('button'), 0).getText())
+      .rejects.toThrow(/Element not found/);
+    expect(absent).toHaveBeenCalledTimes(1);
+
+    // Still strict at 0.
+    const two = vi.fn(async () => makeFindElementsResponse([
+      makeElementInfo({ elementId: 'a', bounds: { left: 0, top: 0, right: 10, bottom: 10 } }),
+      makeElementInfo({ elementId: 'b', bounds: { left: 0, top: 20, right: 10, bottom: 30 } }),
+    ]));
+    const err = await new ElementHandle(makeMockClient({ findElements: two }), _role('button'), 0).find().catch((e) => e);
+    expect(err).toBeInstanceOf(StrictModeViolationError);
+  });
+
   it('keeps the timeout: 0 opt-out single-shot on a modified handle', async () => {
     const findElements = vi.fn(async () => makeFindElementsResponse([]));
     const client = makeMockClient({ findElements });

@@ -1187,9 +1187,15 @@ export class ElementHandle {
     const start = Date.now();
     try {
       let result: ElementInfo;
-      if (this._hasModifiers() && this._timeoutMs === 0) {
-        // Explicit single-shot opt-out, as in _strictResolve.
-        result = await this._resolveOne();
+      if (this._timeoutMs === 0) {
+        // Explicit single-shot opt-out, as in _strictResolve: one read of the
+        // current hierarchy, no polling. (Unmodified handles used to fall
+        // through to _strictResolve, which returns early at 0 for actions —
+        // they pass the raw selector to the agent — so find() threw "not
+        // found" without ever querying the device.)
+        const el = this._hasModifiers() ? await this._resolveOne() : await this._findOneStrict(0);
+        if (!el) throw new Error(`Element not found: ${this._describe()}`);
+        result = el;
       } else {
         // Strict resolution (PILOT-226): poll so multiple matches throw
         // instead of silently returning the first. _strictResolve polls
