@@ -415,9 +415,11 @@ class CommandHandler {
     /// sheet — and it never trips the UIInterruptionMonitor because snapshot
     /// queries are not interactions. The daemon disables autofill with
     /// `defaults write`, but under CoreSimulator pressure those writes time
-    /// out and the sheet comes back. Only its "Not Now" button is ever
-    /// tapped: a dismissal, never a permission denial (PILOT-290). Probes at
-    /// most once per `savePasswordProbeInterval` so the miss path stays cheap.
+    /// out and the sheet comes back. Only the "Not Now" button of a sheet
+    /// titled "Save Password?" is ever tapped — scoped to the sheet so an
+    /// app that happens to render those labels itself is left alone, and a
+    /// dismissal, never a permission denial (PILOT-290). Probes at most once
+    /// per `savePasswordProbeInterval` so the miss path stays cheap.
     @discardableResult
     private func dismissSavePasswordSheetIfPresent() -> Bool {
         let now = Date()
@@ -425,8 +427,11 @@ class CommandHandler {
             return false
         }
         lastSavePasswordProbe = now
-        guard app.staticTexts["Save Password?"].exists else { return false }
-        let notNow = app.buttons["Not Now"]
+        let sheet = app.sheets
+            .containing(.staticText, identifier: "Save Password?")
+            .firstMatch
+        guard sheet.exists else { return false }
+        let notNow = sheet.buttons["Not Now"]
         guard notNow.exists else { return false }
         NSLog("[SystemDialog] Dismissing iCloud Keychain 'Save Password?' sheet via Not Now")
         notNow.tap()
