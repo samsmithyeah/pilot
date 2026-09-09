@@ -121,7 +121,7 @@ This is the safety net for the substring default of `getByText` — without it, 
 | Operation | Strict? |
 |---|---|
 | Actions (`tap`, `type`, `scroll`, `dragTo`, `setChecked`, …) | Yes |
-| Single-element queries (`find`, `getText`, `isVisible`, `boundingBox`, `scrollIntoView`, …) | Yes |
+| Single-element queries (`find`, `getText`, `isVisible`, `isHidden`, `boundingBox`, `scrollIntoView`, …) | Yes |
 | `waitFor({ state: "visible" \| "attached" })` | Yes |
 | Positive assertions (`toBeVisible`, `toHaveText`, `toBeChecked`, …) | Yes |
 | `waitFor({ state: "hidden" \| "detached" })` | No — absence is evaluated over all matches |
@@ -1119,6 +1119,18 @@ if (!(await device.getByRole("button", { name: "Enable notifications" }).isVisib
 Strict mode still applies: a selector that matches more than one element throws a
 `StrictModeViolationError`. A persistent device or agent fault also throws, so an infrastructure
 failure is never reported as "not visible".
+
+#### `elementHandle.isHidden(): Promise<boolean>`
+
+The opposite of `isVisible()`: `true` when the element is not visible **or** does not exist. Does not
+auto-wait. To wait for an element to disappear, use `expect(locator).not.toBeVisible()` or
+`waitFor({ state: "hidden" })`.
+
+```typescript
+if (await device.getByText("Loading…").isHidden()) {
+  // content is ready
+}
+```
 
 #### `elementHandle.isEnabled(): Promise<boolean>`
 

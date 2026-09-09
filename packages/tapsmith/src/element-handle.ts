@@ -1966,7 +1966,20 @@ export class ElementHandle {
    * one element) and on a persistent device/agent fault.
    */
   async isVisible(): Promise<boolean> {
-    return this._probeState('isVisible', 'Visible', (info) => info.visible);
+    return this._probeState('isVisible', 'Visible', (info) => info.visible, false);
+  }
+
+  /**
+   * Returns whether the element is currently hidden — the opposite of
+   * {@link isVisible}: `true` when no element matches or the match is not
+   * visible.
+   *
+   * Does not auto-wait: resolves immediately with the current state. To wait
+   * for an element to disappear use `expect(locator).not.toBeVisible()` or
+   * `waitFor({ state: 'hidden' })`.
+   */
+  async isHidden(): Promise<boolean> {
+    return this._probeState('isHidden', 'Hidden', (info) => !info.visible, true);
   }
 
   /**
@@ -1977,7 +1990,7 @@ export class ElementHandle {
    * state probes.
    */
   async isEnabled(): Promise<boolean> {
-    return this._probeState('isEnabled', 'Enabled', (info) => info.enabled);
+    return this._probeState('isEnabled', 'Enabled', (info) => info.enabled, false);
   }
 
   /**
@@ -1989,7 +2002,7 @@ export class ElementHandle {
    * state probes.
    */
   async isChecked(): Promise<boolean> {
-    return this._probeState('isChecked', 'Checked', (info) => info.checked);
+    return this._probeState('isChecked', 'Checked', (info) => info.checked, false);
   }
 
   /**
@@ -2001,19 +2014,20 @@ export class ElementHandle {
    * state probes.
    */
   async isEditable(): Promise<boolean> {
-    return this._probeState('isEditable', 'Editable', (info) => info.role === 'textfield' && info.enabled);
+    return this._probeState('isEditable', 'Editable', (info) => info.role === 'textfield' && info.enabled, false);
   }
 
   /**
    * @internal — Shared implementation of the boolean state probes
-   * (`isVisible`/`isEnabled`/`isChecked`/`isEditable`), PILOT-287.
+   * (`isVisible`/`isHidden`/`isEnabled`/`isChecked`/`isEditable`), PILOT-287.
    *
    * Unlike `find()` these must never auto-wait for the element to appear:
-   * their `false` case naturally subsumes absence, and callers use them to
+   * one of their two outcomes naturally subsumes absence (`absentResult` —
+   * `false` for every probe except `isHidden`), and callers use them to
    * branch on presence. So the element is resolved exactly once — a genuine
-   * miss reads `false` immediately instead of costing the full timeout and
-   * throwing. (`getText()`/`inputValue()` keep the find-then-read contract:
-   * there is no sensible string for an absent element.)
+   * miss reads `absentResult` immediately instead of costing the full timeout
+   * and throwing. (`getText()`/`inputValue()` keep the find-then-read
+   * contract: there is no sensible string for an absent element.)
    *
    * Traced under the probe's own name so a trace shows e.g. `isVisible →
    * Visible: false` rather than a failed `find`.
@@ -2022,12 +2036,13 @@ export class ElementHandle {
     action: string,
     label: string,
     read: (info: ElementInfo) => boolean,
+    absentResult: boolean,
   ): Promise<boolean> {
     this._emitQueryStarted(action);
     const start = Date.now();
     try {
       const info = await this._probeOnce();
-      const result = info !== undefined && read(info);
+      const result = info === undefined ? absentResult : read(info);
       await this._traceQuery(action, `${label}: ${result}`, Date.now() - start, info?.bounds);
       return result;
     } catch (err) {

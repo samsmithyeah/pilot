@@ -792,6 +792,75 @@ describe('isVisible()', () => {
   });
 });
 
+describe('isHidden()', () => {
+  it('is the opposite of isVisible for a found element', async () => {
+    const client = makeMockClient({
+      findElements: vi.fn(async () => makeFindElementsResponse([makeElementInfo({ visible: false })])),
+    });
+    const handle = new ElementHandle(client, _text('X'), 5000);
+    expect(await handle.isHidden()).toBe(true);
+    expect(await handle.isVisible()).toBe(false);
+  });
+
+  it('returns false for a visible element', async () => {
+    const client = makeMockClient({
+      findElements: vi.fn(async () => makeFindElementsResponse([makeElementInfo({ visible: true })])),
+    });
+    const handle = new ElementHandle(client, _text('X'), 5000);
+    expect(await handle.isHidden()).toBe(false);
+  });
+
+  it('returns true immediately when the element is absent — no auto-wait, no throw', async () => {
+    const findElements = vi.fn(async () => makeFindElementsResponse([]));
+    const client = makeMockClient({ findElements });
+    const handle = new ElementHandle(client, _text('Absent'), 20_000);
+    const start = Date.now();
+    expect(await handle.isHidden()).toBe(true);
+    expect(Date.now() - start).toBeLessThan(1000);
+    expect(findElements).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns true for an absent element on a modified handle (.first())', async () => {
+    const client = makeMockClient({ findElements: vi.fn(async () => makeFindElementsResponse([])) });
+    expect(await new ElementHandle(client, _text('Absent'), 20_000).first().isHidden()).toBe(true);
+  });
+
+  it('still enforces strict mode on an ambiguous selector', async () => {
+    const client = makeMockClient({
+      findElements: vi.fn(async () =>
+        makeFindElementsResponse([
+          makeElementInfo({ elementId: 'a', visible: false }),
+          makeElementInfo({ elementId: 'b', visible: false }),
+        ])),
+    });
+    const err = await new ElementHandle(client, _text('Dup'), 5000).isHidden().catch((e) => e);
+    expect(err).toBeInstanceOf(StrictModeViolationError);
+  });
+
+  it('does not report a momentary agent fault as hidden — retries and reads the state once it clears', async () => {
+    let calls = 0;
+    const findElements = vi.fn(async (): Promise<FindElementsResponse> => {
+      calls++;
+      return calls < 2
+        ? { requestId: '1', elements: [], errorMessage: 'Unknown error' }
+        : makeFindElementsResponse([makeElementInfo({ visible: true })]);
+    });
+    const client = makeMockClient({ findElements });
+    expect(await new ElementHandle(client, _text('X'), 5000).isHidden()).toBe(false);
+    expect(calls).toBe(2);
+  });
+
+  it('surfaces a persistent agent fault instead of returning true', async () => {
+    const client = makeMockClient({
+      findElements: vi.fn(async (): Promise<FindElementsResponse> => ({
+        requestId: '1', elements: [], errorMessage: 'UiAutomation not connected',
+      })),
+    });
+    await expect(new ElementHandle(client, _text('X'), 600).isHidden())
+      .rejects.toThrow(/findElements failed: UiAutomation not connected/);
+  });
+});
+
 describe('isEnabled()', () => {
   it('returns enabled state from found element', async () => {
     const client = makeMockClient({
