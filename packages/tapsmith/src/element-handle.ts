@@ -904,6 +904,9 @@ export class ElementHandle {
     const deadline = Date.now() + timeoutMs;
     const POLL_MS = 250;
     let lastTransientErr: Error | undefined;
+    // The most recent positional miss (`nth(i): expected at least …`), kept so
+    // the deadline error still says WHICH index was short and by how much.
+    let lastPositionalMiss: Error | undefined;
     while (true) {
       try {
         // Floor at 1ms — the daemon treats a 0 timeout as "use the 30s
@@ -937,11 +940,13 @@ export class ElementHandle {
           // answered, so drop any earlier transient timeout.
           lastTransientErr = undefined;
           if (!isPollableNotFoundError(err)) throw err;
+          if (err instanceof Error && err.message.startsWith('nth(')) lastPositionalMiss = err;
         }
       }
       if (Date.now() >= deadline) {
         if (lastTransientErr) throw lastTransientErr;
-        throw new Error(`Element ${this._describe()} was not found after waiting ${timeoutMs}ms`);
+        const detail = lastPositionalMiss ? ` (${lastPositionalMiss.message})` : '';
+        throw new Error(`Element ${this._describe()} was not found after waiting ${timeoutMs}ms${detail}`);
       }
       const sleepMs = Math.min(POLL_MS, Math.max(0, deadline - Date.now()));
       if (sleepMs > 0) await sleep(sleepMs, this._client._getAbortSignal?.());
@@ -1170,17 +1175,28 @@ export class ElementHandle {
 
   // ── Queries ──
 
-  /** Resolve this handle to an ElementInfo. Throws if not found within timeout. */
+  /**
+   * Resolve this handle to an ElementInfo. Waits for the element to be
+   * present (up to the handle's timeout) and throws if it never appears —
+   * on every handle shape, modified (`.first()`, `.nth()`, `.filter()`,
+   * `.and()`/`.or()`, scoped chains) or not. A handle from `all()` resolves
+   * from the snapshot it was created with.
+   */
   async find(): Promise<ElementInfo> {
     this._emitQueryStarted('find');
     const start = Date.now();
     try {
       let result: ElementInfo;
-      if (this._hasModifiers()) {
+      if (this._hasModifiers() && this._timeoutMs === 0) {
+        // Explicit single-shot opt-out, as in _strictResolve.
         result = await this._resolveOne();
       } else {
-        // Strict resolution (PILOT-226): poll findElements so multiple
-        // matches throw instead of silently returning the first.
+        // Strict resolution (PILOT-226): poll so multiple matches throw
+        // instead of silently returning the first. _strictResolve polls
+        // _resolveOne() for modified handles (the same auto-wait actions get —
+        // review follow-up on PILOT-287: readers on `.first()` etc. used to be
+        // single-shot and failed instantly mid-transition) and findElements
+        // for unmodified ones.
         const { element } = await this._strictResolve();
         if (!element) {
           throw new Error(`Element not found: ${this._describe()}`);
@@ -1884,7 +1900,7 @@ export class ElementHandle {
   }
 
   async boundingBox(): Promise<BoundingBox | null> {
-    const info = this._hasModifiers() ? await this._resolveOne() : await this.find();
+    const info = await this.find();
     if (!info.bounds) return null;
     return {
       x: info.bounds.left,
@@ -1976,7 +1992,7 @@ export class ElementHandle {
    * one element) and on a persistent device/agent fault.
    */
   async isVisible(): Promise<boolean> {
-    return this._probeVisibility('isVisible', 'Visible', false);
+    return this._probeVisibility('isVisible', 'Visible', /* negate */ false);
   }
 
   /**
@@ -1989,7 +2005,7 @@ export class ElementHandle {
    * `waitFor({ state: 'hidden' })`.
    */
   async isHidden(): Promise<boolean> {
-    return this._probeVisibility('isHidden', 'Hidden', true);
+    return this._probeVisibility('isHidden', 'Hidden', /* negate */ true);
   }
 
   /**
@@ -2011,7 +2027,7 @@ export class ElementHandle {
    * throws if it never appears, like Playwright's `locator.isChecked()`.
    */
   async isChecked(): Promise<boolean> {
-    const info = this._hasModifiers() ? await this._resolveOne() : await this.find();
+    const info = await this.find();
     return info.checked;
   }
 
@@ -2032,10 +2048,11 @@ export class ElementHandle {
    * `isVisible`/`isHidden` (PILOT-287).
    *
    * Unlike `find()` these must never wait for the element to appear: callers
-   * use them to branch on presence, and absence has a definite answer
-   * (`absentResult`: `false` for isVisible, `true` for isHidden). So the
-   * element is resolved once — a genuine miss reads `absentResult` at once
-   * instead of costing the full timeout and throwing.
+   * use them to branch on presence, and absence has a definite answer — an
+   * absent element is not visible, so isVisible → `false` and isHidden (its
+   * exact negation, `negate`) → `true`. The element is resolved once; a
+   * genuine miss answers at once instead of costing the full timeout and
+   * throwing.
    *
    * The other state readers (`isEnabled`/`isChecked`/`isEditable`,
    * `getText`/`inputValue`) keep Playwright's find-then-read contract: they
@@ -2045,13 +2062,13 @@ export class ElementHandle {
    * Traced under the probe's own name so a trace shows e.g. `isVisible →
    * Visible: false` rather than a failed `find`.
    */
-  private async _probeVisibility(action: string, label: string, absentResult: boolean): Promise<boolean> {
+  private async _probeVisibility(action: string, label: string, negate: boolean): Promise<boolean> {
     this._emitQueryStarted(action);
     const start = Date.now();
     try {
       const info = await this._probeOnce();
-      const visible = info?.visible ?? false;
-      const result = absentResult ? !visible : visible;
+      const visible = info !== undefined && info.visible; // absent ⇒ not visible
+      const result = negate ? !visible : visible;
       await this._traceQuery(action, `${label}: ${result}`, Date.now() - start, info?.bounds);
       return result;
     } catch (err) {
@@ -2082,13 +2099,15 @@ export class ElementHandle {
    * short window measured from the first such failure and capped by the
    * handle timeout ({@link PROBE_RETRY_WINDOW_MS}) — bounding the retries,
    * never the read. When the window closes:
-   * - a stall of *only* stale ticks resolves as not found, matching how every
-   *   other reader in this file classifies a stale snapshot (`find()` reports
-   *   "not found" after one, `waitFor` "did not reach state") — a screen that
-   *   never stops re-rendering yields the not-found answer, not a raw agent
-   *   error that no recovery pattern recognises;
    * - a stall involving a real agent fault surfaces that fault (so
-   *   session-level recovery patterns still match).
+   *   session-level recovery patterns still match);
+   * - a stall of *only* stale ticks throws a descriptive error rather than
+   *   answering. Answering would be a lie in the case that matters most — an
+   *   animating spinner is exactly what produces stale snapshots, and a
+   *   silent "hidden" would take the ready branch. It is not the raw agent
+   *   string either: the message says the hierarchy could not be read and
+   *   points at the polling forms (`expect(...).not.toBeVisible()`,
+   *   `waitFor`) that can wait out the churn.
    */
   private async _probeOnce(): Promise<ElementInfo | undefined> {
     // A handle from all() carries the snapshot it was created from, which
@@ -2126,14 +2145,18 @@ export class ElementHandle {
       if (deadline === undefined) deadline = Date.now() + retryWindowMs;
       if (Date.now() + PROBE_RETRY_POLL_MS > deadline) {
         if (lastFault) throw lastFault;
-        return undefined; // stale-only stall ⇒ not found, like find()/waitFor
+        throw new Error(
+          `Could not read the state of ${this._describe()}: the UI hierarchy kept changing ` +
+            `(stale snapshot) for ${retryWindowMs}ms. Use expect(locator).toBeVisible() / ` +
+            `.not.toBeVisible() or waitFor(), which poll until the screen settles.`,
+        );
       }
       await sleep(PROBE_RETRY_POLL_MS, this._client._getAbortSignal?.());
     }
   }
 
   async inputValue(): Promise<string> {
-    const info = this._hasModifiers() ? await this._resolveOne() : await this.find();
+    const info = await this.find();
     return info.text;
   }
 

@@ -82,6 +82,9 @@ describe("Gestures screen", () => {
   })
 
   test("tap area isVisible returns true", async ({ gesturesScreen }) => {
+    // isVisible() does not wait (PILOT-287) and beforeEach only waits for the
+    // heading — settle the element first, then check the probe agrees.
+    await expect(gesturesScreen.tapArea).toBeVisible()
     const visible = await gesturesScreen.tapArea.isVisible()
     expect(visible).toBe(true)
   })

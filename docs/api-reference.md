@@ -1127,11 +1127,13 @@ if (!(await device.getByRole("button", { name: "Enable notifications" }).isVisib
 
 Strict mode still applies: a selector that matches more than one element throws a
 `StrictModeViolationError`. A single call takes as long as one hierarchy read on the device (it never
-polls for the element). A momentary device or agent fault is retried for up to a couple of seconds
-(capped by the handle's timeout) and then throws, so an infrastructure failure is never reported as
-"not visible"; a hierarchy that stays stale (mid re-render) for the whole window is treated as not
-found, exactly as `find()` and `waitFor()` classify a stale snapshot. A handle obtained from `all()`
-re-queries the device rather than answering from the snapshot it was created from (see `all()`).
+polls for the element). Infrastructure problems are never reported as a visibility answer: an agent
+that does not respond within the read throws at once; a momentary agent fault or a stale mid-re-render
+snapshot is retried for up to a couple of seconds (capped by the handle's timeout), after which the
+fault is thrown — or, if the hierarchy never stopped changing (an animating screen), a descriptive
+error pointing at `expect(locator).toBeVisible()` / `.not.toBeVisible()` and `waitFor()`, which poll
+until the screen settles. A handle obtained from `all()` re-queries the device rather than answering
+from the snapshot it was created from (see `all()`).
 
 Only `isVisible()` and `isHidden()` are non-waiting. `isEnabled()`, `isChecked()` and `isEditable()`
 follow Playwright too: they wait for the element to be present and throw if it never appears, so a
