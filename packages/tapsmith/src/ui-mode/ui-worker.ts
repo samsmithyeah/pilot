@@ -14,6 +14,7 @@
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { runTestFile, collectResults, type RunDevice } from '../runner.js';
+import { telemetry } from '../telemetry.js';
 import type { TapsmithConfig } from '../config.js';
 import {
   serializeTestResult,
@@ -402,6 +403,7 @@ async function runFileWithRecovery(
         },
         abortFileOnError: isRecoverableInfrastructureError,
         resetCapabilities: sharedCapabilities(),
+        runMode: 'ui',
         projectUseOptions,
         projectName,
         testFilter,
@@ -454,7 +456,8 @@ async function recoverFileSession(filePath: string, err: unknown): Promise<void>
 
 function handleShutdown(): void {
   for (const s of sessions) closeDeviceSession(s);
-  process.exit(0);
+  // Bounded wait for the last file's telemetry event (PILOT-330).
+  void telemetry.flush().finally(() => process.exit(0));
 }
 
 // ─── Background preparation ───

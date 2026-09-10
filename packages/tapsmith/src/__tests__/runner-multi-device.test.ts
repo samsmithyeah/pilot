@@ -18,6 +18,7 @@ import type { SessionPreflightContext } from '../session-preflight.js';
 import type { PreparedState } from '../app-reset.js';
 import { Tracing } from '../trace/tracing.js';
 import { getActiveTraceCollector } from '../trace/trace-collector.js';
+import { telemetry } from '../telemetry.js';
 
 const { pushContext, popContext, runSuiteContext } = _internal;
 
@@ -112,6 +113,7 @@ function makeOpts(group: ReturnType<typeof makeDevice>[], config: TapsmithConfig
     config,
     devices: group.map((g) => g.runDevice),
     resetCapabilities: {},
+    runMode: 'test',
     _applied: {},
     _prepared: new Map(),
     ...extra,
@@ -441,5 +443,71 @@ describe('runner with a device group', () => {
     pushContext();
     expect(() => tapsmithTest.use({ devices: 2 })).toThrow(/Declare it on a project instead/);
     popContext();
+  });
+});
+
+describe('runner reports one anonymous telemetry event per file (PILOT-330)', () => {
+  it('records mode, platform, group size and counts — and nothing identifying', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tapsmith-runner-telemetry-'));
+    const filePath = path.join(tempDir, 'mixed.mjs');
+    const runnerUrl = pathToFileURL(path.resolve('src/runner.ts')).href;
+    const recordRun = vi.spyOn(telemetry, 'recordRun').mockImplementation(() => undefined);
+    try {
+      fs.writeFileSync(filePath, `
+        import { test } from ${JSON.stringify(runnerUrl)};
+        test('secret feature works', async () => {});
+        test('secret feature fails', async () => { throw new Error('nope'); });
+        test.skip('secret feature skipped', async () => {});
+      `);
+      const alice = makeDevice('alice');
+      const bob = makeDevice('bob');
+      const config = makeConfig({ devices: 2, platform: 'ios' });
+      const suite = await runTestFile(pathToFileURL(filePath).href, makeOpts([alice, bob], config, {
+        runMode: 'test-parallel',
+        bustImportCache: true,
+      }));
+      expect(collectResults(suite).map((t) => t.status).sort()).toEqual(['failed', 'passed', 'skipped']);
+
+      expect(recordRun).toHaveBeenCalledTimes(1);
+      const [cfg, event] = recordRun.mock.calls[0];
+      // The runner hands over the config it ran with, so `telemetry: false` reaches the client.
+      expect(cfg).toBe(config);
+      expect(event).toEqual({
+        mode: 'test-parallel',
+        platform: 'ios',
+        devices: 2,
+        tests: 3,
+        passed: 1,
+        failed: 1,
+        skipped: 1,
+        durationMs: expect.any(Number),
+      });
+      // Belt and braces: no test name, path, or serial anywhere in the event.
+      const serialized = JSON.stringify(event);
+      expect(serialized).not.toContain('secret');
+      expect(serialized).not.toContain(tempDir);
+      expect(serialized).not.toContain('emulator-');
+    } finally {
+      recordRun.mockRestore();
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports nothing for a file with no devices (the runner\'s own unit tests)', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tapsmith-runner-telemetry-nodev-'));
+    const filePath = path.join(tempDir, 'nodev.mjs');
+    const runnerUrl = pathToFileURL(path.resolve('src/runner.ts')).href;
+    const recordRun = vi.spyOn(telemetry, 'recordRun').mockImplementation(() => undefined);
+    try {
+      fs.writeFileSync(filePath, `
+        import { test } from ${JSON.stringify(runnerUrl)};
+        test('one', async () => {});
+      `);
+      await runTestFile(pathToFileURL(filePath).href, makeOpts([], makeConfig(), { bustImportCache: true }));
+      expect(recordRun).not.toHaveBeenCalled();
+    } finally {
+      recordRun.mockRestore();
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 });

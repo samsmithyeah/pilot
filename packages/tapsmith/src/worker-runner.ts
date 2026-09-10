@@ -35,6 +35,7 @@ import {
 } from './device-session.js';
 import { createActionProgressMessenger } from './action-progress-renderer.js';
 import type { TapsmithReporter } from './reporter.js';
+import { telemetry } from './telemetry.js';
 
 
 let workerId = -1;
@@ -228,6 +229,7 @@ async function runFileWithRecovery(
         // `auto` resolves from the primary's probe; every member runs the
         // same app build, so its hooks are the group's hooks.
         resetCapabilities: sessions[0].capabilities,
+        runMode: 'test-parallel',
         // On retry (attempt 2), bust the ESM import cache so the file's
         // test registrations re-execute. Without this, import() returns the
         // cached module and no tests are registered for the retry.
@@ -272,7 +274,8 @@ async function runFileWithRecovery(
 
 function handleShutdown(): void {
   for (const s of sessions) closeDeviceSession(s);
-  process.exit(0);
+  // Bounded wait for the last file's telemetry event (PILOT-330).
+  void telemetry.flush().finally(() => process.exit(0));
 }
 
 function findRecoverableInfrastructureFailure(

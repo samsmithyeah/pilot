@@ -146,6 +146,15 @@ describe('defineConfig()', () => {
     expect(() => defineConfig({ ui: { prepareDelayMs: 1.5 } })).toThrow(/ui\.prepareDelayMs must be a non-negative integer/);
   });
 
+  it('accepts the telemetry opt-out and rejects a non-boolean', () => {
+    expect(defineConfig({ telemetry: false }).telemetry).toBe(false);
+    // Unset means opted in; the runtime treats anything but `false` as on.
+    expect(defineConfig().telemetry).toBeUndefined();
+    // A string 'false' would silently read as opted IN — refuse it instead.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- exercising the runtime guard against untyped config files
+    expect(() => defineConfig({ telemetry: 'false' as any })).toThrow(/telemetry must be a boolean/);
+  });
+
   it('returns defaults when called with no arguments', () => {
     const config = defineConfig();
     expect(config.timeout).toBe(30_000);

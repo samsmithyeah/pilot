@@ -205,6 +205,16 @@ export interface TapsmithConfig {
   };
 
   /**
+   * Anonymous usage telemetry (default true). Tapsmith reports one event per
+   * test-file run — run mode, platform, pass/fail counts, SDK/Node/OS
+   * versions — under a random per-machine id. It never sends test names,
+   * selectors, app identifiers, or file paths. Set `false` to opt out; the
+   * `TAPSMITH_TELEMETRY=0` environment variable does the same without a
+   * config change. See `docs/telemetry.md`.
+   */
+  telemetry?: boolean;
+
+  /**
    * Delay in milliseconds between keystrokes when typing text.
    * Helps prevent dropped characters on slow CI simulators/emulators.
    * Defaults to 0 (no delay).
@@ -641,6 +651,10 @@ export function assignGroupMemberDevices(
 
 /** Fail fast on malformed `ui` config values instead of silently ignoring them. */
 function validateUiOptions(raw: Partial<TapsmithConfig>): void {
+  if (raw.telemetry !== undefined && typeof raw.telemetry !== 'boolean') {
+    // A string `'false'` would read as opted-in; refuse rather than guess.
+    throw new Error(`config: telemetry must be a boolean (got ${JSON.stringify(raw.telemetry)})`);
+  }
   if (raw.ui === undefined) return;
   if (raw.ui.prepareBetweenRuns !== undefined && typeof raw.ui.prepareBetweenRuns !== 'boolean') {
     throw new Error(`config: ui.prepareBetweenRuns must be a boolean (got ${JSON.stringify(raw.ui.prepareBetweenRuns)})`);

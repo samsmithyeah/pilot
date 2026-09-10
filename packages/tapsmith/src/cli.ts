@@ -16,6 +16,7 @@ import figlet from 'figlet';
 import { TapsmithGrpcClient } from './grpc-client.js';
 import { Device } from './device.js';
 import { runTestFile, collectResults, markFileRetryFlakes, type RunDevice, type TestResult, type SuiteResult } from './runner.js';
+import { telemetry, readSdkVersion } from './telemetry.js';
 import { createReporters, ReporterDispatcher, type FullResult } from './reporter.js';
 import { ensureSessionReady } from './session-preflight.js';
 import {
@@ -180,13 +181,7 @@ function warnSequentialSkippedDevices(
 // ─── Version ───
 
 function getVersion(): string {
-  try {
-    const pkgPath = path.resolve(import.meta.dirname, '../package.json');
-    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
-    return pkg.version ?? '0.0.0';
-  } catch {
-    return '0.0.0';
-  }
+  return readSdkVersion();
 }
 
 // ─── TSX re-exec ───
@@ -2306,6 +2301,9 @@ async function main(): Promise<void> {
   const initialEffectiveConfig = initialProject.effectiveConfig;
   const shouldShowLaunchProgress = args.ui || !args.watch;
   printTapsmithBanner();
+  // After the tsx re-exec, so it prints exactly once, and before any worker
+  // is forked, so no child ever races it (PILOT-330).
+  telemetry.printNoticeIfFirstRun(config);
   if (shardMessage) console.log(dim(shardMessage));
   const launchProgress = shouldShowLaunchProgress
     ? new UiLaunchProgress(createUiLaunchSteps({
@@ -2783,7 +2781,11 @@ async function main(): Promise<void> {
     // finally block swallows them. Skipped when an error is escaping:
     // main().catch prints it and exits with code 1 itself.
     if (!sequentialErrorEscaping) {
-      setTimeout(() => process.exit(sequentialExitCode), 0);
+      // The last file's telemetry event is still in flight here; give it a
+      // bounded moment rather than systematically dropping it (PILOT-330).
+      setTimeout(() => {
+        void telemetry.flush().finally(() => process.exit(sequentialExitCode));
+      }, 0);
     }
   }
 }
@@ -2856,6 +2858,7 @@ async function runTestFileWithRecovery(
         },
         abortFileOnError: isRecoverableInfrastructureError,
         resetCapabilities: sessions[0].capabilities,
+        runMode: 'test',
         // In-process retries need the same ESM cache busting as worker
         // retries; otherwise import() returns the cached module and the
         // retry registers no tests.
