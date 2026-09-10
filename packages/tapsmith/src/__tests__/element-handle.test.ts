@@ -840,9 +840,8 @@ describe('isVisible()', () => {
         elapsed = Date.now() - start;
       }
     })).rejects.toThrow(/findElements failed/);
-    // Re-reads are issued while a poll gap plus one more poll interval still
-    // fit in the 2s window (fast-failing reads at 250ms steps → the last is
-    // issued at 1750ms); a slow-failing read runs to the window's end.
+    // Re-reads are issued while a poll gap still fits in the 2s window
+    // (fast-failing reads at 250ms steps → the last is issued at 2000ms).
     expect(elapsed).toBeGreaterThanOrEqual(1500);
     expect(elapsed).toBeLessThan(5000);
   });
@@ -867,17 +866,30 @@ describe('isVisible()', () => {
     expect(findElements.mock.calls.length).toBeLessThanOrEqual(3);
   });
 
-  it('does not retry an agent command timeout — the read already had the full handle deadline (review follow-up)', async () => {
-    // The timeout only arrives once the read deadline (= handle timeout) has
-    // been spent; granting a second one would double the stall the probe
-    // exists to avoid. Throw at once so the infra error surfaces unchanged.
-    const findElements = vi.fn(async (): Promise<FindElementsResponse> => ({
-      requestId: '1', elements: [], errorMessage: 'Agent command timed out after 30000ms',
-    }));
+  it('treats an agent command timeout as a momentary fault: re-probed within the short window, then surfaced unchanged (review follow-up)', async () => {
+    // Every read carries one poll interval of budget (the daemon's headroom
+    // bounds the dump), so a timeout never means "the agent had the whole
+    // handle timeout". It is retried like any fault; a persistent one is thrown
+    // unchanged after ~2s — not 30s — so session recovery still fires.
+    const budgets: number[] = [];
+    const findElements = vi.fn(async (_sel: unknown, budget?: number): Promise<FindElementsResponse> => {
+      budgets.push(budget!);
+      return { requestId: '1', elements: [], errorMessage: 'Agent command timed out after 5250ms' };
+    });
     const client = makeMockClient({ findElements });
-    await expect(new ElementHandle(client, _text('X'), 30_000).isVisible())
-      .rejects.toThrow(/Agent command timed out/);
-    expect(findElements).toHaveBeenCalledTimes(1);
+    let elapsed = -1;
+    await expect(withFakeClock(60_000, async () => {
+      const start = Date.now();
+      try {
+        return await new ElementHandle(client, _text('X'), 30_000).isVisible();
+      } finally {
+        elapsed = Date.now() - start;
+      }
+    })).rejects.toThrow(/Agent command timed out/);
+    expect(findElements.mock.calls.length).toBeGreaterThan(1);
+    for (const b of budgets) expect(b).toBe(250);
+    expect(elapsed).toBeGreaterThanOrEqual(1500);
+    expect(elapsed).toBeLessThan(5000);
   });
 
   it('re-probes stale snapshots until the handle timeout and reads the element once a tick lands (review follow-up)', async () => {
@@ -916,55 +928,35 @@ describe('isVisible()', () => {
     expect(err).toBeInstanceOf(Error);
     expect(err.message).toMatch(/Could not read the state of .*Spinner/);
     // Reports what happened (reads + elapsed), not a budget: reads every
-    // 250ms from 0 to 4750ms; after the read at 4750ms less than two poll
-    // intervals remain, so stop.
-    expect(err.message).toMatch(/kept changing \(stale snapshot\) across 20 reads over 4750ms/);
+    // 250ms from 0 to 5000ms; after the read at 5000ms no poll gap fits.
+    expect(err.message).toMatch(/kept changing \(stale snapshot\) across 21 reads over 5000ms/);
     expect(err.message).toMatch(/not\.toBeVisible\(\) or waitFor\(\)/);
-    expect(findElements).toHaveBeenCalledTimes(20);
+    expect(findElements).toHaveBeenCalledTimes(21);
   });
 
-  it('stops re-reading while a re-read still fits — the last read never gets a ~1ms budget (review follow-up)', async () => {
-    // The loop used to continue whenever ≥250ms remained, then sleep exactly
-    // 250ms, leaving the final re-read a max(1, ~0) = 1ms deadline. The
-    // daemon's fixed 5s read headroom means even that read would usually
-    // complete — but a token floor of one poll interval keeps the budget
-    // honest and the trace readable. (A 1s "minimum read budget" was tried
-    // and reverted: the budget does not bound the dump, the headroom does, so
-    // it only removed retries from handles with timeouts ≤1.25s.)
+  it('gives a short handle timeout its second tick, like find() (review follow-up)', async () => {
+    // timeout: 400 — one stale read at 0ms must not hard-fail the probe; the
+    // find()-backed path on main got a second tick at 250ms and usually
+    // answered. Every read carries min(250ms, time left) — a 1ms floor is
+    // fine, the daemon's headroom bounds the dump — so no minimum budget
+    // gate can eat the retry.
     const budgets: number[] = [];
+    let calls = 0;
     const findElements = vi.fn(async (_sel: unknown, budget?: number): Promise<FindElementsResponse> => {
       budgets.push(budget!);
-      return { requestId: '1', elements: [], errorMessage: 'Element is stale (UI changed): null' };
+      return ++calls === 1
+        ? { requestId: '1', elements: [], errorMessage: 'Element is stale (UI changed): null' }
+        : makeFindElementsResponse([makeElementInfo({ visible: true })]);
     });
     const client = makeMockClient({ findElements });
-    for (const timeoutMs of [600, 1000, 1100, 5000]) {
-      budgets.length = 0;
-      await expect(withFakeClock(10_000, () => new ElementHandle(client, _text('X'), timeoutMs).isVisible()))
-        .rejects.toThrow(/Could not read the state of/);
-      expect(budgets[0]).toBe(timeoutMs);
-      for (const b of budgets.slice(1)) expect(b).toBeGreaterThanOrEqual(250);
-    }
+    expect(await withFakeClock(5000, () => new ElementHandle(client, _text('X'), 400).isVisible())).toBe(true);
+    expect(budgets).toEqual([250, 150]);
   });
 
-  it('still retries stale snapshots on a short handle timeout, like find() does (review follow-up)', async () => {
-    // A project with `timeout: 1000` for fast local runs: a tap re-renders the
-    // screen and the next isVisible() reads stale. It must re-read, not throw
-    // after one read (a 1s minimum read budget made it single-shot here).
-    let calls = 0;
-    const findElements = vi.fn(async (): Promise<FindElementsResponse> =>
-      ++calls < 3
-        ? { requestId: '1', elements: [], errorMessage: 'Element is stale (UI changed): null' }
-        : makeFindElementsResponse([makeElementInfo({ visible: true })]));
-    const client = makeMockClient({ findElements });
-    expect(await withFakeClock(5000, () => new ElementHandle(client, _text('X'), 1000).isVisible())).toBe(true);
-    expect(calls).toBe(3);
-  });
-
-  it('retries an agent command timeout on a capped re-read instead of throwing it — the cap, not the agent, may have run out (review follow-up)', async () => {
+  it('a momentary agent command timeout between a stale tick and a good read is ridden out (review follow-up)', async () => {
     // "Agent command timed out" is in the worker's recoverable-infrastructure
     // patterns: thrown from a probe, it tears down and recovers the session.
-    // On the FIRST read (full handle timeout) that is the right outcome; on a
-    // capped re-read it is retried like a momentary fault.
+    // A single one is a blip like any other fault and is retried.
     const budgets: number[] = [];
     let calls = 0;
     const findElements = vi.fn(async (_sel: unknown, budget?: number): Promise<FindElementsResponse> => {
@@ -977,8 +969,7 @@ describe('isVisible()', () => {
     const client = makeMockClient({ findElements });
     expect(await withFakeClock(60_000, () => new ElementHandle(client, _text('X'), 30_000).isVisible())).toBe(true);
     expect(calls).toBe(3);
-    expect(budgets[0]).toBe(30_000);
-    expect(budgets[1]).toBeGreaterThanOrEqual(250);
+    expect(budgets).toEqual([250, 250, 250]);
   });
 
   it('still surfaces agent command timeouts that persist on re-reads, after the short fault window (review follow-up)', async () => {
@@ -1000,11 +991,9 @@ describe('isVisible()', () => {
     expect(elapsed).toBeLessThan(5000);
   });
 
-  it('bounds a re-read by the fault window while one is open, so a fault that is slow to fail cannot stretch it (review follow-up)', async () => {
-    // Every read takes 1.5s to fail (a socket that is slow to refuse). With
-    // the re-read budget reset to the remaining HANDLE timeout, the second
-    // read would have been issued with ~28s and the "retried briefly" promise
-    // would hold only if the fault happened to fail fast.
+  it('a fault that is slow to fail is not re-read once the fault window has less than a poll gap left (review follow-up)', async () => {
+    // Every read takes 1.5s to fail (a socket that is slow to refuse). The
+    // window, not the handle timeout, decides whether another read is issued.
     const budgets: number[] = [];
     const findElements = vi.fn(async (_sel: unknown, budget?: number): Promise<FindElementsResponse> => {
       budgets.push(budget!);
@@ -1021,10 +1010,10 @@ describe('isVisible()', () => {
         elapsed = Date.now() - start;
       }
     })).rejects.toThrow(/Not connected to agent/);
-    // Fault at 1500ms opens a window to 3500ms; the re-read at 1750ms is
-    // bounded by what is left of it (1750ms), not the ~28s of handle timeout.
-    expect(budgets).toEqual([30_000, 1750]);
-    expect(elapsed).toBeLessThan(4000);
+    // Fault at 1500ms opens a window to 3500ms; reads at 1750 (fails 3250) and
+    // 3500 (fails 5000; 250ms was left when it was issued); then thrown.
+    expect(budgets).toEqual([250, 250, 250]);
+    expect(elapsed).toBe(5000);
   });
 
   it('bounds the reads a filter({ has }) chain issues by the same budget (review follow-up)', async () => {
@@ -1048,11 +1037,10 @@ describe('isVisible()', () => {
     expect(reads.length % 2).toBe(0);
     for (let i = 0; i < reads.length; i += 2) {
       expect(reads[i + 1].budget).toBe(reads[i].budget);
-      expect(reads[i].budget).toBeLessThanOrEqual(3000);
-      expect(reads[i].budget).toBeGreaterThanOrEqual(250);
+      expect(reads[i].budget).toBeLessThanOrEqual(250);
+      expect(reads[i].budget).toBeGreaterThanOrEqual(1);
     }
-    expect(reads[0].budget).toBe(3000);
-    expect(reads.at(-1)!.budget).toBe(250);
+    expect(reads[0].budget).toBe(250);
   });
 
   it('explains a single stale read that left no room for another as the read using the budget — not as a too-short timeout (review follow-up)', async () => {
@@ -1065,17 +1053,16 @@ describe('isVisible()', () => {
     const client = makeMockClient({ findElements });
     const err = await withFakeClock(10_000, () => new ElementHandle(client, _text('X'), 5000).isVisible()).catch((e) => e);
     expect(err.message).toMatch(
-      /a single read returned a stale snapshot .*; it took 4900ms, and the 100ms left of the 5000ms timeout is not enough for another read \(a re-read needs at least 500ms\)/,
+      /a single read returned a stale snapshot .*; it took 4900ms, and the 100ms left of the 5000ms timeout is not enough for another read \(a re-read needs at least 250ms\)/,
     );
     expect(err.message).not.toMatch(/so it was not retried/);
     expect(findElements).toHaveBeenCalledTimes(1);
   });
 
   it('applies the read budget on modified handles too, so .first()/.nth()/.filter() probes cannot overrun the timeout (review follow-up)', async () => {
-    // _resolveOne() → _resolveAll() reads with the handle's OWN timeout; a
-    // re-read issued just before the probe deadline would carry a fresh full
-    // deadline and return at ~2× the timeout. The probe must re-time the tree
-    // per read, as _resolveForWaitTick does.
+    // _resolveOne() → _resolveAll() reads with the handle's OWN timeout; on a
+    // wedged agent that is timeout + headroom per read. The probe re-times the
+    // tree per read, as _resolveForWaitTick does.
     const budgets: number[] = [];
     const findElements = vi.fn(async (_sel: unknown, budget?: number): Promise<FindElementsResponse> => {
       budgets.push(budget!);
@@ -1086,7 +1073,10 @@ describe('isVisible()', () => {
     for (const handle of [base.first(), base.nth(2), base.filter({ hasText: 'Y' })]) {
       budgets.length = 0;
       await expect(withFakeClock(5000, () => handle.isVisible())).rejects.toThrow(/Could not read the state of/);
-      expect(budgets).toEqual([3000, 2750, 2500, 2250, 2000, 1750, 1500, 1250, 1000, 750, 500, 250]);
+      // One poll interval per read (the last gets what is left: 1ms floor).
+      expect(budgets.length).toBe(13);
+      for (const b of budgets.slice(0, -1)) expect(b).toBe(250);
+      expect(budgets.at(-1)!).toBeGreaterThanOrEqual(1);
     }
   });
 
@@ -1126,10 +1116,9 @@ describe('isVisible()', () => {
     expect(calls).toBe(13);
   });
 
-  it('caps re-reads at the time left, so the call cannot overrun the handle timeout (review follow-up)', async () => {
-    // First read: the full timeout (a slow-but-healthy dump must complete).
-    // Later reads: only what remains, else a read issued just before the
-    // deadline could run a whole extra timeout.
+  it('issues every read with one poll interval of budget, so the call cannot overrun the handle timeout (review follow-up)', async () => {
+    // The daemon's headroom bounds the dump, not this budget; a small budget
+    // keeps a wedged agent from holding the call for timeout + headroom.
     const budgets: number[] = [];
     const findElements = vi.fn(async (_sel: unknown, budget?: number): Promise<FindElementsResponse> => {
       budgets.push(budget!);
@@ -1138,7 +1127,8 @@ describe('isVisible()', () => {
     const client = makeMockClient({ findElements });
     await expect(withFakeClock(5000, () => new ElementHandle(client, _text('X'), 3000).isVisible()))
       .rejects.toThrow(/kept changing/);
-    expect(budgets).toEqual([3000, 2750, 2500, 2250, 2000, 1750, 1500, 1250, 1000, 750, 500, 250]);
+    expect(budgets.length).toBe(13);
+    for (const b of budgets) expect(b).toBeLessThanOrEqual(250);
   });
 
   it('a later stale tick clears a momentary fault, so stale churn reports churn — not the recovered fault (review follow-up)', async () => {
@@ -1156,32 +1146,31 @@ describe('isVisible()', () => {
     expect(err.message).toMatch(/Could not read the state of/);
     expect(err.message).not.toMatch(/Not connected to agent/);
     // The diagnostic counts stale reads as stale reads, and says a fault occurred.
-    expect(err.message).toMatch(/across 19 reads over 4750ms \(plus 1 momentary agent fault that cleared\)/);
-    expect(calls).toBe(20);
+    expect(err.message).toMatch(/across 20 reads over 5000ms \(plus 1 momentary agent fault that cleared\)/);
+    expect(calls).toBe(21);
   });
 
-  it('re-queries the device for a handle from all() instead of answering from the cached snapshot (review follow-up)', async () => {
-    // rows[0].tap() may change rows[1]; a probe that promises the state "right
-    // now" must not read the pre-tap snapshot all() resolved from. Assertions
-    // and waitFor already re-query by index — the probe must agree with them.
+  it('answers from the all() snapshot like every other reader on the handle, so a check and the tap it guards describe the same element (review follow-up)', async () => {
+    // rows = [A, B]; a later query would show B hidden. If the probe re-queried
+    // while find()/tap() kept using the snapshot, `if (await rows[1].isVisible())
+    // await rows[1].tap()` could check one element and tap another. All readers
+    // on an all() handle agree on the captured element; live all() is PILOT-346.
     let calls = 0;
     const findElements = vi.fn(async () => {
       calls++;
       return makeFindElementsResponse([
         makeElementInfo({ elementId: 'a', text: 'A', visible: true }),
-        // Second query (after the "action") reports row 1 hidden.
-        makeElementInfo({ elementId: 'b', text: 'B', visible: calls === 1 }),
+        makeElementInfo({ elementId: 'b', text: 'B', visible: calls === 1, bounds: { left: 0, top: 20, right: 10, bottom: 30 } }),
       ]);
     });
     const client = makeMockClient({ findElements });
     const rows = await new ElementHandle(client, _role('listitem'), 5000).all();
     expect(calls).toBe(1);
-    expect(await rows[1].isVisible()).toBe(false);
-    expect(await rows[1].isHidden()).toBe(true);
-    expect(calls).toBe(3);
-    // The all() snapshot itself is untouched: the batch still acts on it.
+    expect(await rows[1].isVisible()).toBe(true);
+    expect(await rows[1].isHidden()).toBe(false);
     expect((await rows[1].find()).visible).toBe(true);
-    expect(calls).toBe(3);
+    // No device query for any of them.
+    expect(calls).toBe(1);
   });
 
   it('works with timeout: 0 — one read on the daemon default deadline, no artificial 1ms budget (review follow-up)', async () => {
@@ -1484,17 +1473,36 @@ describe('nth()', () => {
     await expect(handle.nth(-4).find()).rejects.toThrow(/nth\(-4\)/);
   });
 
-  it('does not quote a stale element count in the deadline error once later ticks stopped confirming it (review follow-up)', async () => {
-    // Tick 1: three items (nth(5) misses "found 3"); every later tick is stale.
+  it('keeps the last confirmed element count through stale ticks, and refreshes it on the next counted tick (review follow-up)', async () => {
+    // Tick 1: three items (nth(5) misses "found 3"); tick 2 stale (carries no
+    // count — must not discard the diagnostic); tick 3: two items. The
+    // deadline error quotes the most recent COUNTED tick.
     let calls = 0;
-    const findElements = vi.fn(async (): Promise<FindElementsResponse> =>
+    const findElements = vi.fn(async (): Promise<FindElementsResponse> => {
+      calls++;
+      if (calls === 1) return makeFindElementsResponse(threeItems);
+      if (calls === 2) return { requestId: '1', elements: [], errorMessage: 'Element is stale (UI changed): null' };
+      return makeFindElementsResponse(threeItems.slice(0, 2));
+    });
+    const client = makeMockClient({ findElements });
+    const err = await withFakeClock(5000, () => new ElementHandle(client, _role('listitem'), 600).nth(5).find()).catch((e) => e);
+    expect(err.message).toMatch(/was not found after waiting 600ms \(nth\(5\): expected at least 6 element\(s\), but found 2\)/);
+
+    // Stale for the rest of the wait: the tick-1 count is the best information there is.
+    calls = 0;
+    const staleAfterFirst = vi.fn(async (): Promise<FindElementsResponse> =>
       ++calls === 1
         ? makeFindElementsResponse(threeItems)
         : { requestId: '1', elements: [], errorMessage: 'Element is stale (UI changed): null' });
-    const client = makeMockClient({ findElements });
-    const err = await new ElementHandle(client, _role('listitem'), 600).nth(5).find().catch((e) => e);
-    expect(err.message).toMatch(/was not found after waiting 600ms/);
-    expect(err.message).not.toMatch(/found 3/);
+    const err2 = await withFakeClock(5000, () =>
+      new ElementHandle(makeMockClient({ findElements: staleAfterFirst }), _role('listitem'), 600).nth(5).find()).catch((e) => e);
+    expect(err2.message).toMatch(/was not found after waiting 600ms \(nth\(5\): .*found 3\)/);
+  });
+
+  it('timeout: 0 keeps the positional diagnostic on the single-shot error (review follow-up)', async () => {
+    const client = makeMockClient({ findElements: vi.fn(async () => makeFindElementsResponse(threeItems)) });
+    await expect(new ElementHandle(client, _role('listitem'), 0).nth(5).find())
+      .rejects.toThrow(/^Element not found: .*\(nth\(5\): expected at least 6 element\(s\), but found 3\)/);
   });
 
   it('tap() on an out-of-range nth handle names the index and the count in the deadline error, like find() (review follow-up)', async () => {
@@ -1510,7 +1518,7 @@ describe('nth()', () => {
       .rejects.toThrow(/was not found after waiting 600ms \(nth\(5\): expected at least 6 element\(s\), but found 3\)/);
   });
 
-  it('tap() drops a stale positional count once later ticks stop confirming it (review follow-up)', async () => {
+  it('tap() keeps the last confirmed positional count through stale ticks, like find() (review follow-up)', async () => {
     let calls = 0;
     const findElements = vi.fn(async (): Promise<FindElementsResponse> =>
       ++calls === 1
@@ -1518,16 +1526,16 @@ describe('nth()', () => {
         : { requestId: '1', elements: [], errorMessage: 'Element is stale (UI changed): null' });
     const client = makeMockClient({ findElements, tap: vi.fn(async () => successResponse()) });
     const err = await withFakeClock(5000, () => new ElementHandle(client, _role('listitem'), 600).nth(5).tap()).catch((e) => e);
-    expect(err.message).toMatch(/was not found after waiting 600ms/);
-    expect(err.message).not.toMatch(/found 3/);
+    expect(err.message).toMatch(/was not found after waiting 600ms \(nth\(5\): .*found 3\)/);
   });
 
   it('bounds each poll tick of find()/tap() on a modified handle so the wait cannot overrun its deadline (review follow-up)', async () => {
     // _strictResolve/_waitForEnabled read modified handles through
     // _resolveOne(), which used the handle's OWN timeout per read (and an
     // and/or operand's own, often 30s, one): a tick issued late in the wait
-    // could run a whole extra timeout. Each tick is now bounded by the time
-    // left (no artificial ceiling: the daemon's read headroom bounds a dump).
+    // could run a whole extra timeout (+ headroom per read of the chain on a
+    // wedged agent). Each tick now carries the same 250ms budget as an
+    // unmodified read; the daemon's headroom bounds the dump.
     const budgets: number[] = [];
     const findElements = vi.fn(async (_sel: unknown, budget?: number): Promise<FindElementsResponse> => {
       budgets.push(budget!);
@@ -1553,11 +1561,7 @@ describe('nth()', () => {
         }
       })).rejects.toThrow(/was not found after waiting 2000ms/);
       expect(budgets.length).toBeGreaterThan(1);
-      expect(budgets[0]).toBeLessThanOrEqual(2000);
-      // Non-increasing (an and/or tick reads both operands with one budget),
-      // and shrinking overall as the deadline nears.
-      for (let i = 1; i < budgets.length; i++) expect(budgets[i]).toBeLessThanOrEqual(budgets[i - 1]);
-      expect(budgets.at(-1)!).toBeLessThan(budgets[0]);
+      for (const b of budgets) expect(b).toBeLessThanOrEqual(250);
       expect(elapsed).toBeLessThanOrEqual(2250);
     }
   });

@@ -869,14 +869,13 @@ for (const item of items) {
 
 The returned handles carry the snapshot they were resolved from, so reading and acting on the batch
 does not re-query the device for every element: `find()`, `getText()`, `isEnabled()`, `isChecked()`,
-`isEditable()`, `inputValue()`, `boundingBox()` and actions address the element captured by `all()`
-(so after an action that moves the list, `items[i].boundingBox()` still reports the captured
-coordinates). Checks of
-*current* state re-query the device by index instead — `expect(items[i])` assertions,
-`waitFor()`, `isVisible()` and `isHidden()` — so they reflect what is on screen now, like Playwright's
-snapshot-free `all()`. If the list changes between `all()` and the check (an item is removed, say), the
-two groups can answer about different elements; call `all()` again after a change that reorders the
-list, or use `.nth(i)` for a handle that always resolves live.
+`isEditable()`, `inputValue()`, `boundingBox()`, `isVisible()`, `isHidden()` and actions all address
+the element captured by `all()`, so a check and the action it guards always describe the same element
+(and after an action that moves the list, `items[i].boundingBox()` still reports the captured
+coordinates). `expect(items[i])` assertions and `waitFor()` re-query the device by index, so they
+reflect what is on screen now. If the list changes after `all()` (an item is removed, say), call `all()`
+again, or use `.nth(i)` for a handle that always resolves live. Making `all()` return live locators, as
+Playwright does, is tracked as PILOT-346.
 
 ### Waiting
 
@@ -1129,17 +1128,20 @@ if (!(await device.getByRole("button", { name: "Enable notifications" }).isVisib
 
 Strict mode still applies: a selector that matches more than one element throws a
 `StrictModeViolationError`. On a settled screen a call takes as long as one hierarchy read on the
-device (it never polls for the element). Infrastructure problems are never reported as a visibility answer: an agent
-that does not respond within the read throws at once, and a momentary agent fault is retried for up to
-a couple of seconds (capped by the handle's timeout; a fault that is slow to fail is bounded by that
-window too) and then thrown. A stale mid-re-render snapshot
+device (it never polls for the element). Infrastructure problems are never reported as a visibility
+answer: a momentary agent fault or agent timeout is retried for up to a couple of seconds (capped by
+the handle's timeout) and then thrown. A stale mid-re-render snapshot
 just means the screen is busy, so — like `find()` and `waitFor()` — it is re-read until the handle's
 timeout; if the hierarchy never settles (a screen that never stops animating) the call keeps re-reading
 for the handle's timeout and then throws a descriptive error, pointing at `expect(locator).toBeVisible()` /
-`.not.toBeVisible()` and `waitFor()`, rather than guessing an answer. Each read is bounded by the
-timeout; a `filter({ has })` or scoped chain issues a few reads in sequence. A handle
-obtained from `all()` re-queries the device rather than answering from the snapshot it was created
-from (see `all()`).
+`.not.toBeVisible()` and `waitFor()`, rather than guessing an answer. A handle obtained from `all()`
+answers from the snapshot it was created from, like every other reader on that handle (see `all()`).
+
+> **Behaviour change.** Before this release `isVisible()` waited for the element like `find()` and threw
+> when it never appeared, so `expect(await x.isVisible()).toBe(true)` straight after a navigation used
+> to pass by waiting. It now reads the screen as it is at that instant and may return `false` while the
+> new screen is still appearing. To wait for visibility, use `await expect(x).toBeVisible()`; use
+> `isVisible()`/`isHidden()` only to branch on the current state.
 
 Only `isVisible()` and `isHidden()` are non-waiting. `isEnabled()`, `isChecked()` and `isEditable()`
 follow Playwright too: they wait for the element to be present and throw if it never appears, so a
