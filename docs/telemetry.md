@@ -47,7 +47,7 @@ prints every event to stderr, prefixed `[telemetry]`, and sends nothing. It is t
 
 ## What is collected
 
-One event is sent when a **test file finishes running** (`tapsmith run`), plus a one-off `tapsmith install` event the first time a machine creates its anonymous id. Events go to [PostHog](https://posthog.com), hosted in its EU region, as a standard PostHog capture envelope:
+One event is sent when a **test-file run finishes** (`tapsmith run`), plus a one-off `tapsmith install` event the first time a machine creates its anonymous id. A file that Tapsmith retries after an infrastructure failure reports one event per attempt; a file whose run is aborted mid-way may report none. Treat the events as a sample of activity, not an exact file count. Events go to [PostHog](https://posthog.com), hosted in its EU region, as a standard PostHog capture envelope:
 
 | Field | Example | Why |
 |---|---|---|
@@ -61,7 +61,7 @@ Every event's `properties` carry:
 
 | Property | Example | Why |
 |---|---|---|
-| `session_id` | `"a91e…"` | A random UUID per Tapsmith process, never stored. Groups the files of one run. |
+| `session_id` | `"a91e…"` | Groups every event of one Tapsmith invocation — a single CLI run (including its parallel workers) or one MCP server session. The entry point sets it once and every forked worker inherits it; it is never stored. |
 | `sdk_version` | `"0.4.1"` | Which Tapsmith versions are in use. |
 | `node_version` | `"v22.21.0"` | Which Node versions to keep supporting. |
 | `os` | `"darwin"` | Host operating system (`darwin`, `linux`, `win32`). |
@@ -90,7 +90,7 @@ That is the complete list. The payload is a closed set of fields, and Tapsmith's
 - App identifiers (`package`, bundle ids), APK/app paths, or anything from your config other than the boolean `telemetry` key
 - File paths, project names, or repository names
 - Device serials, UDIDs, device names, hostnames, usernames, or email addresses
-- IP addresses or IP-derived location (each event asks PostHog not to geolocate, and the project discards client IPs before storage)
+- IP addresses or IP-derived location. Every event carries `$geoip_disable: true` so PostHog derives no location, and the Tapsmith PostHog project is configured to discard client IP addresses before storage. Both together are what makes this true; if you redirect events with `TAPSMITH_TELEMETRY_ENDPOINT`, your own receiver sees the connection's source address like any HTTPS server, and this guarantee is then yours to keep.
 - Anything from your app's network traffic
 
 ## The first-run notice
@@ -103,7 +103,7 @@ The first time Tapsmith runs tests on a machine it prints a short notice to stde
 - The processor is PostHog Inc. under its cloud terms, with data held in its EU region. Tapsmith reads the data through PostHog's dashboards and nowhere else.
 - Failures are silent. Telemetry never slows a run down, never prints a warning, and never changes an exit code — an offline CI machine behaves identically.
 - After three consecutive failures Tapsmith stops trying for the rest of the process.
-- Forked worker processes (parallel workers, UI-mode workers, watch-mode children) report their own files and inherit your opt-out.
+- Forked worker processes (parallel workers, UI-mode workers, watch-mode children) report their own files and inherit your opt-out. They share one anonymous id and one session id, set by the parent before forking. A fresh machine's first parallel run may emit more than one `install` event, but all carry that single id, so a machine is still counted once (count distinct ids, not raw install events).
 
 ## The anonymous id
 
@@ -114,11 +114,12 @@ The id lives in `~/.tapsmith/telemetry.json`, owner-readable only:
   "anonymousId": "7f3c1d3a-9d0f-4a9c-b0a5-6d2f4e1c8a11",
   "createdAt": "2026-09-10T14:02:58.001Z",
   "noticeShown": true,
-  "enabled": false
+  "enabled": false,
+  "installReported": true
 }
 ```
 
-`enabled` is written by `tapsmith telemetry enable|disable` and is absent (meaning on) until you use them. Delete the file to rotate the id (the next run counts as a new install and prints the notice again). If the file cannot be written — a read-only home directory, say — Tapsmith uses a throwaway id for that process and sends no `install` event.
+`enabled` is written by `tapsmith telemetry enable|disable` and is absent (meaning on) until you use them; `anonymousId` is created only when the first event is sent, so a machine that runs `tapsmith telemetry disable` first never gets one. Delete the file to rotate the id (the next run counts as a new install and prints the notice again) — but note this also clears a machine-wide opt-out, so if you had run `tapsmith telemetry disable`, run it again afterwards. If the file cannot be written — a read-only home directory, say — Tapsmith uses a throwaway id for that process and sends no `install` event.
 
 ## Pointing telemetry somewhere else
 

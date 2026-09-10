@@ -16,7 +16,7 @@ import figlet from 'figlet';
 import { TapsmithGrpcClient } from './grpc-client.js';
 import { Device } from './device.js';
 import { runTestFile, collectResults, markFileRetryFlakes, type RunDevice, type TestResult, type SuiteResult } from './runner.js';
-import { telemetry, readSdkVersion } from './telemetry.js';
+import { telemetry, readSdkVersion, ensureSessionEnv } from './telemetry.js';
 import { createReporters, ReporterDispatcher, type FullResult } from './reporter.js';
 import { ensureSessionReady } from './session-preflight.js';
 import {
@@ -1829,6 +1829,11 @@ async function main(): Promise<void> {
     return;
   }
 
+  // Stamp one telemetry session id into the environment before any child is
+  // forked (the tsx re-exec, workers, watch/MCP run children all inherit it),
+  // so every per-file event of this invocation shares one session (PILOT-330).
+  ensureSessionEnv();
+
   // Subcommands that print their own command-specific help on --help.
   // Other commands (e.g. `tapsmith test --help`) fall back to the top-level
   // help below.
@@ -2314,6 +2319,10 @@ async function main(): Promise<void> {
   // After the tsx re-exec, so it prints exactly once, and before any worker
   // is forked, so no child ever races it (PILOT-330).
   telemetry.printNoticeIfFirstRun(config);
+  // Persist the anonymous id here too, before forking workers, so a fresh
+  // machine's first parallel run shares one id instead of each worker minting
+  // its own (PILOT-330 review).
+  telemetry.ensureIdentity(config);
   if (shardMessage) console.log(dim(shardMessage));
   const launchProgress = shouldShowLaunchProgress
     ? new UiLaunchProgress(createUiLaunchSteps({

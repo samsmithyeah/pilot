@@ -493,6 +493,59 @@ describe('runner reports one anonymous telemetry event per file (PILOT-330)', ()
     }
   });
 
+  it('on a retry-capable path, does not report an attempt with a recoverable infrastructure failure (PILOT-330 review)', async () => {
+    // The CLI / parallel / UI paths set abortFileOnError and retry such a file;
+    // reporting the discarded attempt would emit a second event and inflate
+    // `failed`. The runner must skip it there.
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tapsmith-runner-telemetry-infra-'));
+    const filePath = path.join(tempDir, 'flaky.mjs');
+    const runnerUrl = pathToFileURL(path.resolve('src/runner.ts')).href;
+    const recordRun = vi.spyOn(telemetry, 'recordRun').mockImplementation(() => undefined);
+    try {
+      fs.writeFileSync(filePath, `
+        import { test } from ${JSON.stringify(runnerUrl)};
+        test('hits an agent drop', async () => { throw new Error('Agent connection dropped'); });
+      `);
+      const alice = makeDevice('alice');
+      const suite = await runTestFile(pathToFileURL(filePath).href, makeOpts([alice], makeConfig({ devices: undefined }), {
+        runMode: 'test-parallel',
+        abortFileOnError: () => true,
+        bustImportCache: true,
+      }));
+      expect(collectResults(suite).map((t) => t.status)).toEqual(['failed']);
+      expect(recordRun).not.toHaveBeenCalled();
+    } finally {
+      recordRun.mockRestore();
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('on a non-retry path (watch/mcp), still reports a single infra-degraded run (PILOT-330 review 2)', async () => {
+    // watch-run runs a file exactly once with in-place recovery and no
+    // abortFileOnError, so its infra-degraded run is the real outcome and must
+    // be counted — the retry-only skip must not swallow it.
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tapsmith-runner-telemetry-infra-watch-'));
+    const filePath = path.join(tempDir, 'flaky.mjs');
+    const runnerUrl = pathToFileURL(path.resolve('src/runner.ts')).href;
+    const recordRun = vi.spyOn(telemetry, 'recordRun').mockImplementation(() => undefined);
+    try {
+      fs.writeFileSync(filePath, `
+        import { test } from ${JSON.stringify(runnerUrl)};
+        test('hits an agent drop', async () => { throw new Error('Agent connection dropped'); });
+      `);
+      const alice = makeDevice('alice');
+      await runTestFile(pathToFileURL(filePath).href, makeOpts([alice], makeConfig({ devices: undefined }), {
+        runMode: 'watch',
+        bustImportCache: true,
+      }));
+      expect(recordRun).toHaveBeenCalledTimes(1);
+      expect(recordRun.mock.calls[0][1]).toMatchObject({ mode: 'watch', tests: 1, failed: 1, passed: 0 });
+    } finally {
+      recordRun.mockRestore();
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it('reports nothing for a file with no devices (the runner\'s own unit tests)', async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tapsmith-runner-telemetry-nodev-'));
     const filePath = path.join(tempDir, 'nodev.mjs');

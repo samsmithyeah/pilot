@@ -376,6 +376,16 @@ describe('isExplicitWorkers() / loadConfig()', () => {
     });
   });
 
+  it('loadConfig propagates a validation error from a discovered config instead of swallowing it (PILOT-330 review)', async () => {
+    // Regression: a malformed value used to throw inside the discovery loop's
+    // catch, which warned and fell back to DEFAULT_CONFIG — turning
+    // `telemetry: 'false'` (invalid) into a run that reports (opted IN).
+    const contents = 'export default { telemetry: "false" };\n';
+    await withTempConfig(contents, 'tapsmith.config.mjs', async (dir) => {
+      await expect(loadConfig(dir)).rejects.toThrow(/telemetry must be a boolean/);
+    });
+  });
+
   // The fixtures below simulate what `defineConfig` produces without
   // actually importing it — the dynamic import in loadConfig can't resolve
   // the tapsmith package's .ts source from a temp-dir .mjs fixture. Since

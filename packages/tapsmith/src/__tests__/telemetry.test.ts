@@ -8,6 +8,7 @@ import {
   runEventFromResults,
   telemetryNoticeText,
   readSdkVersion,
+  ensureSessionEnv,
   TELEMETRY_DOCS_URL,
   type TelemetryPayload,
   type TelemetryRunEvent,
@@ -50,6 +51,7 @@ function make(opts: {
   fetchFn?: typeof fetch;
   notices?: string[];
   endpoint?: string;
+  noticeVisible?: boolean;
 } = {}): Telemetry {
   return new Telemetry({
     stateFile,
@@ -58,6 +60,9 @@ function make(opts: {
     fetchFn: opts.fetchFn ?? fakeFetch().fn,
     sdkVersion: '9.9.9',
     apiKey: 'phc_test',
+    // Default the notice to "reaches a person" so tests exercise the common
+    // interactive/CI path; the not-visible case is covered explicitly.
+    noticeVisible: opts.noticeVisible ?? true,
     writeNotice: (text) => opts.notices?.push(text),
   });
 }
@@ -412,7 +417,11 @@ describe('machine-wide switch (tapsmith telemetry enable|disable)', () => {
     const { fn } = fakeFetch();
     const t = make({ fetchFn: fn });
     expect(t.setMachineEnabled(false)).toBe(true);
-    expect(JSON.parse(fs.readFileSync(stateFile, 'utf-8'))).toMatchObject({ enabled: false, noticeShown: false });
+    const persisted = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
+    expect(persisted).toMatchObject({ enabled: false, noticeShown: false });
+    // Opting out before the first run must NOT mint an identifier (PILOT-330 review).
+    expect(persisted.anonymousId).toBeUndefined();
+    expect(t.status({}).anonymousId).toBeUndefined();
 
     // A fresh process on this machine, as every later run is.
     const notices: string[] = [];
@@ -511,6 +520,8 @@ describe('TAPSMITH_TELEMETRY_DEBUG dry run', () => {
     expect(payloads[1].properties).toMatchObject({ mode: 'test', platform: 'android', tests: 3, duration_ms: 1234 });
     // Still counts as enabled — it is a dry run, not an opt-out.
     expect(t.status({})).toMatchObject({ enabled: true, debug: true });
+    // A dry run leaves no identifier on disk (PILOT-330 review).
+    expect(fs.existsSync(stateFile)).toBe(false);
   });
 
   it('treats an explicit false as off', () => {
@@ -539,5 +550,125 @@ describe('readSdkVersion()', () => {
   it('reads the package version', () => {
     const pkg = JSON.parse(fs.readFileSync(path.resolve('package.json'), 'utf-8'));
     expect(readSdkVersion()).toBe(pkg.version);
+  });
+});
+
+describe('install delivery is not lost to an early exit (PILOT-330 review)', () => {
+  it('resends the install from a later process until one is acknowledged', async () => {
+    // First process: the install POST never lands (process died / network gone).
+    const fail = vi.fn(async () => { throw new TypeError('fetch failed'); }) as unknown as typeof fetch;
+    const a = make({ fetchFn: fail });
+    a.recordRun({}, RUN);
+    await a.flush();
+    // The id is on disk but installReported is not set.
+    const persisted = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
+    expect(persisted.anonymousId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(persisted.installReported).toBeUndefined();
+
+    // A later process resends the install, and on 2xx marks it reported.
+    const ok = fakeFetch();
+    const b = make({ fetchFn: ok.fn });
+    b.recordRun({}, RUN);
+    await b.flush();
+    expect(ok.calls.map((c) => c.body.event)).toEqual(['tapsmith install', 'tapsmith run']);
+    expect(ok.calls[0].body.distinct_id).toBe(persisted.anonymousId);
+    expect(JSON.parse(fs.readFileSync(stateFile, 'utf-8')).installReported).toBe(true);
+
+    // Once acknowledged, no further process resends it.
+    const third = fakeFetch();
+    const c = make({ fetchFn: third.fn });
+    c.recordRun({}, RUN);
+    await c.flush();
+    expect(third.calls.map((x) => x.body.event)).toEqual(['tapsmith run']);
+  });
+
+  it('sends at most one install per process even across many files', async () => {
+    const { fn, calls } = fakeFetch();
+    const t = make({ fetchFn: fn });
+    t.recordRun({}, RUN);
+    t.recordRun({}, RUN);
+    t.recordRun({}, RUN);
+    await t.flush();
+    expect(calls.filter((c) => c.body.event === 'tapsmith install')).toHaveLength(1);
+    expect(calls.filter((c) => c.body.event === 'tapsmith run')).toHaveLength(3);
+  });
+});
+
+describe('session id groups an invocation across processes (PILOT-330 review)', () => {
+  it('is read from TAPSMITH_TELEMETRY_SESSION so forked children share it', async () => {
+    const parent = fakeFetch();
+    const child = fakeFetch();
+    const env = { TAPSMITH_TELEMETRY_SESSION: 'shared-session-id' };
+    const a = new Telemetry({ stateFile, env, fetchFn: parent.fn, apiKey: 'phc_test', writeNotice: () => undefined });
+    const b = new Telemetry({ stateFile, env, fetchFn: child.fn, apiKey: 'phc_test', writeNotice: () => undefined });
+    a.recordRun({}, RUN);
+    b.recordRun({}, RUN);
+    await Promise.all([a.flush(), b.flush()]);
+    expect(parent.calls.at(-1)!.body.properties.session_id).toBe('shared-session-id');
+    expect(child.calls.at(-1)!.body.properties.session_id).toBe('shared-session-id');
+  });
+
+  it('ensureSessionEnv sets the var once and is idempotent', () => {
+    const env: NodeJS.ProcessEnv = {};
+    ensureSessionEnv(env);
+    const first = env.TAPSMITH_TELEMETRY_SESSION;
+    expect(first).toMatch(/^[0-9a-f-]{36}$/);
+    ensureSessionEnv(env);
+    expect(env.TAPSMITH_TELEMETRY_SESSION).toBe(first);
+  });
+});
+
+describe('ensureIdentity shares one id across a first-ever parallel run (PILOT-330 review)', () => {
+  it('the parent persists an id that forked workers then read, instead of each minting its own', async () => {
+    // Parent (CLI/MCP) pre-creates the id before forking.
+    make().ensureIdentity({});
+    const id = JSON.parse(fs.readFileSync(stateFile, 'utf-8')).anonymousId;
+    expect(id).toMatch(/^[0-9a-f-]{36}$/);
+
+    // Two "workers" (separate instances) both read that one id.
+    const w1 = fakeFetch();
+    const w2 = fakeFetch();
+    const a = make({ fetchFn: w1.fn });
+    const b = make({ fetchFn: w2.fn });
+    a.recordRun({}, RUN);
+    b.recordRun({}, RUN);
+    await Promise.all([a.flush(), b.flush()]);
+    expect(w1.calls.every((c) => c.body.distinct_id === id)).toBe(true);
+    expect(w2.calls.every((c) => c.body.distinct_id === id)).toBe(true);
+  });
+
+  it('mints nothing when telemetry is disabled', () => {
+    make({ env: { TAPSMITH_TELEMETRY: '0' } }).ensureIdentity({});
+    expect(fs.existsSync(stateFile)).toBe(false);
+    make().ensureIdentity({ telemetry: false });
+    expect(fs.existsSync(stateFile)).toBe(false);
+  });
+});
+
+describe('first-run notice visibility (PILOT-330 review)', () => {
+  it('prints but does not persist "shown" when the notice cannot reach a person', () => {
+    const notices: string[] = [];
+    // e.g. an MCP server whose stderr is the host's log file.
+    const hidden = make({ notices, noticeVisible: false });
+    expect(hidden.printNoticeIfFirstRun({})).toBe(true);
+    expect(notices).toEqual([telemetryNoticeText()]);
+    // Not burned: a later interactive run still gets to print it.
+    expect(fs.existsSync(stateFile)).toBe(false);
+    const visible = make({ notices, noticeVisible: true });
+    expect(visible.printNoticeIfFirstRun({})).toBe(true);
+    expect(notices).toHaveLength(2);
+  });
+
+  it('never throws when the notice sink is broken', () => {
+    const t = new Telemetry({
+      stateFile,
+      env: {},
+      fetchFn: fakeFetch().fn,
+      apiKey: 'phc_test',
+      noticeVisible: true,
+      writeNotice: () => { throw new Error('EBADF'); },
+    });
+    expect(() => t.printNoticeIfFirstRun({})).not.toThrow();
+    expect(t.printNoticeIfFirstRun({})).toBe(false);
   });
 });

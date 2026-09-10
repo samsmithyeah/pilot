@@ -272,7 +272,13 @@ async function runFileWithRecovery(
   throw new Error(`Worker ${workerId}: exhausted recovery attempts for ${path.basename(filePath)}`);
 }
 
+let shuttingDown = false;
 function handleShutdown(): void {
+  // Exit is now deferred behind the telemetry flush, so a second `shutdown`
+  // (or any queued message) could re-enter and tear the same sessions down
+  // twice. Guard it (PILOT-330 review).
+  if (shuttingDown) return;
+  shuttingDown = true;
   for (const s of sessions) closeDeviceSession(s);
   // Bounded wait for the last file's telemetry event (PILOT-330).
   void telemetry.flush().finally(() => process.exit(0));

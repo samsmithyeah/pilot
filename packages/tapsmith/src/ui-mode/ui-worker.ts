@@ -454,7 +454,13 @@ async function recoverFileSession(filePath: string, err: unknown): Promise<void>
 
 // ─── Shutdown ───
 
+let shuttingDown = false;
 function handleShutdown(): void {
+  // Exit is deferred behind the telemetry flush, so a worker recycle that
+  // sends a second `shutdown` in that window must not tear the same sessions
+  // down twice (PILOT-330 review).
+  if (shuttingDown) return;
+  shuttingDown = true;
   for (const s of sessions) closeDeviceSession(s);
   // Bounded wait for the last file's telemetry event (PILOT-330).
   void telemetry.flush().finally(() => process.exit(0));

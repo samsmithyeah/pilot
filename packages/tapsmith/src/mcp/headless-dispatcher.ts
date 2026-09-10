@@ -630,6 +630,10 @@ export class HeadlessTestDispatcher implements TestDispatcher {
     // The MCP server's stderr is the user's terminal (stdout is the protocol
     // stream); this is the last user-facing point before a child runs a file.
     telemetry.printNoticeIfFirstRun(config ?? undefined);
+    // Persist the anonymous id in this parent before it forks per-file run
+    // children, so they share one id rather than each minting its own on a
+    // fresh machine (PILOT-330 review).
+    telemetry.ensureIdentity(config ?? undefined);
 
     if (config) {
       try {

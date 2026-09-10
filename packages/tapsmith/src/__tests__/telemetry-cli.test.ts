@@ -90,6 +90,27 @@ describe('tapsmith telemetry status', () => {
     expect(h.text()).toContain('dry-run mode');
   });
 
+  it('flags a present-but-unreadable config instead of silently reporting enabled (PILOT-330 review)', async () => {
+    // A tapsmith.config in the cwd that loadConfig could not import returns
+    // defaults with no path; status must say the config was not consulted.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tapsmith-cli-cwd-'));
+    fs.writeFileSync(path.join(dir, 'tapsmith.config.mjs'), 'throw new Error("boom")\n');
+    const cwd = process.cwd();
+    process.chdir(dir);
+    try {
+      // loadConfig here stands in for the swallowed import failure: defaults, no path.
+      const h = harness({ config: defineConfig() });
+      expect(await h.run(['status'])).toBe(0);
+      expect(h.text()).toContain('could not be read here');
+      h.out.length = 0;
+      expect(await h.run(['status', '--json'])).toBe(0);
+      expect(JSON.parse(h.text())).toMatchObject({ configConsulted: false });
+    } finally {
+      process.chdir(cwd);
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('--json emits the status object for scripting', async () => {
     const h = harness({ env: { DO_NOT_TRACK: '1' } });
     expect(await h.run(['status', '--json'])).toBe(0);
@@ -131,10 +152,28 @@ describe('tapsmith telemetry enable / disable', () => {
     expect(h.text()).toContain('Still off here: TAPSMITH_TELEMETRY or DO_NOT_TRACK is set');
   });
 
-  it('--json works on enable/disable too', async () => {
+  it('enable warns when the project config still keeps it off (PILOT-330 review)', async () => {
+    // Regression: `enable` used to compute status with no config, so this
+    // caveat was dead code and the command reported enabled:true.
+    const h = harness({ config: defineConfig({ telemetry: false }) });
+    expect(await h.run(['enable'])).toBe(0);
+    expect(h.text()).toContain('Still off here: the project config sets telemetry: false');
+  });
+
+  it('--json works on enable/disable too, with the same shape as status', async () => {
     const h = harness();
     expect(await h.run(['disable', '--json'])).toBe(0);
-    expect(JSON.parse(h.text())).toMatchObject({ enabled: false, reason: 'machine' });
+    const parsed = JSON.parse(h.text());
+    expect(parsed).toMatchObject({ enabled: false, reason: 'machine' });
+    // Same keys as `status --json` (PILOT-330 review).
+    expect(parsed).toHaveProperty('configPath');
+    expect(parsed).toHaveProperty('configConsulted', true);
+  });
+
+  it('enable --json reflects a config opt-out instead of claiming enabled (PILOT-330 review)', async () => {
+    const h = harness({ config: defineConfig({ telemetry: false }) });
+    expect(await h.run(['enable', '--json'])).toBe(0);
+    expect(JSON.parse(h.text())).toMatchObject({ enabled: false, reason: 'config' });
   });
 
   it('fails clearly when the state file cannot be written', async () => {

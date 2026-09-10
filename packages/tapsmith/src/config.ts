@@ -814,7 +814,7 @@ function resolveRootDir(raw: Partial<TapsmithConfig>, root: string): string {
   return rawHasExplicitRootDir(raw) && raw.rootDir ? path.resolve(root, raw.rootDir) : root;
 }
 
-const CONFIG_CANDIDATES = ['tapsmith.config.ts', 'tapsmith.config.js', 'tapsmith.config.mjs'];
+export const CONFIG_CANDIDATES = ['tapsmith.config.ts', 'tapsmith.config.js', 'tapsmith.config.mjs'];
 
 /**
  * The config file `loadConfig(dir, configFile)` would read, or undefined when
@@ -873,21 +873,28 @@ export async function loadConfig(dir?: string, configFile?: string): Promise<Tap
   for (const name of CONFIG_CANDIDATES) {
     const configPath = path.resolve(root, name);
     if (fs.existsSync(configPath)) {
+      let mod: Record<string, unknown>;
       try {
         // For .ts files we rely on tsx / ts-node being available at runtime.
-        const mod = await import(configPath);
-        const original: Partial<TapsmithConfig> = mod.default ?? mod;
-        const raw = omitUndefined(original);
-        const merged = applyConfigDefaults(
-          { ...DEFAULT_CONFIG, ...raw, rootDir: resolveRootDir(original, root) },
-          raw,
-        );
-        withExplicitRootDir(merged, rawHasExplicitRootDir(original));
-        withConfigPath(merged, configPath);
-        return withExplicitWorkers(merged, rawHasExplicitWorkers(original));
+        // Only the import is tolerated-and-skipped: a config that cannot be
+        // read falls through to the next candidate. Validation errors from
+        // applyConfigDefaults below must PROPAGATE — silently discarding a
+        // whole config because one key is malformed would, for `telemetry`,
+        // turn an opt-out into a run that reports (PILOT-330 review).
+        mod = await import(configPath);
       } catch (err) {
         console.warn(`Warning: failed to load ${configPath}: ${err}`);
+        continue;
       }
+      const original: Partial<TapsmithConfig> = (mod.default as Partial<TapsmithConfig>) ?? mod;
+      const raw = omitUndefined(original);
+      const merged = applyConfigDefaults(
+        { ...DEFAULT_CONFIG, ...raw, rootDir: resolveRootDir(original, root) },
+        raw,
+      );
+      withExplicitRootDir(merged, rawHasExplicitRootDir(original));
+      withConfigPath(merged, configPath);
+      return withExplicitWorkers(merged, rawHasExplicitWorkers(original));
     }
   }
 

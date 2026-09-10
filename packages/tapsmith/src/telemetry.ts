@@ -96,11 +96,22 @@ export interface TelemetryProperties {
 }
 
 interface TelemetryState {
-  anonymousId: string;
+  /**
+   * Random per-machine id. Optional: it is minted only when something is
+   * actually sent, so `tapsmith telemetry disable` on a fresh machine can
+   * persist the switch below without creating an identifier (PILOT-330 review).
+   */
+  anonymousId?: string;
   createdAt: string;
   noticeShown: boolean;
   /** Machine-wide switch set by `tapsmith telemetry enable|disable`. Absent means on. */
   enabled?: boolean;
+  /**
+   * Set once the `install` event has been accepted (HTTP 2xx). Until then any
+   * later process resends it, so a first run that exits before the install
+   * lands is not lost forever.
+   */
+  installReported?: boolean;
 }
 
 export interface TelemetryOptions {
@@ -113,8 +124,21 @@ export interface TelemetryOptions {
   sdkVersion?: string;
   /** PostHog project token. Default: the Tapsmith project's. Empty disables sending (dry runs still print). */
   apiKey?: string;
+  /**
+   * Groups every event of one Tapsmith invocation. Default:
+   * `TAPSMITH_TELEMETRY_SESSION` (set once by the CLI/MCP entry point and
+   * inherited by every forked child), else a fresh id. See {@link ensureSessionEnv}.
+   */
+  sessionId?: string;
   /** Where the first-run notice is written. Default: stderr. */
   writeNotice?: (text: string) => void;
+  /**
+   * Whether the notice actually reaches a person: only then is it marked
+   * shown. Default: stderr is a TTY, or this is CI (whose log is read). An
+   * MCP server whose stderr is the host's log file leaves the flag unset so a
+   * later interactive run still prints it. Test seam.
+   */
+  noticeVisible?: boolean;
   /** Where `TAPSMITH_TELEMETRY_DEBUG` dry-run payloads are written. Default: stderr. */
   writeDebug?: (text: string) => void;
 }
@@ -198,6 +222,20 @@ function isDebug(env: NodeJS.ProcessEnv): boolean {
   return flag !== undefined && flag !== '' && !FALSEY.has(flag);
 }
 
+/** Environment variable carrying the shared session id across forked children. */
+export const SESSION_ENV = 'TAPSMITH_TELEMETRY_SESSION';
+
+/**
+ * Stamp a single session id into the environment, once, at the top-level
+ * entry point (the CLI's `main`, the MCP server). Every child it forks — the
+ * tsx re-exec, parallel workers, UI workers, watch/MCP run children —
+ * inherits it through `process.env`, so all their per-file events share one
+ * id and a "count distinct sessions" query means "count invocations". Idempotent.
+ */
+export function ensureSessionEnv(env: NodeJS.ProcessEnv = process.env): void {
+  if (!env[SESSION_ENV]) env[SESSION_ENV] = randomUUID();
+}
+
 // ─── Client ───
 
 export class Telemetry {
@@ -207,10 +245,15 @@ export class Telemetry {
   private readonly _fetch: typeof fetch;
   private readonly _writeNotice: (text: string) => void;
   private readonly _writeDebug: (text: string) => void;
-  private readonly _sessionId = randomUUID();
   private readonly _apiKey: string;
+  private readonly _noticeVisible: boolean;
+  private _sessionId: string | undefined;
   private _sdkVersion: string | undefined;
   private _state: TelemetryState | undefined;
+  /** True once an id has been read from, or written to, disk this process. */
+  private _idPersisted = false;
+  /** True once this process has already sent (or skipped) its install event. */
+  private _installAttempted = false;
   private readonly _pending = new Set<Promise<void>>();
   private _consecutiveFailures = 0;
 
@@ -221,8 +264,18 @@ export class Telemetry {
     this._fetch = opts.fetchFn ?? ((input, init) => fetch(input, init));
     this._sdkVersion = opts.sdkVersion;
     this._apiKey = opts.apiKey ?? POSTHOG_PROJECT_KEY;
+    this._sessionId = opts.sessionId;
+    this._noticeVisible = opts.noticeVisible ?? (!!process.stderr.isTTY || isCI(this._env));
     this._writeNotice = opts.writeNotice ?? ((text) => process.stderr.write(text));
     this._writeDebug = opts.writeDebug ?? ((text) => process.stderr.write(text));
+  }
+
+  /**
+   * The session id, resolved lazily so a `TAPSMITH_TELEMETRY_SESSION` the
+   * entry point sets after this singleton is constructed is still honoured.
+   */
+  private sessionId(): string {
+    return this._sessionId ?? (this._sessionId = this._env[SESSION_ENV] || randomUUID());
   }
 
   /**
@@ -259,8 +312,10 @@ export class Telemetry {
    * that opts back in has already been counted or never will be.
    */
   setMachineEnabled(enabled: boolean): boolean {
+    // No `anonymousId` here: disabling before the first run must not mint an
+    // identifier (PILOT-330 review). One is created only when something sends.
     const current = this._peekState()
-      ?? { anonymousId: randomUUID(), createdAt: new Date().toISOString(), noticeShown: false };
+      ?? { createdAt: new Date().toISOString(), noticeShown: false };
     // Someone who ran `enable` by hand has read the docs; the notice would
     // only repeat them.
     return this._saveState({ ...current, enabled, noticeShown: current.noticeShown || enabled });
@@ -273,12 +328,21 @@ export class Telemetry {
    * stderr may be captured or interleaved. Returns true when it printed.
    */
   printNoticeIfFirstRun(config: Pick<TapsmithConfig, 'telemetry'> | undefined): boolean {
-    if (!this.isEnabled(config)) return false;
-    const state = this._loadState();
-    if (state.noticeShown) return false;
-    this._writeNotice(telemetryNoticeText());
-    this._saveState({ ...state, noticeShown: true });
-    return true;
+    try {
+      if (!this.isEnabled(config)) return false;
+      const state = this._peekState() ?? { createdAt: new Date().toISOString(), noticeShown: false };
+      if (state.noticeShown) return false;
+      this._writeNotice(telemetryNoticeText());
+      // Only burn the once-per-machine flag when the notice actually reached a
+      // person. An MCP server whose stderr is the host's log leaves it unset,
+      // so a later interactive run still gets its turn (PILOT-330 review).
+      if (this._noticeVisible) this._saveState({ ...state, noticeShown: true });
+      return true;
+    } catch {
+      // A closed/broken stderr must not turn the notice into an uncaught
+      // exception on the CLI or MCP critical path. Telemetry never surfaces.
+      return false;
+    }
   }
 
   /**
@@ -288,6 +352,7 @@ export class Telemetry {
   recordRun(config: Pick<TapsmithConfig, 'telemetry'> | undefined, run: TelemetryRunEvent): void {
     if (!this.isEnabled(config)) return;
     try {
+      this._maybeSendInstall();
       this._send(this._payload('run', run));
     } catch {
       // Telemetry never surfaces.
@@ -323,7 +388,7 @@ export class Telemetry {
   private _payload(event: 'install' | 'run', run?: TelemetryRunEvent): TelemetryPayload {
     const sdkVersion = this._sdkVersion ?? (this._sdkVersion = readSdkVersion());
     const properties: TelemetryProperties = {
-      session_id: this._sessionId,
+      session_id: this.sessionId(),
       sdk_version: sdkVersion,
       node_version: process.version,
       os: process.platform,
@@ -347,13 +412,13 @@ export class Telemetry {
     return {
       api_key: this._apiKey,
       event: event === 'run' ? 'tapsmith run' : 'tapsmith install',
-      distinct_id: this._loadState().anonymousId,
+      distinct_id: this._ensureId(),
       timestamp: new Date().toISOString(),
       properties,
     };
   }
 
-  private _send(payload: TelemetryPayload): void {
+  private _send(payload: TelemetryPayload, onOk?: () => void): void {
     if (isDebug(this._env)) {
       // Dry run: show exactly what would have gone over the wire, send nothing.
       this._writeDebug(`[telemetry] ${JSON.stringify(payload)}\n`);
@@ -371,8 +436,12 @@ export class Telemetry {
           body: JSON.stringify(payload),
           signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
         });
-        if (res.ok) this._consecutiveFailures = 0;
-        else this._consecutiveFailures++;
+        if (res.ok) {
+          this._consecutiveFailures = 0;
+          try { onOk?.(); } catch { /* never surface */ }
+        } else {
+          this._consecutiveFailures++;
+        }
         // Drain so the connection can be reused/closed promptly.
         await res.arrayBuffer().catch(() => undefined);
       } catch {
@@ -384,34 +453,85 @@ export class Telemetry {
   }
 
   /**
-   * Load (or create) the persisted state. A fresh file means a new machine
-   * or a wiped home directory: that is the `install` we count. Any read or
-   * write failure degrades to an in-memory id for this process only.
+   * Send the one-off `install` event unless it has already been acknowledged.
+   * The `installReported` flag is persisted only on a 2xx, so a first run that
+   * exits before the install lands leaves it unset and the next process
+   * resends — installs are not lost to an early exit (PILOT-330 review).
    */
-  private _loadState(): TelemetryState {
-    const existing = this._peekState();
-    if (existing) return existing;
-    const fresh: TelemetryState = { anonymousId: randomUUID(), createdAt: new Date().toISOString(), noticeShown: false };
-    // `_saveState` records `fresh` as the current state whether or not the
-    // write lands, so `_payload` below sees the id without re-reading.
-    const persisted = this._saveState(fresh);
-    // Only a persisted id is an install: an ephemeral one would count the
-    // same machine again on every process.
-    if (persisted) {
-      try {
-        this._send(this._payload('install'));
-      } catch {
-        // Telemetry never surfaces.
-      }
+  private _maybeSendInstall(): void {
+    if (this._installAttempted) return;
+    const state = this._ensureIdState();
+    if (state.installReported) {
+      this._installAttempted = true;
+      return;
     }
-    return fresh;
+    // If the id could not be persisted (read-only home), `installReported`
+    // can never stick, so sending would re-fire the install on every future
+    // process. Skip it and let a writable machine be the one that counts. In
+    // a dry run the id is intentionally unpersisted but we still want the
+    // install printed, so debug bypasses this gate.
+    if (!this._idPersisted && !isDebug(this._env)) return;
+    this._installAttempted = true;
+    this._send(this._payload('install'), () => {
+      const current = this._peekState() ?? state;
+      this._saveState({ ...current, installReported: true });
+    });
+  }
+
+  /**
+   * The persisted state, guaranteeing an `anonymousId`. Minting one is the
+   * first thing that ever writes an identifier to disk, so nothing that only
+   * reads (status, the notice) creates it.
+   */
+  private _ensureIdState(): TelemetryState {
+    const existing = this._peekState();
+    if (existing?.anonymousId) return existing;
+    const next: TelemetryState = {
+      createdAt: new Date().toISOString(),
+      noticeShown: false,
+      ...existing,
+      anonymousId: randomUUID(),
+    };
+    if (isDebug(this._env)) {
+      // A dry run must not touch the disk: keep the id in memory for this
+      // process only, so `TAPSMITH_TELEMETRY_DEBUG=1` leaves no identifier
+      // behind (PILOT-330 review).
+      this._state = next;
+      this._idPersisted = false;
+      return next;
+    }
+    // Best effort: `_saveState` caches `next` in memory even if the write
+    // fails, so this process keeps one stable id either way. Whether it
+    // reached disk decides if an `install` can be reliably marked reported.
+    this._idPersisted = this._saveState(next);
+    return next;
+  }
+
+  /**
+   * Mint and persist the anonymous id in the top-level process before it
+   * forks per-file workers, so every worker of a first-ever run reads one
+   * shared id from disk instead of each minting its own (PILOT-330 review).
+   * No-op when telemetry is off, so it never creates an id for an opted-out
+   * machine. Never throws.
+   */
+  ensureIdentity(config: Pick<TapsmithConfig, 'telemetry'> | undefined): void {
+    if (!this.isEnabled(config)) return;
+    try { this._ensureIdState(); } catch { /* Telemetry never surfaces. */ }
+  }
+
+  private _ensureId(): string {
+    return this._ensureIdState().anonymousId!;
   }
 
   /** The persisted state if there is one — no file is created, nothing is sent. */
   private _peekState(): TelemetryState | undefined {
     if (this._state) return this._state;
     const existing = readState(this._stateFile);
-    if (existing) this._state = existing;
+    if (existing) {
+      this._state = existing;
+      // A state read from disk carrying an id is, by definition, persisted.
+      if (existing.anonymousId) this._idPersisted = true;
+    }
     return existing;
   }
 
@@ -432,13 +552,20 @@ export class Telemetry {
 
 function readState(file: string): TelemetryState | undefined {
   try {
-    const raw = JSON.parse(fs.readFileSync(file, 'utf-8')) as Partial<TelemetryState>;
-    if (typeof raw.anonymousId !== 'string' || raw.anonymousId.length === 0) return undefined;
+    const raw = JSON.parse(fs.readFileSync(file, 'utf-8')) as Partial<TelemetryState> | null;
+    if (raw === null || typeof raw !== 'object') return undefined;
+    const hasId = typeof raw.anonymousId === 'string' && raw.anonymousId.length > 0;
+    // A file carrying no usable signal at all — no id, no machine switch, no
+    // notice flag — is torn or empty; treat it as absent so a fresh id is
+    // minted. A file with only the switch (a `disable` before any run) or only
+    // the notice flag is legitimate and kept.
+    if (!hasId && typeof raw.enabled !== 'boolean' && raw.noticeShown !== true) return undefined;
     return {
-      anonymousId: raw.anonymousId,
+      ...(hasId ? { anonymousId: raw.anonymousId } : {}),
       createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : new Date().toISOString(),
       noticeShown: raw.noticeShown === true,
       ...(typeof raw.enabled === 'boolean' ? { enabled: raw.enabled } : {}),
+      ...(raw.installReported === true ? { installReported: true } : {}),
     };
   } catch {
     return undefined;

@@ -52,6 +52,7 @@ import { runInAttemptContext, type AttemptToken } from './attempt-fence.js';
 import { matchesTestFilter } from './test-filter.js';
 import { startLiveNetwork } from './trace/live-network.js';
 import { telemetry, runEventFromResults, type RunMode } from './telemetry.js';
+import { isRecoverableInfrastructureError } from './worker-protocol.js';
 import { filterEntriesByHosts } from './trace/filter-hosts.js';
 
 // ─── Trace Device Info ───
@@ -2800,8 +2801,21 @@ export async function runTestFile(
 function reportRunTelemetry(opts: RunOptions, suite: SuiteResult, durationMs: number): void {
   if (opts.devices.length === 0) return;
   try {
+    const results = collectResults(suite);
+    // Don't count an attempt that will be RETRIED because of a recoverable
+    // infrastructure failure (agent disconnect, gRPC unavailable): reporting
+    // the discarded attempt would emit a second event and inflate `failed` on
+    // exactly the infra-flaky files (PILOT-330 review). Only the retry-capable
+    // paths set `abortFileOnError` (the CLI, parallel workers, and UI workers,
+    // which loop on `isRecoverableInfrastructureError`); watch and MCP run a
+    // file exactly once with in-place recovery, so their single infra-degraded
+    // run is the real outcome and must still be counted (PILOT-330 review 2).
+    if (opts.abortFileOnError
+      && results.some((r) => r.status === 'failed' && isRecoverableInfrastructureError(r.error))) {
+      return;
+    }
     telemetry.recordRun(opts.config, runEventFromResults(
-      collectResults(suite),
+      results,
       { mode: opts.runMode, platform: resolvePlatformFixture(opts.config), devices: opts.devices.length },
       durationMs,
     ));

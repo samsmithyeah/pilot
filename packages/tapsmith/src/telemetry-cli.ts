@@ -8,8 +8,9 @@
  */
 
 import * as os from 'node:os';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { loadConfig, configPathOf, type TapsmithConfig } from './config.js';
+import { loadConfig, configPathOf, CONFIG_CANDIDATES, type TapsmithConfig } from './config.js';
 import { telemetry as defaultTelemetry, TELEMETRY_DOCS_URL, type Telemetry, type TelemetryStatus } from './telemetry.js';
 
 export interface TelemetryCommandDeps {
@@ -65,7 +66,62 @@ function tilde(file: string): string {
   return home && file.startsWith(home + path.sep) ? `~${file.slice(home.length)}` : file;
 }
 
-function describe(status: TelemetryStatus, configPath: string | undefined, configError: string | undefined): string {
+/** Everything the config load told us, shared by every subcommand. */
+interface ConfigView {
+  status: TelemetryStatus;
+  configPath: string | undefined;
+  /** Set when loading the config threw (an explicit `-c` file, or a validation error). */
+  configError: string | undefined;
+  /** A config file is present in the cwd but was not consulted (import failed, swallowed). */
+  configPresentButUnread: boolean;
+}
+
+/**
+ * Load the project config best-effort and fold it into the telemetry status.
+ * Every subcommand goes through this so `enable`/`disable` account for a
+ * `telemetry: false` config exactly as `status` does (PILOT-330 review).
+ */
+async function resolveConfigView(
+  telemetry: Telemetry,
+  load: (configFile?: string) => Promise<TapsmithConfig>,
+  configFile: string | undefined,
+): Promise<ConfigView> {
+  let config: TapsmithConfig | undefined;
+  let configError: string | undefined;
+  try {
+    config = await load(configFile);
+  } catch (err) {
+    configError = err instanceof Error ? err.message : String(err);
+  }
+  const configPath = config ? configPathOf(config) : undefined;
+  // Discovery returns defaults (no path) both when nothing exists and when a
+  // present file failed to import; only the latter is a caveat worth naming.
+  const configPresentButUnread = !configError && !configPath && !configFile
+    && CONFIG_CANDIDATES.some((name) => fs.existsSync(path.resolve(process.cwd(), name)));
+  return { status: telemetry.status(config), configPath, configError, configPresentButUnread };
+}
+
+function configNote(view: ConfigView): string | undefined {
+  if (view.configError) {
+    return `the config could not be loaded (${view.configError}); its \`telemetry\` key was not consulted`;
+  }
+  if (view.configPresentButUnread) {
+    return 'a tapsmith config file is present but could not be read here; its `telemetry` key was not consulted';
+  }
+  return undefined;
+}
+
+function jsonPayload(view: ConfigView): Record<string, unknown> {
+  return {
+    ...view.status,
+    configPath: view.configPath ?? null,
+    configConsulted: !configNote(view),
+    docs: TELEMETRY_DOCS_URL,
+  };
+}
+
+function describe(view: ConfigView): string {
+  const { status } = view;
   const lines: string[] = [];
   if (status.enabled) {
     lines.push(status.debug
@@ -79,12 +135,13 @@ function describe(status: TelemetryStatus, configPath: string | undefined, confi
     const why = status.reason === 'env'
       ? 'TAPSMITH_TELEMETRY or DO_NOT_TRACK is set in this environment'
       : status.reason === 'config'
-        ? `telemetry: false in ${configPath ?? 'the config'}`
+        ? `telemetry: false in ${view.configPath ?? 'the config'}`
         : `machine-wide, via \`tapsmith telemetry disable\` (${tilde(status.stateFile)})`;
     lines.push(`Telemetry is disabled (${why}).`);
     if (status.reason === 'machine') lines.push('  Re-enable: tapsmith telemetry enable');
   }
-  if (configError) lines.push(`  Note: the config could not be loaded (${configError}); its \`telemetry\` key was not consulted.`);
+  const note = configNote(view);
+  if (note) lines.push(`  Note: ${note}.`);
   lines.push(`  Docs: ${TELEMETRY_DOCS_URL}`);
   return lines.join('\n') + '\n';
 }
@@ -109,43 +166,37 @@ export async function runTelemetryCommand(argv: string[], deps: TelemetryCommand
   if (args.subcommand === 'enable' || args.subcommand === 'disable') {
     const enabling = args.subcommand === 'enable';
     if (!telemetry.setMachineEnabled(enabling)) {
-      const status = telemetry.status(undefined);
-      stderr(`Could not write ${tilde(status.stateFile)}. `
+      const stateFile = telemetry.status(undefined).stateFile;
+      stderr(`Could not write ${tilde(stateFile)}. `
         + (enabling ? 'Telemetry stays as it was.\n' : 'Set TAPSMITH_TELEMETRY=0 in your shell instead.\n'));
       return 1;
     }
-    const status = telemetry.status(undefined);
+    // Fold the project config in, so `enable` under `telemetry: false` reports
+    // the truth and the JSON shape matches `status` (PILOT-330 review).
+    const view = await resolveConfigView(telemetry, load, args.configFile);
     if (args.json) {
-      stdout(JSON.stringify({ ...status, docs: TELEMETRY_DOCS_URL }, null, 2) + '\n');
+      stdout(JSON.stringify(jsonPayload(view), null, 2) + '\n');
       return 0;
     }
     if (enabling) {
-      stdout(`Telemetry enabled for this machine (${tilde(status.stateFile)}).\n`);
-      if (!status.enabled) {
-        stdout(`  Still off here: ${status.reason === 'env'
+      stdout(`Telemetry enabled for this machine (${tilde(view.status.stateFile)}).\n`);
+      if (!view.status.enabled) {
+        stdout(`  Still off here: ${view.status.reason === 'env'
           ? 'TAPSMITH_TELEMETRY or DO_NOT_TRACK is set in this environment.'
-          : 'the project config sets telemetry: false.'}\n`);
+          : `the project config sets telemetry: false${view.configPath ? ` in ${view.configPath}` : ''}.`}\n`);
       }
     } else {
-      stdout(`Telemetry disabled for this machine (${tilde(status.stateFile)}). Re-enable with \`tapsmith telemetry enable\`.\n`);
+      stdout(`Telemetry disabled for this machine (${tilde(view.status.stateFile)}). Re-enable with \`tapsmith telemetry enable\`.\n`);
     }
     return 0;
   }
 
   // status (the default)
-  let config: TapsmithConfig | undefined;
-  let configError: string | undefined;
-  try {
-    config = await load(args.configFile);
-  } catch (err) {
-    configError = err instanceof Error ? err.message : String(err);
-  }
-  const status = telemetry.status(config);
-  const configPath = config ? configPathOf(config) : undefined;
+  const view = await resolveConfigView(telemetry, load, args.configFile);
   if (args.json) {
-    stdout(JSON.stringify({ ...status, configPath: configPath ?? null, docs: TELEMETRY_DOCS_URL }, null, 2) + '\n');
+    stdout(JSON.stringify(jsonPayload(view), null, 2) + '\n');
   } else {
-    stdout(describe(status, configPath, configError));
+    stdout(describe(view));
   }
   return 0;
 }
