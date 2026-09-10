@@ -869,7 +869,9 @@ for (const item of items) {
 
 The returned handles carry the snapshot they were resolved from, so reading and acting on the batch
 does not re-query the device for every element: `find()`, `getText()`, `isEnabled()`, `isChecked()`,
-`isEditable()`, `inputValue()` and actions address the element captured by `all()`. Checks of
+`isEditable()`, `inputValue()`, `boundingBox()` and actions address the element captured by `all()`
+(so after an action that moves the list, `items[i].boundingBox()` still reports the captured
+coordinates). Checks of
 *current* state re-query the device by index instead — `expect(items[i])` assertions,
 `waitFor()`, `isVisible()` and `isHidden()` — so they reflect what is on screen now, like Playwright's
 snapshot-free `all()`. If the list changes between `all()` and the check (an item is removed, say), the
@@ -1129,7 +1131,8 @@ Strict mode still applies: a selector that matches more than one element throws 
 `StrictModeViolationError`. On a settled screen a call takes as long as one hierarchy read on the
 device (it never polls for the element). Infrastructure problems are never reported as a visibility answer: an agent
 that does not respond within the read throws at once, and a momentary agent fault is retried for up to
-a couple of seconds (capped by the handle's timeout) and then thrown. A stale mid-re-render snapshot
+a couple of seconds (capped by the handle's timeout; a fault that is slow to fail is bounded by that
+window too) and then thrown. A stale mid-re-render snapshot
 just means the screen is busy, so — like `find()` and `waitFor()` — it is re-read until the handle's
 timeout; if the hierarchy never settles (a screen that never stops animating) the call costs the full
 timeout and then throws a descriptive error, pointing at `expect(locator).toBeVisible()` /
@@ -1153,10 +1156,15 @@ than one element throws a `StrictModeViolationError`, whereas `not.toBeVisible()
 elements (say, two "Loading…" spinners), use those, or narrow with `.first()`/`.filter()`.
 
 ```typescript
-if (await device.getByText("Loading…").isHidden()) {
-  // content is ready
+// Presence branch: dismiss a banner only if one is showing
+if (!(await device.getByRole("button", { name: "Dismiss" }).isHidden())) {
+  await device.getByRole("button", { name: "Dismiss" }).tap();
 }
 ```
+
+Do not use `isHidden()` to wait for a spinner or animation to finish: an animating screen is exactly
+what produces stale snapshots, so the probe would have to keep re-reading and, if the animation never
+stops, throws. `await expect(device.getByText("Loading…")).not.toBeVisible()` is the tool for that.
 
 #### `elementHandle.isEnabled(): Promise<boolean>`
 
@@ -2729,7 +2737,7 @@ Close the WebView connection. Usually called via `device.native()` instead.
 
 Lazy reference to an element within a WebView, created by `webview.locator()` or the `webview.getBy*` methods. Supports actions and assertions.
 
-**Actions & queries (strict):** `click()`, `fill(value)`, `textContent()`, `innerHTML()`, `inputValue()`, `getAttribute(name)`, `isVisible()`, `isHidden()` (both single-read, no auto-wait, as on `ElementHandle`)
+**Actions & queries (strict):** `click()`, `fill(value)`, `textContent()`, `innerHTML()`, `inputValue()`, `getAttribute(name)`, `isVisible()`, `isHidden()` (both a single DOM read with no auto-wait — the same non-waiting contract as on `ElementHandle`, minus the native probe's stale-snapshot re-reads, which a DOM query does not need)
 
 **Narrowing & multi-element (strict-mode exempt):**
 

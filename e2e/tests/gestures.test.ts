@@ -98,14 +98,16 @@ describe("Gestures screen", () => {
   // element answers at once instead of spending the action timeout (30s) and
   // throwing. The value assertions catch a regression to the pre-fix throw;
   // the wall-clock bound catches a regression to a silent poll-to-deadline
-  // (which would still return the right values, 60s later). Two reads on a
-  // settled screen take well under a second even on a starved CI emulator, so
-  // 15s is generous headroom while still a quarter of a poll-to-deadline.
+  // (which would still return the right values, 30s per call later). The
+  // bound sits just under ONE default timeout: a single hierarchy read on a
+  // cold software-GPU CI shard can take several seconds, and each probe's
+  // first read is allowed the full timeout, so a tighter bound would flag a
+  // slow shard as a regression in the code under test.
   test("isVisible/isHidden answer for an absent element without waiting", async ({ device }) => {
     const absent = device.getByText("Definitely not on this screen", { exact: true })
     const start = Date.now()
     expect(await absent.isVisible()).toBe(false)
     expect(await absent.isHidden()).toBe(true)
-    expect(Date.now() - start).toBeLessThan(15_000)
+    expect(Date.now() - start).toBeLessThan(25_000)
   })
 })

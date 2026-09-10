@@ -248,6 +248,14 @@ describe('WebView strict mode (PILOT-227)', () => {
       expect(await handle.getByText('A').first().isHidden()).toBe(true);
       expect(await handle.getByText('A').last().isHidden()).toBe(false);
     });
+
+    it('both probes are traced under their own names, like every other locator method (review follow-up)', async () => {
+      const { handle } = makeHandle([{ text: 'A', visible: true }]);
+      const traced = vi.spyOn(handle as unknown as { _traced: (action: string) => unknown }, '_traced');
+      await handle.getByText('A').isVisible();
+      await handle.getByText('A').isHidden();
+      expect(traced.mock.calls.map((c) => c[0])).toEqual(['isVisible', 'isHidden']);
+    });
   });
 
   describe('assertions', () => {

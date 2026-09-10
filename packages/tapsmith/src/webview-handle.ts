@@ -753,15 +753,19 @@ export class WebViewHandle {
 
   /** @internal — Single-tick visibility query. Strict: an ambiguous locator
    * (no positional modifier, >1 match) throws instead of silently reporting
-   * the first match's visibility. */
-  async _isVisibleLocator(loc: WebViewLocator): Promise<boolean> {
-    const probe = await this._probeLocator(loc, Math.min(this._timeoutMs, WEB_SOCKET_CONNECT_TIMEOUT_MS));
-    if (loc._nthIndex !== undefined) {
-      const idx = normalizeNthIndex(loc._nthIndex, probe.count);
-      return idx >= 0 && idx < probe.count && probe.targetVisible;
-    }
-    if (probe.count > 1) throw buildWebViewStrictError(loc, probe);
-    return probe.count === 1 && probe.targetVisible;
+   * the first match's visibility. Traced under the calling probe's name
+   * (`isVisible`/`isHidden`) like every other locator method, so the probe
+   * shows up as its own row in a trace rather than leaving a gap. */
+  async _isVisibleLocator(loc: WebViewLocator, action: 'isVisible' | 'isHidden' = 'isVisible'): Promise<boolean> {
+    return this._traced(action, loc._selector, async () => {
+      const probe = await this._probeLocator(loc, Math.min(this._timeoutMs, WEB_SOCKET_CONNECT_TIMEOUT_MS));
+      if (loc._nthIndex !== undefined) {
+        const idx = normalizeNthIndex(loc._nthIndex, probe.count);
+        return idx >= 0 && idx < probe.count && probe.targetVisible;
+      }
+      if (probe.count > 1) throw buildWebViewStrictError(loc, probe);
+      return probe.count === 1 && probe.targetVisible;
+    }, loc._finderJs);
   }
 
   /**
