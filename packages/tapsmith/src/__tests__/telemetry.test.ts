@@ -246,6 +246,23 @@ describe('Telemetry.recordRun()', () => {
     expect(t.status({}).endpoint).toBe('https://eu.i.posthog.com/i/v0/e/');
   });
 
+  it('ships with the Tapsmith project token compiled in', async () => {
+    // Without a token every send is a silent no-op, so a release built with
+    // the placeholder would report nothing and nobody would notice.
+    const debug: string[] = [];
+    const t = new Telemetry({
+      stateFile,
+      env: { TAPSMITH_TELEMETRY_DEBUG: '1' },
+      fetchFn: fakeFetch().fn,
+      writeNotice: () => undefined,
+      writeDebug: (text) => debug.push(text),
+    });
+    t.recordRun({}, RUN);
+    await t.flush();
+    const payload = JSON.parse(debug.at(-1)!.slice('[telemetry] '.length)) as TelemetryPayload;
+    expect(payload.api_key).toMatch(/^phc_[A-Za-z0-9]{20,}$/);
+  });
+
   it('reads the endpoint from TAPSMITH_TELEMETRY_ENDPOINT when not given explicitly', async () => {
     const { fn, calls } = fakeFetch();
     const t = new Telemetry({

@@ -142,11 +142,10 @@ export const TELEMETRY_DOCS_URL = 'https://tapsmith.dev/reference/telemetry/';
 const DEFAULT_ENDPOINT = 'https://eu.i.posthog.com/i/v0/e/';
 /**
  * The Tapsmith PostHog project token. Public by design (every PostHog client
- * ships one); it can only write events, never read them. Empty until the
- * project exists — with no key nothing is sent, so a build from source
- * before then is silent rather than erroring.
+ * ships one); it can only write events, never read them. An empty string
+ * turns every send into a silent no-op (tests use the `apiKey` option).
  */
-const POSTHOG_PROJECT_KEY = '';
+const POSTHOG_PROJECT_KEY = 'phc_mgZ8EcfsLqrJKjRRJL2K99cfeDPUjVaqVY78MYNH329B';
 const SEND_TIMEOUT_MS = 3_000;
 /** Stop trying for the rest of the process after this many consecutive failures. */
 const MAX_CONSECUTIVE_FAILURES = 3;
