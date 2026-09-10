@@ -126,6 +126,8 @@ function shouldPrintBannerForCommand(args: CliArgs): boolean {
 
   // Keep protocol and machine-readable surfaces byte-clean.
   if (args.command === 'mcp-server') return false;
+  // A settings switch, not a run: no banner, like `--version`.
+  if (args.command === 'telemetry') return false;
   if (args.command === 'list-devices' && commandArgsInclude(args.command, '--json')) return false;
   if (args.command === 'doctor' && commandArgsInclude(args.command, '--json')) return false;
   if (args.command === 'verify' && commandArgsInclude(args.command, '--json')) return false;
@@ -1328,6 +1330,7 @@ function parseArgs(argv: string[]): CliArgs {
         || arg === 'mcp-server'
         || arg === 'doctor'
         || arg === 'init'
+        || arg === 'telemetry'
       ) {
         break;
       }
@@ -1790,6 +1793,7 @@ ${bold('Usage:')}
   tapsmith verify [--json]           Run one test end-to-end to prove the setup works
   tapsmith doctor [--json] [-c file] Check system health (--json includes fixes + device inventory)
   tapsmith mcp-server [--config file] Run MCP server for LLM/agent integration (stdio transport)
+  tapsmith telemetry [status|enable|disable]  Show or switch anonymous usage telemetry for this machine
   tapsmith --version                 Print version
   tapsmith --help                    Show this help
 
@@ -1985,6 +1989,12 @@ async function main(): Promise<void> {
     const { runDoctor } = await import('./doctor.js');
     const forwardedArgv = forwardedArgs('doctor');
     await runDoctor(forwardedArgv);
+    return;
+  }
+
+  if (args.command === 'telemetry') {
+    const { runTelemetryCommand } = await import('./telemetry-cli.js');
+    process.exitCode = await runTelemetryCommand(forwardedArgs('telemetry'));
     return;
   }
 

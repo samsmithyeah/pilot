@@ -331,10 +331,121 @@ describe('Telemetry.printNoticeIfFirstRun()', () => {
 
   it('says how to opt out and where the details are', () => {
     const text = telemetryNoticeText();
+    expect(text).toContain('tapsmith telemetry disable');
     expect(text).toContain('telemetry: false');
     expect(text).toContain('TAPSMITH_TELEMETRY=0');
     expect(text).toContain(TELEMETRY_DOCS_URL);
     expect(text).toMatch(/never sends test names, selectors, app identifiers, or file paths/);
+  });
+});
+
+describe('machine-wide switch (tapsmith telemetry enable|disable)', () => {
+  it('disable before any run creates no id for sending and sends nothing, ever', async () => {
+    const { fn } = fakeFetch();
+    const t = make({ fetchFn: fn });
+    expect(t.setMachineEnabled(false)).toBe(true);
+    expect(JSON.parse(fs.readFileSync(stateFile, 'utf-8'))).toMatchObject({ enabled: false, noticeShown: false });
+
+    // A fresh process on this machine, as every later run is.
+    const notices: string[] = [];
+    const later = make({ fetchFn: fn, notices });
+    expect(later.isEnabled({})).toBe(false);
+    expect(later.status({})).toMatchObject({ enabled: false, reason: 'machine' });
+    later.recordRun({}, RUN);
+    expect(later.printNoticeIfFirstRun({})).toBe(false);
+    await later.flush();
+    expect(fn).not.toHaveBeenCalled();
+    expect(notices).toEqual([]);
+  });
+
+  it('enable flips it back, keeps the id, and skips the notice', async () => {
+    const first = fakeFetch();
+    const a = make({ fetchFn: first.fn });
+    a.recordRun({}, RUN);
+    await a.flush();
+    const id = first.calls[0].body.anonymousId;
+
+    expect(make().setMachineEnabled(false)).toBe(true);
+    expect(make().isEnabled({})).toBe(false);
+    expect(make().setMachineEnabled(true)).toBe(true);
+
+    const notices: string[] = [];
+    const again = fakeFetch();
+    const b = make({ fetchFn: again.fn, notices });
+    expect(b.isEnabled({})).toBe(true);
+    expect(b.printNoticeIfFirstRun({})).toBe(false);
+    b.recordRun({}, RUN);
+    await b.flush();
+    expect(again.calls.map((c) => c.body.event)).toEqual(['run']);
+    expect(again.calls[0].body.anonymousId).toBe(id);
+    expect(notices).toEqual([]);
+  });
+
+  it('cannot override the env var or the config opt-out', () => {
+    expect(make().setMachineEnabled(true)).toBe(true);
+    expect(make({ env: { TAPSMITH_TELEMETRY: '0' } }).status({})).toMatchObject({ enabled: false, reason: 'env' });
+    expect(make().status({ telemetry: false })).toMatchObject({ enabled: false, reason: 'config' });
+  });
+
+  it('reports false when the state cannot be written', () => {
+    fs.mkdirSync(tempDir, { recursive: true });
+    fs.writeFileSync(path.join(tempDir, 'nested'), 'in the way');
+    expect(make().setMachineEnabled(false)).toBe(false);
+  });
+});
+
+describe('Telemetry.status()', () => {
+  it('names the single deciding reason in precedence order: env, config, machine', () => {
+    make().setMachineEnabled(false);
+    const t = make({ env: { DO_NOT_TRACK: '1' } });
+    expect(t.status({ telemetry: false })).toMatchObject({ enabled: false, reason: 'env' });
+    expect(make().status({ telemetry: false })).toMatchObject({ enabled: false, reason: 'config' });
+    expect(make().status({})).toMatchObject({ enabled: false, reason: 'machine' });
+    make().setMachineEnabled(true);
+    const on = make().status({});
+    expect(on.enabled).toBe(true);
+    expect(on.reason).toBeUndefined();
+  });
+
+  it('exposes the id, state file, endpoint and debug flag without creating anything', () => {
+    const t = make({ env: { TAPSMITH_TELEMETRY_DEBUG: '1' } });
+    const s = t.status({});
+    expect(s).toMatchObject({ enabled: true, debug: true, stateFile, anonymousId: undefined, endpoint: 'https://collector.test/v1/events' });
+    expect(fs.existsSync(stateFile)).toBe(false);
+  });
+});
+
+describe('TAPSMITH_TELEMETRY_DEBUG dry run', () => {
+  it('prints every payload to the debug sink and sends nothing', async () => {
+    const { fn } = fakeFetch();
+    const debug: string[] = [];
+    const t = new Telemetry({
+      stateFile,
+      endpoint: 'https://collector.test/v1/events',
+      env: { TAPSMITH_TELEMETRY_DEBUG: '1' },
+      fetchFn: fn,
+      sdkVersion: '9.9.9',
+      writeNotice: () => undefined,
+      writeDebug: (text) => debug.push(text),
+    });
+    t.recordRun({}, RUN);
+    await t.flush();
+    expect(fn).not.toHaveBeenCalled();
+    expect(t.pendingCount).toBe(0);
+    const payloads = debug.map((line) => {
+      expect(line).toMatch(/^\[telemetry\] \{.*\}\n$/);
+      return JSON.parse(line.slice('[telemetry] '.length)) as TelemetryPayload;
+    });
+    expect(payloads.map((p) => p.event)).toEqual(['install', 'run']);
+    expect(Object.keys(payloads[1]).sort()).toEqual(PAYLOAD_KEYS);
+    expect(payloads[1].run).toEqual(RUN);
+    // Still counts as enabled — it is a dry run, not an opt-out.
+    expect(t.status({})).toMatchObject({ enabled: true, debug: true });
+  });
+
+  it('treats an explicit false as off', () => {
+    expect(make({ env: { TAPSMITH_TELEMETRY_DEBUG: '0' } }).status({}).debug).toBe(false);
+    expect(make({ env: { TAPSMITH_TELEMETRY_DEBUG: '' } }).status({}).debug).toBe(false);
   });
 });
 

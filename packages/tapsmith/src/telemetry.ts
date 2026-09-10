@@ -72,6 +72,8 @@ interface TelemetryState {
   anonymousId: string;
   createdAt: string;
   noticeShown: boolean;
+  /** Machine-wide switch set by `tapsmith telemetry enable|disable`. Absent means on. */
+  enabled?: boolean;
 }
 
 export interface TelemetryOptions {
@@ -84,6 +86,24 @@ export interface TelemetryOptions {
   sdkVersion?: string;
   /** Where the first-run notice is written. Default: stderr. */
   writeNotice?: (text: string) => void;
+  /** Where `TAPSMITH_TELEMETRY_DEBUG` dry-run payloads are written. Default: stderr. */
+  writeDebug?: (text: string) => void;
+}
+
+/** Why telemetry is off, in precedence order: the first that applies wins. */
+export type TelemetryOffReason = 'env' | 'config' | 'machine';
+
+/** What `tapsmith telemetry status` reports. */
+export interface TelemetryStatus {
+  enabled: boolean;
+  /** Set only when `enabled` is false. */
+  reason?: TelemetryOffReason;
+  /** True when `TAPSMITH_TELEMETRY_DEBUG` is set: payloads print to stderr and nothing is sent. */
+  debug: boolean;
+  stateFile: string;
+  /** Present once the machine has an id (absent on a machine that has never run or has opted out first). */
+  anonymousId?: string;
+  endpoint: string;
 }
 
 // ─── Constants ───
@@ -136,6 +156,12 @@ function isCI(env: NodeJS.ProcessEnv): boolean {
   return !!(env.CI && env.CI !== 'false');
 }
 
+/** `TAPSMITH_TELEMETRY_DEBUG` set to anything but an explicit false. */
+function isDebug(env: NodeJS.ProcessEnv): boolean {
+  const flag = env.TAPSMITH_TELEMETRY_DEBUG?.trim().toLowerCase();
+  return flag !== undefined && flag !== '' && !FALSEY.has(flag);
+}
+
 // ─── Client ───
 
 export class Telemetry {
@@ -144,6 +170,7 @@ export class Telemetry {
   private readonly _env: NodeJS.ProcessEnv;
   private readonly _fetch: typeof fetch;
   private readonly _writeNotice: (text: string) => void;
+  private readonly _writeDebug: (text: string) => void;
   private readonly _sessionId = randomUUID();
   private _sdkVersion: string | undefined;
   private _state: TelemetryState | undefined;
@@ -157,11 +184,48 @@ export class Telemetry {
     this._fetch = opts.fetchFn ?? ((input, init) => fetch(input, init));
     this._sdkVersion = opts.sdkVersion;
     this._writeNotice = opts.writeNotice ?? ((text) => process.stderr.write(text));
+    this._writeDebug = opts.writeDebug ?? ((text) => process.stderr.write(text));
   }
 
-  /** See {@link isTelemetryEnabled}. */
+  /**
+   * Whether this process will report. Env and config (see
+   * {@link isTelemetryEnabled}) are checked first, then the machine-wide
+   * switch `tapsmith telemetry disable` writes into the state file. Reading
+   * the switch never creates the file: a machine that opted out before its
+   * first run gets no id and sends no `install`.
+   */
   isEnabled(config: Pick<TapsmithConfig, 'telemetry'> | undefined): boolean {
-    return isTelemetryEnabled(config, this._env);
+    return this.status(config).enabled;
+  }
+
+  /** The effective state and, when off, the single reason that decided it. */
+  status(config: Pick<TapsmithConfig, 'telemetry'> | undefined): TelemetryStatus {
+    const state = this._peekState();
+    const base = {
+      debug: isDebug(this._env),
+      stateFile: this._stateFile,
+      anonymousId: state?.anonymousId,
+      endpoint: this._endpoint,
+    };
+    if (envDisables(this._env)) return { ...base, enabled: false, reason: 'env' };
+    if (config?.telemetry === false) return { ...base, enabled: false, reason: 'config' };
+    if (state?.enabled === false) return { ...base, enabled: false, reason: 'machine' };
+    return { ...base, enabled: true };
+  }
+
+  /**
+   * Flip the machine-wide switch (`tapsmith telemetry enable|disable`).
+   * Returns false when the state file cannot be written, in which case the
+   * caller should point at the environment variable instead. Never sends:
+   * a machine that opts out before its first run is not an install, and one
+   * that opts back in has already been counted or never will be.
+   */
+  setMachineEnabled(enabled: boolean): boolean {
+    const current = this._peekState()
+      ?? { anonymousId: randomUUID(), createdAt: new Date().toISOString(), noticeShown: false };
+    // Someone who ran `enable` by hand has read the docs; the notice would
+    // only repeat them.
+    return this._saveState({ ...current, enabled, noticeShown: current.noticeShown || enabled });
   }
 
   /**
@@ -235,6 +299,11 @@ export class Telemetry {
   }
 
   private _send(payload: TelemetryPayload): void {
+    if (isDebug(this._env)) {
+      // Dry run: show exactly what would have gone over the wire, send nothing.
+      this._writeDebug(`[telemetry] ${JSON.stringify(payload)}\n`);
+      return;
+    }
     if (this._consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) return;
     const attempt = (async () => {
       try {
@@ -262,12 +331,8 @@ export class Telemetry {
    * write failure degrades to an in-memory id for this process only.
    */
   private _loadState(): TelemetryState {
-    if (this._state) return this._state;
-    const existing = readState(this._stateFile);
-    if (existing) {
-      this._state = existing;
-      return existing;
-    }
+    const existing = this._peekState();
+    if (existing) return existing;
     const fresh: TelemetryState = { anonymousId: randomUUID(), createdAt: new Date().toISOString(), noticeShown: false };
     // `_saveState` records `fresh` as the current state whether or not the
     // write lands, so `_payload` below sees the id without re-reading.
@@ -282,6 +347,14 @@ export class Telemetry {
       }
     }
     return fresh;
+  }
+
+  /** The persisted state if there is one — no file is created, nothing is sent. */
+  private _peekState(): TelemetryState | undefined {
+    if (this._state) return this._state;
+    const existing = readState(this._stateFile);
+    if (existing) this._state = existing;
+    return existing;
   }
 
   private _saveState(state: TelemetryState): boolean {
@@ -307,6 +380,7 @@ function readState(file: string): TelemetryState | undefined {
       anonymousId: raw.anonymousId,
       createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : new Date().toISOString(),
       noticeShown: raw.noticeShown === true,
+      ...(typeof raw.enabled === 'boolean' ? { enabled: raw.enabled } : {}),
     };
   } catch {
     return undefined;
@@ -327,8 +401,9 @@ export function telemetryNoticeText(): string {
     'Tapsmith collects anonymous usage data to guide development: SDK, Node and OS',
     'versions, platform (Android/iOS), run mode, and pass/fail counts per run.',
     'It never sends test names, selectors, app identifiers, or file paths.',
-    'Opt out with `telemetry: false` in tapsmith.config.ts or TAPSMITH_TELEMETRY=0.',
-    `Details: ${TELEMETRY_DOCS_URL}`,
+    'Opt out with `tapsmith telemetry disable`, TAPSMITH_TELEMETRY=0, or',
+    '`telemetry: false` in tapsmith.config.ts. `tapsmith telemetry status` shows the',
+    `current setting. Details: ${TELEMETRY_DOCS_URL}`,
     '',
   ].join('\n') + '\n';
 }

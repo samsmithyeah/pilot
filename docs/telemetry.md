@@ -8,6 +8,14 @@ Without usage numbers there is no way to tell five users from five thousand, whi
 
 Any one of these disables telemetry completely. Nothing is sent, and no anonymous id is created.
 
+```bash
+# Once, for every project on this machine
+npx tapsmith telemetry disable
+
+# See the current setting and, if it is off, which switch decided it
+npx tapsmith telemetry status
+```
+
 ```typescript
 // tapsmith.config.ts
 import { defineConfig } from "tapsmith";
@@ -27,7 +35,15 @@ TAPSMITH_TELEMETRY=0 npx tapsmith test
 DO_NOT_TRACK=1 npx tapsmith test
 ```
 
-The environment variable can switch telemetry **off** for a run whose shared config leaves it on. It cannot switch it **on** when the config says `telemetry: false`.
+The switches only ever combine towards **off**. The environment variable wins over the config, the config wins over the machine-wide setting, and `tapsmith telemetry enable` cannot override either of the other two. `tapsmith telemetry status` names the one that decided.
+
+### Seeing exactly what would be sent
+
+```bash
+TAPSMITH_TELEMETRY_DEBUG=1 npx tapsmith test
+```
+
+prints every event to stderr, prefixed `[telemetry]`, and sends nothing. It is the quickest way to audit the payload against the tables below.
 
 ## What is collected
 
@@ -86,11 +102,12 @@ The id lives in `~/.tapsmith/telemetry.json`, owner-readable only:
 {
   "anonymousId": "7f3c1d3a-9d0f-4a9c-b0a5-6d2f4e1c8a11",
   "createdAt": "2026-09-10T14:02:58.001Z",
-  "noticeShown": true
+  "noticeShown": true,
+  "enabled": false
 }
 ```
 
-Delete the file to rotate the id (the next run counts as a new install and prints the notice again). If the file cannot be written — a read-only home directory, say — Tapsmith uses a throwaway id for that process and sends no `install` event.
+`enabled` is written by `tapsmith telemetry enable|disable` and is absent (meaning on) until you use them. Delete the file to rotate the id (the next run counts as a new install and prints the notice again). If the file cannot be written — a read-only home directory, say — Tapsmith uses a throwaway id for that process and sends no `install` event.
 
 ## Pointing telemetry somewhere else
 
