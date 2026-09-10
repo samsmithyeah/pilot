@@ -1127,10 +1127,12 @@ if (!(await device.getByRole("button", { name: "Enable notifications" }).isVisib
 ```
 
 Strict mode still applies: a selector that matches more than one element throws a
-`StrictModeViolationError`. On a settled screen a call takes as long as one hierarchy read on the
-device (it never polls for the element). Infrastructure problems are never reported as a visibility
-answer: a momentary agent fault or agent timeout is retried for up to a couple of seconds (capped by
-the handle's timeout) and then thrown. A stale mid-re-render snapshot
+`StrictModeViolationError`. On a settled screen a present element costs one hierarchy read on the
+device (it never polls for the element). An absent answer costs two: the accessibility tree can briefly
+lag a just-rendered screen, so the first empty read is confirmed by waiting for the UI to settle (at
+most 1.5 s) and reading once more, as `scrollIntoView()` does before its first swipe. Infrastructure
+problems are never reported as a visibility answer: a momentary agent fault or agent timeout is retried
+for up to a couple of seconds after it first appears (capped by the handle's timeout) and then thrown. A stale mid-re-render snapshot
 just means the screen is busy, so — like `find()` and `waitFor()` — it is re-read until the handle's
 timeout; if the hierarchy never settles (a screen that never stops animating) the call keeps re-reading
 for the handle's timeout and then throws a descriptive error, pointing at `expect(locator).toBeVisible()` /
@@ -2682,6 +2684,10 @@ Get an attribute value from an element.
 #### `webview.isVisible(selector: string): Promise<boolean>`
 
 Check if an element is visible: it must be rendered (have layout boxes — an ancestor with `display: none` counts as hidden) and not have `display: none`, `visibility: hidden`, or `opacity: 0`.
+
+#### `webview.isHidden(selector: string): Promise<boolean>`
+
+The opposite of `isVisible(selector)`: `true` when nothing matches the selector or the match is not visible. One DOM read, no auto-wait.
 
 #### `webview.evaluate<T>(expression: string): Promise<T>`
 

@@ -304,7 +304,7 @@ describe('find()', () => {
       findElements: vi.fn(async () => makeFindElementsResponse([])),
     });
     const handle = new ElementHandle(client, _text('Missing'), 300);
-    await expect(handle.find()).rejects.toThrow(/was not found/);
+    await expect(withFakeClock(5000, () => handle.find())).rejects.toThrow(/was not found/);
   });
 
   it('throws with selector description in the error message', async () => {
@@ -312,7 +312,7 @@ describe('find()', () => {
       findElements: vi.fn(async () => makeFindElementsResponse([])),
     });
     const handle = new ElementHandle(client, _text('Gone'), 300);
-    await expect(handle.find()).rejects.toThrow('getByText("Gone", { exact: true })');
+    await expect(withFakeClock(5000, () => handle.find())).rejects.toThrow('getByText("Gone", { exact: true })');
   });
 
   it('polls findElements with a capped per-tick budget', async () => {
@@ -736,8 +736,35 @@ describe('isVisible()', () => {
     const start = Date.now();
     expect(await handle.isVisible()).toBe(false);
     expect(Date.now() - start).toBeLessThan(1000);
-    // Exactly one resolution: a confirmed miss is the answer, not a "not yet".
-    expect(findElements).toHaveBeenCalledTimes(1);
+    // Two reads, not a poll: the first empty read is confirmed once (after a
+    // bounded idle wait, so a lagging accessibility tree can catch up), and
+    // the second empty read is the answer — not a "not yet".
+    expect(findElements).toHaveBeenCalledTimes(2);
+    expect(client.waitForIdle).toHaveBeenCalledTimes(1);
+    expect(client.waitForIdle).toHaveBeenCalledWith(1500);
+  });
+
+  it('confirms a first empty read, so a lagging accessibility tree does not read as absence (review follow-up)', async () => {
+    // PILOT-283: right after navigation the tree can briefly describe the
+    // previous screen with no error. `if (await btn.isHidden()) return` on one
+    // such read would skip a visible button.
+    let calls = 0;
+    const findElements = vi.fn(async () =>
+      ++calls === 1 ? makeFindElementsResponse([]) : makeFindElementsResponse([makeElementInfo({ visible: true })]));
+    const waitForIdle = vi.fn(async () => successResponse());
+    const client = makeMockClient({ findElements, waitForIdle });
+    expect(await new ElementHandle(client, _text('Enable notifications'), 5000).isVisible()).toBe(true);
+    expect(calls).toBe(2);
+    expect(waitForIdle).toHaveBeenCalledTimes(1);
+  });
+
+  it('confirms the miss at most once, and the idle wait is best effort and capped by the handle timeout (review follow-up)', async () => {
+    const findElements = vi.fn(async () => makeFindElementsResponse([]));
+    const waitForIdle = vi.fn(async () => { throw new Error('waitForIdle unsupported'); });
+    const client = makeMockClient({ findElements, waitForIdle });
+    expect(await new ElementHandle(client, _text('Absent'), 800).isVisible()).toBe(false);
+    expect(findElements).toHaveBeenCalledTimes(2);
+    expect(waitForIdle).toHaveBeenCalledWith(800);
   });
 
   it('returns false for an absent element on a modified handle (.first())', async () => {
@@ -745,7 +772,7 @@ describe('isVisible()', () => {
     const client = makeMockClient({ findElements });
     const handle = new ElementHandle(client, _text('Absent'), 20_000).first();
     expect(await handle.isVisible()).toBe(false);
-    expect(findElements).toHaveBeenCalledTimes(1);
+    expect(findElements).toHaveBeenCalledTimes(2); // one read + the confirming read
   });
 
   it('returns false when nth() is out of range', async () => {
@@ -1173,6 +1200,17 @@ describe('isVisible()', () => {
     expect(calls).toBe(1);
   });
 
+  it('filter() on a handle from all() is refused, like first()/last()/nth() — the snapshot would have silently ignored it (review follow-up)', async () => {
+    // _resolveOne reads the all() snapshot BEFORE filters apply, so
+    // `rows[0].filter({ hasText: 'Sold out' })` used to report rows[0]'s state
+    // and act on rows[0] regardless of the filter.
+    const client = makeMockClient({
+      findElements: vi.fn(async () => makeFindElementsResponse([makeElementInfo({ elementId: 'a', text: 'A' })])),
+    });
+    const rows = await new ElementHandle(client, _role('listitem'), 5000).all();
+    expect(() => rows[0].filter({ hasText: 'Sold out' })).toThrow(/filter\(\) cannot be called on a handle returned by all\(\)/);
+  });
+
   it('works with timeout: 0 — one read on the daemon default deadline, no artificial 1ms budget (review follow-up)', async () => {
     const findElements = vi.fn(async () => makeFindElementsResponse([]));
     const client = makeMockClient({ findElements });
@@ -1225,7 +1263,7 @@ describe('isHidden()', () => {
     const start = Date.now();
     expect(await handle.isHidden()).toBe(true);
     expect(Date.now() - start).toBeLessThan(1000);
-    expect(findElements).toHaveBeenCalledTimes(1);
+    expect(findElements).toHaveBeenCalledTimes(2); // one read + the confirming read
   });
 
   it('returns true for an absent element on a modified handle (.first())', async () => {
@@ -1431,10 +1469,12 @@ describe('last()', () => {
     const client = makeMockClient({
       findElements: vi.fn(async () => makeFindElementsResponse([])),
     });
-    // find() now waits on modified handles too (review follow-up): use a short
-    // timeout, and the deadline error keeps the positional diagnostic.
+    // find() now waits on modified handles too (review follow-up). With no
+    // match at all the error carries no positional detail: `nth(-1)` is an
+    // index the user never wrote and "found 0" adds nothing to "not found".
     const handle = new ElementHandle(client, _role('listitem'), 300);
-    await expect(handle.last().find()).rejects.toThrow(/was not found after waiting 300ms \(nth\(-1\)/);
+    const err = await withFakeClock(5000, () => handle.last().find()).catch((e) => e);
+    expect(err.message).toMatch(/was not found after waiting 300ms$/);
   });
 });
 
@@ -1462,7 +1502,8 @@ describe('nth()', () => {
       findElements: vi.fn(async () => makeFindElementsResponse(threeItems)),
     });
     const handle = new ElementHandle(client, _role('listitem'), 300);
-    await expect(handle.nth(5).find()).rejects.toThrow(/nth\(5\): expected at least 6 element\(s\), but found 3/);
+    await expect(withFakeClock(5000, () => handle.nth(5).find()))
+      .rejects.toThrow(/nth\(5\): expected at least 6 element\(s\), but found 3/);
   });
 
   it('throws when negative index is out of bounds', async () => {
@@ -1470,7 +1511,7 @@ describe('nth()', () => {
       findElements: vi.fn(async () => makeFindElementsResponse(threeItems)),
     });
     const handle = new ElementHandle(client, _role('listitem'), 300);
-    await expect(handle.nth(-4).find()).rejects.toThrow(/nth\(-4\)/);
+    await expect(withFakeClock(5000, () => handle.nth(-4).find())).rejects.toThrow(/nth\(-4\)/);
   });
 
   it('keeps the last confirmed element count through stale ticks, and refreshes it on the next counted tick (review follow-up)', async () => {
@@ -1503,6 +1544,15 @@ describe('nth()', () => {
     const client = makeMockClient({ findElements: vi.fn(async () => makeFindElementsResponse(threeItems)) });
     await expect(new ElementHandle(client, _role('listitem'), 0).nth(5).find())
       .rejects.toThrow(/^Element not found: .*\(nth\(5\): expected at least 6 element\(s\), but found 3\)/);
+  });
+
+  it('first().tap() with nothing matching carries no positional detail — the index was never the user\'s (review follow-up)', async () => {
+    const client = makeMockClient({
+      findElements: vi.fn(async () => makeFindElementsResponse([])),
+      tap: vi.fn(async () => successResponse()),
+    });
+    const err = await withFakeClock(5000, () => new ElementHandle(client, _role('button'), 600).first().tap()).catch((e) => e);
+    expect(err.message).toMatch(/was not found after waiting 600ms$/);
   });
 
   it('tap() on an out-of-range nth handle names the index and the count in the deadline error, like find() (review follow-up)', async () => {
@@ -2008,7 +2058,7 @@ describe('or()', () => {
     // short timeout, and the deadline error names the or() handle.
     const a = new ElementHandle(client, _text('OK'), 300);
     const b = new ElementHandle(client, _text('Confirm'), 300);
-    await expect(a.or(b).find()).rejects.toThrow(/was not found after waiting 300ms/);
+    await expect(withFakeClock(5000, () => a.or(b).find())).rejects.toThrow(/was not found after waiting 300ms/);
   });
 });
 
@@ -3609,7 +3659,7 @@ describe('scoped selector descriptions (review follow-up)', () => {
     });
     const parent = new ElementHandle(client, _role('list'), 300);
     const child = parent.getByText('Row', { exact: true });
-    await expect(child.find()).rejects.toThrow(
+    await expect(withFakeClock(5000, () => child.find())).rejects.toThrow(
       'getByRole("list").getByText("Row", { exact: true })',
     );
   });

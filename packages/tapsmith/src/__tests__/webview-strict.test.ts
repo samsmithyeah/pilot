@@ -226,6 +226,16 @@ describe('WebView strict mode (PILOT-227)', () => {
     });
   });
 
+  describe('isHidden(selector) — string-selector form', () => {
+    it('is the negation of isVisible(selector)', async () => {
+      const hiddenOrAbsent = makeHandle([], false).handle;
+      expect(await hiddenOrAbsent.isHidden('.banner')).toBe(true);
+      expect(await hiddenOrAbsent.isVisible('.banner')).toBe(false);
+      const visible = makeHandle([], true).handle;
+      expect(await visible.isHidden('.banner')).toBe(false);
+    });
+  });
+
   describe('isHidden()', () => {
     it('is the negation of isVisible for a single match', async () => {
       const { handle } = makeHandle([{ text: 'A', visible: false }]);

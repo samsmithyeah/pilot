@@ -183,6 +183,28 @@ const STALE_SNAPSHOT_SIGNATURE = 'is stale (UI changed)';
  */
 const PROBE_FAULT_RETRY_WINDOW_MS = 2000;
 const PROBE_RETRY_POLL_MS = 250;
+/**
+ * Idle-wait budget used by the visibility probes to confirm a first empty
+ * read. Right after navigation or app launch the accessibility tree can lag
+ * the rendered screen — briefly describing the previous screen with no error
+ * (PILOT-283) — so a presence branch taken on one empty read could skip an
+ * element that is plainly visible. Same rationale and bound as
+ * {@link SCROLL_FIRST_SWIPE_IDLE_TIMEOUT_MS}: bounded so a screen with
+ * continuous animation (idle never arrives) costs an absent answer at most
+ * this much extra.
+ */
+const PROBE_MISS_CONFIRM_IDLE_MS = SCROLL_FIRST_SWIPE_IDLE_TIMEOUT_MS;
+
+/**
+ * The parenthetical a deadline / single-shot "not found" error carries for a
+ * positional miss (`nth(5): expected at least 6 element(s), but found 3`).
+ * Empty when the tick found nothing at all: for `.first()`/`.last()` the index
+ * is one the user never wrote, and "found 0" adds nothing to "not found".
+ */
+function positionalMissDetail(err: Error | undefined): string {
+  if (!err || !err.message.startsWith('nth(') || /but found 0$/.test(err.message)) return '';
+  return ` (${err.message})`;
+}
 /*
  * What a `findElements` budget actually buys (see agent_comms.rs in the
  * daemon): the on-device agent runs a hierarchy dump to completion IGNORING
@@ -578,6 +600,10 @@ export class ElementHandle {
 
   /** Narrow matches by additional criteria without changing the selector. */
   filter(criteria: FilterOptions): ElementHandle {
+    // A handle from all() resolves from its snapshot BEFORE filters apply, so
+    // a filter on it would be silently ignored (`rows[0].filter(…)` would still
+    // act on rows[0]). Refuse it, as first()/last()/nth() do.
+    this._assertNoResolvedCache('filter');
     return new ElementHandle(this._client, this._selector, this._timeoutMs, {
       ...this._options,
       filters: [...(this._options.filters ?? []), criteria],
@@ -961,8 +987,9 @@ export class ElementHandle {
       }
       if (Date.now() >= deadline) {
         if (lastTransientErr) throw lastTransientErr;
-        const detail = lastPositionalMiss ? ` (${lastPositionalMiss.message})` : '';
-        throw new Error(`Element ${this._describe()} was not found after waiting ${timeoutMs}ms${detail}`);
+        throw new Error(
+          `Element ${this._describe()} was not found after waiting ${timeoutMs}ms${positionalMissDetail(lastPositionalMiss)}`,
+        );
       }
       const sleepMs = Math.min(POLL_MS, Math.max(0, deadline - Date.now()));
       if (sleepMs > 0) await sleep(sleepMs, this._client._getAbortSignal?.());
@@ -1147,11 +1174,10 @@ export class ElementHandle {
       if (Date.now() >= deadline) {
         if (lastTransientErr) throw lastTransientErr;
         const desc = this._describe();
-        const detail = lastPositionalMiss ? ` (${lastPositionalMiss.message})` : '';
         throw new Error(
           everFound
             ? `Element ${desc} is disabled after waiting ${timeoutMs}ms`
-            : `Element ${desc} was not found after waiting ${timeoutMs}ms${detail}`,
+            : `Element ${desc} was not found after waiting ${timeoutMs}ms${positionalMissDetail(lastPositionalMiss)}`,
         );
       }
       const sleepMs = Math.min(POLL_MS, Math.max(0, deadline - Date.now()));
@@ -1253,7 +1279,7 @@ export class ElementHandle {
           // the positional diagnostic kept as the non-zero path keeps it; a
           // stale snapshot or a strict violation propagates as itself.
           if (!isPollableNotFoundError(err) || isStaleSnapshotError(err)) throw err;
-          if (err instanceof Error && err.message.startsWith('nth(')) detail = ` (${err.message})`;
+          detail = positionalMissDetail(err instanceof Error ? err : undefined);
           el = undefined;
         }
         if (!el) throw new Error(`Element not found: ${this._describe()}${detail}`);
@@ -2201,9 +2227,16 @@ export class ElementHandle {
    *   from the agent — including a stale tick — clears the remembered fault,
    *   so a long-recovered blip is never reported as the cause of a stall.
    *
-   * `timeout: 0` is the explicit single-shot opt-out: one read, no retries.
-   * That read is issued with a 0 deadline, which the daemon maps to its
-   * default command deadline — the same as `count()` at timeout 0.
+   * An **empty read** is an answer, not an unreliable tick — but the first one
+   * is confirmed before it is trusted: the accessibility tree can lag a
+   * just-rendered screen with no error (PILOT-283), so the probe waits for the
+   * UI to settle (best effort, bounded by {@link PROBE_MISS_CONFIRM_IDLE_MS})
+   * and reads once more, exactly as `scrollIntoView` confirms its first miss.
+   * A present element still answers from one read; an absent one costs two.
+   *
+   * `timeout: 0` is the explicit single-shot opt-out: one read, no retries and
+   * no confirmation. That read is issued with a 0 deadline, which the daemon
+   * maps to its default command deadline — the same as `count()` at timeout 0.
    */
   private async _probeOnce(): Promise<ElementInfo | undefined> {
     const start = Date.now();
@@ -2215,14 +2248,18 @@ export class ElementHandle {
     let lastFault: Error | undefined;
     let staleReads = 0;
     let faultReads = 0;
+    let missConfirmed = false;
     while (true) {
       // Floor at 1ms — the daemon treats 0 as "use the 30s default", which is
       // right only for the explicit timeout-0 opt-out.
       const budget = this._timeoutMs === 0 ? 0 : Math.min(PROBE_RETRY_POLL_MS, Math.max(1, deadline - Date.now()));
+      let miss = false;
       try {
-        return this._hasModifiers()
+        const el = this._hasModifiers()
           ? await this._resolveOneWithin(budget)
           : await this._findOneStrict(budget);
+        if (el) return el;
+        miss = true;
       } catch (err) {
         if (isStaleSnapshotError(err)) {
           // A definitive (if unusable) answer from the agent: the earlier
@@ -2237,10 +2274,24 @@ export class ElementHandle {
           lastFault = err as Error;
           if (faultDeadline === undefined) faultDeadline = Date.now() + faultWindowMs;
         } else if (isPollableNotFoundError(err)) {
-          return undefined;
+          miss = true;
         } else {
           throw err;
         }
+      }
+      if (miss) {
+        if (missConfirmed || this._timeoutMs === 0) return undefined;
+        // First empty read: let a lagging accessibility tree catch up, then
+        // read again before answering "absent".
+        missConfirmed = true;
+        try {
+          await this._client.waitForIdle(Math.min(PROBE_MISS_CONFIRM_IDLE_MS, this._timeoutMs));
+        } catch (err) {
+          // A user stop must propagate immediately (PILOT-222); anything else
+          // is a best-effort idle wait that must not block the answer.
+          if (isAbortError(err)) throw err;
+        }
+        continue;
       }
       const now = Date.now();
       // While a fault window is open it is the nearer deadline.

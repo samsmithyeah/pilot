@@ -960,6 +960,15 @@ export class WebViewHandle {
     return result as boolean;
   }
 
+  /**
+   * The opposite of {@link isVisible}: `true` when no element matches the
+   * selector or the match is not visible. One DOM read, no auto-wait. Mirrors
+   * `ElementHandle.isHidden()` / `WebViewLocator.isHidden()`.
+   */
+  async isHidden(selector: string): Promise<boolean> {
+    return !(await this.isVisible(selector));
+  }
+
   async evaluate<T = unknown>(expression: string): Promise<T> {
     return this._traced('evaluate', undefined, async (deadline) => {
       return (await this._evaluate(expression, remainingUntil(deadline))) as T;

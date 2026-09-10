@@ -224,6 +224,7 @@ const html = await errorMessage.innerHTML()
 const value = await emailInput.inputValue()
 const href = await webview.locator("a.link").getAttribute("href")
 const visible = await errorMessage.isVisible()
+const hidden = await errorMessage.isHidden() // true when absent or not visible
 ```
 
 Locators are lazy -- no queries are made until you call an action or pass the locator to `expect()`.
