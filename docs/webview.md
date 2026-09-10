@@ -157,6 +157,16 @@ Check whether an element is visible. Returns `false` if the element is not rende
 const visible = await webview.isVisible(".error-banner")
 ```
 
+### `webview.isHidden(selector)`
+
+The opposite of `isVisible(selector)`: `true` when nothing matches the selector or the match is not visible. One DOM read, no auto-wait — use it to branch on the current state, and `expect(locator).not.toBeVisible()` to wait for something to disappear.
+
+```typescript
+if (await webview.isHidden(".cookie-banner")) {
+  // nothing to dismiss
+}
+```
+
 ### `webview.evaluate<T>(expression)`
 
 Execute arbitrary JavaScript in the WebView and return the result.

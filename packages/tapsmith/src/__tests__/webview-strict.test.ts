@@ -234,6 +234,14 @@ describe('WebView strict mode (PILOT-227)', () => {
       const visible = makeHandle([], true).handle;
       expect(await visible.isHidden('.banner')).toBe(false);
     });
+
+    it('both string forms are traced under their own names, like the locator forms (review follow-up)', async () => {
+      const { handle } = makeHandle([], true);
+      const traced = vi.spyOn(handle as unknown as { _traced: (action: string) => unknown }, '_traced');
+      await handle.isVisible('.banner');
+      await handle.isHidden('.banner');
+      expect(traced.mock.calls.map((c) => c[0])).toEqual(['isVisible', 'isHidden']);
+    });
   });
 
   describe('isHidden()', () => {

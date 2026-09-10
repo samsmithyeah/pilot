@@ -95,23 +95,24 @@ describe("Gestures screen", () => {
   })
 
   // PILOT-287: the visibility probes must not wait for the element. An absent
-  // element answers at once instead of spending the action timeout (30s) and
+  // element answers at once instead of spending the action timeout and
   // throwing. The value assertions catch a regression to the pre-fix throw;
   // the wall-clock bound catches a regression to a silent poll-to-deadline
   // (which would still return the right values, one timeout per call later).
-  // The CI configs use 10s (iOS) and 15s (Android) defaults, so the bound must
-  // sit under 10s to catch that on every config. A legitimate absent answer is
-  // two 250ms-budget reads (each bounded by the daemon's ~5s read window) plus
-  // a ≤1.5s idle wait confirming the miss, so 8s is generous even on a cold
-  // software-GPU shard. Bound each call on its own so two slow reads cannot
-  // add up to a false failure.
+  // Such a regression always costs at least the configured default timeout
+  // (10s local iOS, 15s Android, 30s iOS CI), so each call is bounded by
+  // that rather than a constant that a slow shard could legitimately reach: an
+  // absent answer is two reads (each bounded by the daemon's ~5s read window)
+  // plus a ≤1.5s idle wait confirming the miss. Bound each call on its own so
+  // two slow reads cannot add up to a false failure.
   test("isVisible/isHidden answer for an absent element without waiting", async ({ device }) => {
     const absent = device.getByText("Definitely not on this screen", { exact: true })
+    const pollToDeadlineMs = device._getDefaultTimeout()
     let start = Date.now()
     expect(await absent.isVisible()).toBe(false)
-    expect(Date.now() - start).toBeLessThan(8_000)
+    expect(Date.now() - start).toBeLessThan(pollToDeadlineMs)
     start = Date.now()
     expect(await absent.isHidden()).toBe(true)
-    expect(Date.now() - start).toBeLessThan(8_000)
+    expect(Date.now() - start).toBeLessThan(pollToDeadlineMs)
   })
 })

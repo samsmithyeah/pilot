@@ -249,6 +249,50 @@ describe('getBy* scoping', () => {
       expect(count).toBe(2);
     });
 
+    it('a child of an all() row resolves the row LIVE by index, like nth(i): a layout shift after all() does not lose it (review follow-up)', async () => {
+      // A snackbar pushes the whole list down 50px after all(); rows[0]
+      // re-resolves index 0 live and finds its (shifted) button.
+      let shifted = false;
+      const shift = (el: ElementInfo, dy: number) =>
+        makeElementInfo({ ...el, bounds: { ...el.bounds!, top: el.bounds!.top + dy, bottom: el.bounds!.bottom + dy } });
+      const findElements = vi.fn(async (selector: Selector) => {
+        const desc = formatSelector(selector);
+        const src = desc.includes('getByRole') ? buttons : dialogs;
+        return makeFindElementsResponse(shifted ? src.map((e) => shift(e, 50)) : src);
+      });
+      const client = makeMockClient({ findElements });
+      const rows = await new ElementHandle(client, _testId('dialog'), 600).all();
+      shifted = true;
+      const el = await withFakeClock(5000, () => rows[0].getByRole('button', { name: 'Submit' }).find());
+      expect(el.elementId).toBe('b1');
+    });
+
+    it('a child of an all() row with no identifying attributes resolves by live index too (review follow-up)', async () => {
+      const anonymous = dialogs.map((d, i) => makeElementInfo({ ...d, elementId: `a${i}`, text: '' }));
+      const findElements = vi.fn(async (selector: Selector) => {
+        const desc = formatSelector(selector);
+        if (desc.includes('getByRole')) return makeFindElementsResponse(buttons);
+        return makeFindElementsResponse(anonymous);
+      });
+      const client = makeMockClient({ findElements });
+      const rows = await new ElementHandle(client, _testId('dialog'), 600).all();
+      expect((await rows[1].getByRole('button', { name: 'Submit' }).find()).elementId).toBe('b2');
+    });
+
+    it('a user stop while resolving an all() scope parent propagates instead of becoming an empty scope (review follow-up)', async () => {
+      const abort = Object.assign(new Error('Aborted'), { name: 'AbortError' });
+      let listReads = 0;
+      const findElements = vi.fn(async (selector: Selector) => {
+        const desc = formatSelector(selector);
+        if (desc.includes('getByRole')) return makeFindElementsResponse(buttons);
+        if (++listReads > 1) throw abort;
+        return makeFindElementsResponse(dialogs);
+      });
+      const client = makeMockClient({ findElements });
+      const rows = await new ElementHandle(client, _testId('dialog'), 600).all();
+      await expect(withFakeClock(5000, () => rows[0].getByRole('button').find())).rejects.toBe(abort);
+    });
+
     it('honors the parent scope on the assertion path (not a global query)', async () => {
       const device = scopedClient();
       // Scoped to the first dialog → only b1 is in scope. Assertions resolve
@@ -453,6 +497,27 @@ describe('tap()', () => {
     const client = makeMockClient({ findElements });
     const handle = new ElementHandle(client, _text('Submit'), 500);
     await expect(handle.tap()).rejects.toThrow(/is disabled/);
+  });
+
+  it('reports "not found", not "disabled", when the element was disabled for a tick and then vanished (review follow-up)', async () => {
+    // A Save button renders disabled once, then the step unmounts it. The
+    // deadline message must describe the last thing seen, not the first.
+    let calls = 0;
+    const findElements = vi.fn(async () =>
+      ++calls === 1 ? makeFindElementsResponse([makeElementInfo({ enabled: false })]) : makeFindElementsResponse([]));
+    const client = makeMockClient({ findElements });
+    const err = await withFakeClock(5000, () => new ElementHandle(client, _text('Save'), 2000).tap()).catch((e) => e);
+    expect(err.message).toMatch(/was not found after waiting 2000ms$/);
+    expect(err.message).not.toMatch(/disabled/);
+  });
+
+  it('still reports "disabled" when the element is absent for a tick and then present but disabled (review follow-up)', async () => {
+    let calls = 0;
+    const findElements = vi.fn(async () =>
+      ++calls === 1 ? makeFindElementsResponse([]) : makeFindElementsResponse([makeElementInfo({ enabled: false })]));
+    const client = makeMockClient({ findElements });
+    await expect(withFakeClock(5000, () => new ElementHandle(client, _text('Save'), 2000).tap()))
+      .rejects.toThrow(/is disabled after waiting 2000ms/);
   });
 
   it('throws "not found" when element never appears', async () => {
@@ -765,6 +830,46 @@ describe('isVisible()', () => {
     expect(await new ElementHandle(client, _text('Absent'), 800).isVisible()).toBe(false);
     expect(findElements).toHaveBeenCalledTimes(2);
     expect(waitForIdle).toHaveBeenCalledWith(800);
+  });
+
+  it('a stale confirming re-read does not turn an absent answer into a stall or a throw (review follow-up)', async () => {
+    // Spinner screen, element genuinely absent: read 1 is empty, the idle wait
+    // never settles, and every re-read is stale. The first answer must stand
+    // after a short confirmation window — not a 30s churn ending in a throw.
+    let calls = 0;
+    const findElements = vi.fn(async (): Promise<FindElementsResponse> => {
+      calls++;
+      if (calls === 1) return makeFindElementsResponse([]);
+      return { requestId: '1', elements: [], errorMessage: 'Element is stale (UI changed): null' };
+    });
+    const waitForIdle = vi.fn(() => new Promise<ReturnType<typeof successResponse>>((resolve) => {
+      setTimeout(() => resolve(successResponse()), 1500);
+    }));
+    const client = makeMockClient({ findElements, waitForIdle });
+    const start = Date.now();
+    expect(await withFakeClock(60_000, () => new ElementHandle(client, _text('Dismiss'), 30_000).isVisible())).toBe(false);
+    // 1.5s idle wait + a ≤2s confirmation window of 250ms re-reads.
+    expect(Date.now() - start).toBeLessThan(4000);
+    expect(calls).toBeLessThan(12);
+    expect(waitForIdle).toHaveBeenCalledTimes(1);
+  });
+
+  it('an empty read closes an open fault window, so a blip after the miss confirmation gets its full grace (review follow-up)', async () => {
+    // Fault at t=0 (window to t=2000), empty read at t=250, idle wait until
+    // ~t=1850, second blip, then the confirming empty read. The second blip
+    // must be retried — not thrown because the FIRST blip's window is nearly up.
+    let calls = 0;
+    const findElements = vi.fn(async (): Promise<FindElementsResponse> => {
+      calls++;
+      if (calls === 1 || calls === 3) return { requestId: '1', elements: [], errorMessage: 'UiAutomation not connected' };
+      return makeFindElementsResponse([]);
+    });
+    const waitForIdle = vi.fn(() => new Promise<ReturnType<typeof successResponse>>((resolve) => {
+      setTimeout(() => resolve(successResponse()), 1600);
+    }));
+    const client = makeMockClient({ findElements, waitForIdle });
+    expect(await withFakeClock(60_000, () => new ElementHandle(client, _text('Dismiss'), 30_000).isVisible())).toBe(false);
+    expect(calls).toBe(4);
   });
 
   it('returns false for an absent element on a modified handle (.first())', async () => {
@@ -1211,6 +1316,40 @@ describe('isVisible()', () => {
     expect(() => rows[0].filter({ hasText: 'Sold out' })).toThrow(/filter\(\) cannot be called on a handle returned by all\(\)/);
   });
 
+  it('and()/or() on a handle from all() are refused too — the left operand would have resolved live over every row (review follow-up)', async () => {
+    // _resolveAll never consults the all() snapshot, so `rows[0].and(x)` would
+    // silently intersect ALL rows with x, not row 0.
+    const client = makeMockClient({
+      findElements: vi.fn(async () => makeFindElementsResponse([
+        makeElementInfo({ elementId: 'a', text: 'A' }),
+        makeElementInfo({ elementId: 'b', text: 'B' }),
+      ])),
+    });
+    const rows = await new ElementHandle(client, _role('listitem'), 5000).all();
+    const other = new ElementHandle(client, _role('button'), 5000);
+    expect(() => rows[0].and(other)).toThrow(/and\(\) cannot be called on a handle returned by all\(\)/);
+    expect(() => rows[1].or(other)).toThrow(/or\(\) cannot be called on a handle returned by all\(\)/);
+  });
+
+  it('an all() handle is refused as the OTHER operand too, and as filter({ has }) (review follow-up)', async () => {
+    // The right operand of and()/or() and a `has`/`hasNot` handle are resolved
+    // from their selector alone, so `x.and(rows[0])` would intersect x with
+    // every row and `list.filter({ has: rows[0] })` would match every row.
+    const client = makeMockClient({
+      findElements: vi.fn(async () => makeFindElementsResponse([
+        makeElementInfo({ elementId: 'a', text: 'A' }),
+        makeElementInfo({ elementId: 'b', text: 'B' }),
+      ])),
+    });
+    const list = new ElementHandle(client, _role('listitem'), 5000);
+    const rows = await list.all();
+    const other = new ElementHandle(client, _role('button'), 5000);
+    expect(() => other.and(rows[0])).toThrow(/and cannot combine a handle returned by all\(\)/);
+    expect(() => other.or(rows[0])).toThrow(/or cannot combine a handle returned by all\(\)/);
+    expect(() => list.filter({ has: rows[0] })).toThrow(/filter\(\{ has \}\) cannot combine a handle returned by all\(\)/);
+    expect(() => list.filter({ hasNot: rows[1] })).toThrow(/filter\(\{ hasNot \}\) cannot combine a handle returned by all\(\)/);
+  });
+
   it('works with timeout: 0 — one read on the daemon default deadline, no artificial 1ms budget (review follow-up)', async () => {
     const findElements = vi.fn(async () => makeFindElementsResponse([]));
     const client = makeMockClient({ findElements });
@@ -1546,6 +1685,15 @@ describe('nth()', () => {
       .rejects.toThrow(/^Element not found: .*\(nth\(5\): expected at least 6 element\(s\), but found 3\)/);
   });
 
+  it('nth(5).tap() on an EMPTY list keeps the positional detail — nothing else in the error names the index (review follow-up)', async () => {
+    const client = makeMockClient({
+      findElements: vi.fn(async () => makeFindElementsResponse([])),
+      tap: vi.fn(async () => successResponse()),
+    });
+    const err = await withFakeClock(5000, () => new ElementHandle(client, _role('listitem'), 600).nth(5).tap()).catch((e) => e);
+    expect(err.message).toMatch(/was not found after waiting 600ms \(nth\(5\): expected at least 6 element\(s\), but found 0\)$/);
+  });
+
   it('first().tap() with nothing matching carries no positional detail — the index was never the user\'s (review follow-up)', async () => {
     const client = makeMockClient({
       findElements: vi.fn(async () => makeFindElementsResponse([])),
@@ -1796,6 +1944,98 @@ describe('positional actions on shared-property matches', () => {
     // retry re-queried and dispatched the fresh id 'fresh-1'.
     expect(tap).toHaveBeenNthCalledWith(1, undefined, expect.any(Number), 'stale-1');
     expect(tap).toHaveBeenNthCalledWith(2, undefined, expect.any(Number), 'fresh-1');
+  });
+
+  it('a snapshot refresh reads with the poll-tick budget, not the handle timeout (review follow-up)', async () => {
+    const tap = vi.fn(async () => failureResponse('Element is stale (UI changed)'));
+    const budgets: number[] = [];
+    const findElements = vi.fn(async (_sel: unknown, budget?: number) => {
+      budgets.push(budget!);
+      return makeFindElementsResponse([makeElementInfo({ elementId: 'e0' }), makeElementInfo({ elementId: 'e1' })]);
+    });
+    const client = makeMockClient({ findElements, tap });
+    const items = await new ElementHandle(client, _role('listitem'), 30_000).all();
+    await items[1].tap().catch(() => undefined);
+    expect(budgets[0]).toBe(30_000); // all() itself
+    expect(budgets.length).toBeGreaterThan(1);
+    for (const b of budgets.slice(1)) expect(b).toBe(250); // every refresh
+  });
+
+  it('a refresh that fails inside the enabled-wait surfaces the agent error, not "is disabled" (review follow-up)', async () => {
+    let findCalls = 0;
+    const findElements = vi.fn(async () => {
+      findCalls += 1;
+      if (findCalls > 1) throw new Error('findElements failed: UiAutomation not connected');
+      return makeFindElementsResponse([makeElementInfo({ elementId: 'e0', enabled: false }), makeElementInfo({ elementId: 'e1', enabled: false })]);
+    });
+    const client = makeMockClient({ findElements, tap: vi.fn(async () => successResponse()) });
+    const items = await new ElementHandle(client, _role('listitem'), 1000).all();
+    await expect(withFakeClock(5000, () => items[1].tap())).rejects.toThrow(/UiAutomation not connected/);
+  });
+
+  it('a failed snapshot refresh does not poison the handle: the error surfaces once, later reads use the previous capture (review follow-up)', async () => {
+    const tap = vi.fn(async () => failureResponse('Element is stale (UI changed)'));
+    let findCalls = 0;
+    const findElements = vi.fn(async () => {
+      findCalls += 1;
+      if (findCalls === 2) throw new Error('findElements failed: UiAutomation not connected');
+      return makeFindElementsResponse([makeElementInfo({ elementId: 'e0' }), makeElementInfo({ elementId: 'e1' })]);
+    });
+    const client = makeMockClient({ findElements, tap });
+    const items = await new ElementHandle(client, _role('listitem'), 5000).all();
+    await expect(items[1].tap()).rejects.toThrow(/UiAutomation not connected/);
+    // The refresh rejected → the previous capture is back; no cached rejection.
+    expect((await items[1].find()).elementId).toBe('e1');
+    expect(findCalls).toBe(2);
+  });
+
+  it('after a refresh that shrank the list, a reader on an all() handle WAITS with device reads and fails descriptively, not by spinning on the frozen capture (review follow-up)', async () => {
+    let tapCalls = 0;
+    const tap = vi.fn(async () =>
+      (tapCalls += 1) === 1 ? failureResponse('Element is stale (UI changed)') : successResponse(),
+    );
+    let findCalls = 0;
+    const findElements = vi.fn(async () => {
+      findCalls += 1;
+      const n = findCalls === 1 ? 3 : 1;
+      return makeFindElementsResponse(Array.from({ length: n }, (_, i) => makeElementInfo({ elementId: `r${findCalls}-${i}`, text: `row ${i}` })));
+    });
+    const client = makeMockClient({ findElements, tap });
+    const items = await new ElementHandle(client, _role('listitem'), 1000).all();
+    // The stale retry re-captures a 1-row list; rows[2] can no longer be
+    // satisfied. The tap reports that in the element's terms, not as a raw
+    // internal nth() error.
+    await expect(items[2].tap()).rejects.toThrow(/Element getByRole\("listitem"\) changed while being acted on and could not be found again: nth\(2\)/);
+    const before = findCalls;
+    const err = await withFakeClock(5000, () => items[2].find()).catch((e) => e);
+    expect(err.message).toMatch(/was not found after waiting 1000ms \(nth\(2\): expected at least 3 element\(s\), but found 1\)$/);
+    // Each tick re-captured from the device rather than re-awaiting the frozen list.
+    expect(findCalls).toBeGreaterThan(before + 1);
+  });
+
+  it('a stale retry REFRESHES the all() snapshot rather than turning the handle live (review follow-up)', async () => {
+    let tapCalls = 0;
+    const tap = vi.fn(async () =>
+      (tapCalls += 1) === 1 ? failureResponse('Element is stale (UI changed)') : successResponse(),
+    );
+    let findCalls = 0;
+    const findElements = vi.fn(async () => {
+      findCalls += 1;
+      const tag = findCalls === 1 ? 'stale' : 'fresh';
+      return makeFindElementsResponse([
+        makeElementInfo({ elementId: `${tag}-0`, text: `${tag} zero` }),
+        makeElementInfo({ elementId: `${tag}-1`, text: `${tag} one` }),
+      ]);
+    });
+    const client = makeMockClient({ findElements, tap });
+    const items = await new ElementHandle(client, _role('listitem'), 5000).all();
+    await items[1].tap();
+    expect(findCalls).toBe(2);
+    // Readers answer from the refreshed capture — no third device read — and
+    // the all()-handle guards still hold.
+    expect((await items[1].find()).elementId).toBe('fresh-1');
+    expect(findCalls).toBe(2);
+    expect(() => items[1].first()).toThrow(/first\(\) cannot be called on a handle returned by all\(\)/);
   });
 });
 
@@ -2421,6 +2661,24 @@ describe('setChecked()', () => {
     expect(tap).toHaveBeenCalled();
   });
 
+  it('setChecked() on a handle from all() confirms the change from a fresh read — one tap, no blind re-tap (review follow-up)', async () => {
+    // The captured snapshot would show the ORIGINAL state forever; the
+    // confirmation must re-capture by index or it double-toggles.
+    const device = { checked: [false, false] };
+    const tap = vi.fn(async (_sel: unknown, _t: unknown, id?: string) => {
+      const i = Number(id!.slice(1));
+      device.checked[i] = !device.checked[i];
+      return successResponse();
+    });
+    const findElements = vi.fn(async () =>
+      makeFindElementsResponse(device.checked.map((c, i) => makeElementInfo({ elementId: `s${i}`, role: 'switch', checked: c }))));
+    const client = makeMockClient({ findElements, tap });
+    const rows = await new ElementHandle(client, _role('switch'), 5000).all();
+    await withFakeClock(10_000, () => rows[1].setChecked(true));
+    expect(tap).toHaveBeenCalledTimes(1);
+    expect(device.checked).toEqual([false, true]);
+  });
+
   it('on a stale retry, skips the tap if the re-resolved element is already in the desired state', async () => {
     // First resolve: unchecked (so it decides to tap). The tap fails stale.
     // The re-resolve sees it already checked (the change that staled it set it)
@@ -2677,6 +2935,24 @@ describe('boundingBox()', () => {
     const handle = new ElementHandle(client, _role('button'), 5000);
     const box = await handle.last().boundingBox();
     expect(box).toEqual({ x: 50, y: 0, width: 100, height: 80 });
+  });
+
+  it('waits for a late element on a modified handle instead of failing on the first empty read (review follow-up)', async () => {
+    let calls = 0;
+    const findElements = vi.fn(async () =>
+      ++calls < 3
+        ? makeFindElementsResponse([])
+        : makeFindElementsResponse([makeElementInfo({ elementId: 'e1', bounds: { left: 0, top: 0, right: 50, bottom: 50 } })]));
+    const client = makeMockClient({ findElements });
+    const box = await withFakeClock(5000, () => new ElementHandle(client, _role('button'), 5000).first().boundingBox());
+    expect(box).toEqual({ x: 0, y: 0, width: 50, height: 50 });
+    expect(calls).toBe(3);
+  });
+
+  it('reports a timed-out wait on a modified handle, not a single-read positional miss (review follow-up)', async () => {
+    const client = makeMockClient({ findElements: vi.fn(async () => makeFindElementsResponse([])) });
+    await expect(withFakeClock(5000, () => new ElementHandle(client, _role('button'), 1000).first().boundingBox()))
+      .rejects.toThrow(/was not found after waiting 1000ms$/);
   });
 });
 

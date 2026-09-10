@@ -949,6 +949,21 @@ export class WebViewHandle {
   }
 
   async isVisible(selector: string): Promise<boolean> {
+    return this._traced('isVisible', selector, () => this._isVisibleSelector(selector));
+  }
+
+  /**
+   * The opposite of {@link isVisible}: `true` when no element matches the
+   * selector or the match is not visible. One DOM read, no auto-wait. Mirrors
+   * `ElementHandle.isHidden()` / `WebViewLocator.isHidden()`. Traced under its
+   * own name, like the locator form, so the check is a row in the trace.
+   */
+  async isHidden(selector: string): Promise<boolean> {
+    return this._traced('isHidden', selector, async () => !(await this._isVisibleSelector(selector)));
+  }
+
+  /** Single DOM read behind the string-selector visibility probes. */
+  private async _isVisibleSelector(selector: string): Promise<boolean> {
     const result = await this._evaluate(`(() => {
       const el = document.querySelector(${JSON.stringify(selector)});
       if (!el) return false;
@@ -958,15 +973,6 @@ export class WebViewHandle {
       return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
     })()`, Math.min(this._timeoutMs, WEB_SOCKET_CONNECT_TIMEOUT_MS));
     return result as boolean;
-  }
-
-  /**
-   * The opposite of {@link isVisible}: `true` when no element matches the
-   * selector or the match is not visible. One DOM read, no auto-wait. Mirrors
-   * `ElementHandle.isHidden()` / `WebViewLocator.isHidden()`.
-   */
-  async isHidden(selector: string): Promise<boolean> {
-    return !(await this.isVisible(selector));
   }
 
   async evaluate<T = unknown>(expression: string): Promise<T> {

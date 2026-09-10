@@ -870,12 +870,22 @@ for (const item of items) {
 The returned handles carry the snapshot they were resolved from, so reading and acting on the batch
 does not re-query the device for every element: `find()`, `getText()`, `isEnabled()`, `isChecked()`,
 `isEditable()`, `inputValue()`, `boundingBox()`, `isVisible()`, `isHidden()` and actions all address
-the element captured by `all()`, so a check and the action it guards always describe the same element
+the element captured by `all()`, so a check and the action it guards describe the same element
 (and after an action that moves the list, `items[i].boundingBox()` still reports the captured
-coordinates). `expect(items[i])` assertions and `waitFor()` re-query the device by index, so they
-reflect what is on screen now. If the list changes after `all()` (an item is removed, say), call `all()`
-again, or use `.nth(i)` for a handle that always resolves live. Making `all()` return live locators, as
-Playwright does, is tracked as PILOT-346.
+coordinates). Scoped children (`items[i].getByRole("button")`) resolve their parent live by index, like
+`.nth(i)`: once the list has changed they address whatever row is now at index `i`, so call `all()` again
+after the list changes before acting on a row's children. Two things refresh the snapshot from a fresh
+read by the same index: an action whose captured element went stale mid-action, and a wait the
+capture cannot satisfy (a disabled control, a `setChecked()` state change being confirmed, an index the
+capture no longer has); the handle keeps answering from the refreshed capture. `expect(items[i])` assertions and
+`waitFor()` also re-query the device by index, so they reflect what is on screen now. Because a handle
+from `all()` already names one element, `first()`, `last()`, `nth()`, `filter()`, `and()` and `or()`
+throw on it, and so does passing it as the other operand or as `has`/`hasNot` — narrow the locator
+before calling `all()` instead (`list.filter({ hasText: "Sold out" }).all()`). Note that filters always
+apply before a positional index, so `list.nth(1).filter(…)` means "the second matching row", not "row 1
+if it matches". If the list changes after `all()` (an item is removed, say), call `all()` again, or use
+`.nth(i)` for a handle that always resolves live. Making `all()` return live locators, as Playwright
+does, is tracked as PILOT-346.
 
 ### Waiting
 
@@ -1130,9 +1140,14 @@ Strict mode still applies: a selector that matches more than one element throws 
 `StrictModeViolationError`. On a settled screen a present element costs one hierarchy read on the
 device (it never polls for the element). An absent answer costs two: the accessibility tree can briefly
 lag a just-rendered screen, so the first empty read is confirmed by waiting for the UI to settle (at
-most 1.5 s) and reading once more, as `scrollIntoView()` does before its first swipe. Infrastructure
+most 1.5 s) and reading once more, as `scrollIntoView()` does before its first swipe. If that re-read
+only yields stale snapshots (a spinner keeps the tree churning), it is retried for a couple of seconds
+and then the first empty read stands as the answer — an absent element never costs the whole timeout. Infrastructure
 problems are never reported as a visibility answer: a momentary agent fault or agent timeout is retried
-for up to a couple of seconds after it first appears (capped by the handle's timeout) and then thrown. A stale mid-re-render snapshot
+for a short window after it first appears (about two seconds, capped by the handle's timeout) and then thrown.
+The window bounds when the next re-read may be scheduled, not the wall clock: a read that is itself slow
+to fail (an agent command timeout takes ~5 s to come back) can add one more such read before the fault
+is thrown. A stale mid-re-render snapshot
 just means the screen is busy, so — like `find()` and `waitFor()` — it is re-read until the handle's
 timeout; if the hierarchy never settles (a screen that never stops animating) the call keeps re-reading
 for the handle's timeout and then throws a descriptive error, pointing at `expect(locator).toBeVisible()` /
@@ -1200,7 +1215,9 @@ const editable = await device.getByRole("textfield", { name: "Email" }).isEditab
 
 #### `elementHandle.inputValue(): Promise<string>`
 
-Get the current value of an input field. On Android, this returns the element's text property.
+Get the current value of an input field. On Android, this returns the element's text property. Waits
+for the element to be present (up to the handle's timeout, on every handle shape including
+`.first()`/`.nth()`/`.filter()`) and throws if it never appears.
 
 ```typescript
 const value = await device.getByRole("textfield", { name: "Email" }).inputValue();
@@ -1208,7 +1225,9 @@ const value = await device.getByRole("textfield", { name: "Email" }).inputValue(
 
 #### `elementHandle.boundingBox(): Promise<BoundingBox | null>`
 
-Get the element's position and dimensions. Returns `null` if the element has no bounds.
+Get the element's position and dimensions. Returns `null` if the element has no bounds. Waits for the
+element to be present (up to the handle's timeout, on every handle shape including
+`.first()`/`.nth()`/`.filter()`) and throws if it never appears.
 
 ```typescript
 const box = await device.getByText("Header", { exact: true }).boundingBox();
@@ -2687,7 +2706,7 @@ Check if an element is visible: it must be rendered (have layout boxes — an an
 
 #### `webview.isHidden(selector: string): Promise<boolean>`
 
-The opposite of `isVisible(selector)`: `true` when nothing matches the selector or the match is not visible. One DOM read, no auto-wait.
+The opposite of `isVisible(selector)`: `true` when nothing matches the selector or the match is not visible. One DOM read, no auto-wait. Both string forms appear as their own row in a trace, like the locator forms.
 
 #### `webview.evaluate<T>(expression: string): Promise<T>`
 

@@ -183,6 +183,8 @@ const STALE_SNAPSHOT_SIGNATURE = 'is stale (UI changed)';
  */
 const PROBE_FAULT_RETRY_WINDOW_MS = 2000;
 const PROBE_RETRY_POLL_MS = 250;
+/** Budget of the device read that refreshes an all() snapshot (see _refreshSnapshot). */
+const SNAPSHOT_REFRESH_BUDGET_MS = PROBE_RETRY_POLL_MS;
 /**
  * Idle-wait budget used by the visibility probes to confirm a first empty
  * read. Right after navigation or app launch the accessibility tree can lag
@@ -198,11 +200,13 @@ const PROBE_MISS_CONFIRM_IDLE_MS = SCROLL_FIRST_SWIPE_IDLE_TIMEOUT_MS;
 /**
  * The parenthetical a deadline / single-shot "not found" error carries for a
  * positional miss (`nth(5): expected at least 6 element(s), but found 3`).
- * Empty when the tick found nothing at all: for `.first()`/`.last()` the index
- * is one the user never wrote, and "found 0" adds nothing to "not found".
+ * Empty for `.first()`/`.last()` (indices 0 / -1): that index is one the user
+ * never wrote, and `_describe()` does not render it either. An explicit
+ * `nth(5)` keeps its detail even on an empty list — it is the only place the
+ * error names the index at all.
  */
 function positionalMissDetail(err: Error | undefined): string {
-  if (!err || !err.message.startsWith('nth(') || /but found 0$/.test(err.message)) return '';
+  if (!err || !/^nth\((?!0\)|-1\))/.test(err.message)) return '';
   return ` (${err.message})`;
 }
 /*
@@ -586,6 +590,17 @@ export class ElementHandle {
     });
   }
 
+  /** @internal — Refuse an all() handle as an operand (and/or/has/hasNot): it
+   * would be resolved live from its selector, ignoring the element it names. */
+  private static _assertOperandNotResolved(method: string, operand: ElementHandle): void {
+    if (operand._options.resolvedElementsPromise) {
+      throw new Error(
+        `${method} cannot combine a handle returned by all(). ` +
+          'Handles from all() already reference a specific element; pass the locator you called all() on instead.',
+      );
+    }
+  }
+
   /** @internal — Prevent re-indexing on handles returned by all(). */
   private _assertNoResolvedCache(method: string): void {
     if (this._options.resolvedElementsPromise) {
@@ -602,8 +617,11 @@ export class ElementHandle {
   filter(criteria: FilterOptions): ElementHandle {
     // A handle from all() resolves from its snapshot BEFORE filters apply, so
     // a filter on it would be silently ignored (`rows[0].filter(…)` would still
-    // act on rows[0]). Refuse it, as first()/last()/nth() do.
+    // act on rows[0]). Refuse it, as first()/last()/nth() do. The same goes for
+    // an all() handle used as `has`/`hasNot`: only its selector is consulted.
     this._assertNoResolvedCache('filter');
+    if (criteria.has) ElementHandle._assertOperandNotResolved('filter({ has })', criteria.has);
+    if (criteria.hasNot) ElementHandle._assertOperandNotResolved('filter({ hasNot })', criteria.hasNot);
     return new ElementHandle(this._client, this._selector, this._timeoutMs, {
       ...this._options,
       filters: [...(this._options.filters ?? []), criteria],
@@ -617,6 +635,11 @@ export class ElementHandle {
    * `this` (with all its modifiers) becomes the left operand, preserving call order.
    */
   and(other: ElementHandle): ElementHandle {
+    // Both operands resolve through _resolveAll(), which never consults an
+    // all() snapshot, so `rows[0].and(x)` / `x.and(rows[0])` would silently
+    // intersect ALL rows.
+    this._assertNoResolvedCache('and');
+    ElementHandle._assertOperandNotResolved('and', other);
     return new ElementHandle(this._client, this._selector, this._timeoutMs, {
       andSelf: this,
       andHandle: other,
@@ -629,6 +652,8 @@ export class ElementHandle {
    * `this` (with all its modifiers) becomes the left operand, preserving call order.
    */
   or(other: ElementHandle): ElementHandle {
+    this._assertNoResolvedCache('or');
+    ElementHandle._assertOperandNotResolved('or', other);
     return new ElementHandle(this._client, this._selector, this._timeoutMs, {
       orSelf: this,
       orHandle: other,
@@ -735,6 +760,12 @@ export class ElementHandle {
    * Playwright, instead of surfacing the parent's "not found" error.
    */
   private async _scopeToParent(children: ElementInfo[], parent: ElementHandle): Promise<ElementInfo[]> {
+    // A parent from all() is resolved live by index here, exactly like
+    // `.nth(i)` (and like `expect(items[i])`): re-identifying a captured row
+    // in a fresh read has no reliable key — element ids go stale, bounds move
+    // with any layout shift, text mutates and testIDs repeat — so every
+    // "smarter" match has a silent wrong-row failure. Live-by-index is the
+    // documented behaviour; live all() handles are PILOT-346.
     const parentEls = await parent._resolveAll();
     const nthIndex = parent._options.nthIndex;
 
@@ -948,13 +979,17 @@ export class ElementHandle {
         // Floor at 1ms — the daemon treats a 0 timeout as "use the 30s
         // default", which would stall the final poll tick for 30s.
         const findBudget = Math.min(POLL_MS, Math.max(1, deadline - Date.now()));
+        // An all() handle answers from its capture without a device read, so
+        // that answer says nothing about whether the agent is responsive.
+        const fromSnapshot = !!this._options.resolvedElementsPromise;
         const el = this._hasModifiers()
           ? await this._resolveOneWithin(findBudget)
           : await this._findOneStrict(findBudget);
-        // Reaching here means the agent answered (a match or an empty result),
-        // so it's currently responsive — clear any earlier transient timeout so
-        // a genuine "not found" isn't misreported as an infra error at the end.
-        lastTransientErr = undefined;
+        // Reaching here after a device read means the agent answered (a match
+        // or an empty result), so it's currently responsive — clear any earlier
+        // transient timeout so a genuine "not found" isn't misreported as an
+        // infra error at the end.
+        if (!fromSnapshot) lastTransientErr = undefined;
         lastPositionalMiss = undefined;
         if (el) {
           const remaining = Math.max(0, deadline - Date.now());
@@ -990,6 +1025,15 @@ export class ElementHandle {
         throw new Error(
           `Element ${this._describe()} was not found after waiting ${timeoutMs}ms${positionalMissDetail(lastPositionalMiss)}`,
         );
+      }
+      // An all() snapshot cannot change on its own: a tick that could not be
+      // satisfied from it re-captures by index before the next one, so this
+      // is a real wait (like .nth(i)) rather than a busy-wait on a frozen list.
+      // A refresh that fails is classified like any tick's read error.
+      const refreshErr = await this._refreshSnapshot();
+      if (refreshErr) {
+        if (isRetryableResolutionError(refreshErr)) lastTransientErr = refreshErr;
+        else if (!isPollableNotFoundError(refreshErr)) throw refreshErr;
       }
       const sleepMs = Math.min(POLL_MS, Math.max(0, deadline - Date.now()));
       if (sleepMs > 0) await sleep(sleepMs, this._client._getAbortSignal?.());
@@ -1117,7 +1161,7 @@ export class ElementHandle {
     const MIN_ACTION_BUDGET_MS = 1000;
     const deadline = Date.now() + timeoutMs;
     const POLL_MS = 250;
-    let everFound = false;
+    let lastSeenDisabled = false;
     let lastTransientErr: Error | undefined;
     // The most recent positional miss (`nth(i): expected at least …`), kept so
     // the deadline error still says WHICH index was short and by how much —
@@ -1129,16 +1173,22 @@ export class ElementHandle {
         // Floor at 1ms — the daemon treats a 0 timeout as "use the 30s
         // default", which would stall the final poll tick for 30s.
         const findBudget = Math.min(POLL_MS, Math.max(1, deadline - Date.now()));
+        // A capture (all() handle) answers without a device read; only a
+        // device read proves the agent responsive (see _strictResolve).
+        const fromSnapshot = !!this._options.resolvedElementsPromise;
         const el = this._hasModifiers()
           ? await this._resolveOneWithin(findBudget)
           : await this._findOneStrict(findBudget);
         // The agent answered (match or empty) → responsive; drop any earlier
         // transient timeout so a genuine "not found"/"disabled" isn't reported
         // as an infra error at the deadline.
-        lastTransientErr = undefined;
+        if (!fromSnapshot) lastTransientErr = undefined;
         lastPositionalMiss = undefined;
+        // Remember what the LAST counted read saw, so an element that was
+        // present (disabled) for a tick and then vanished is reported as not
+        // found, not as still disabled.
+        lastSeenDisabled = !!el && !el.enabled;
         if (el) {
-          everFound = true;
           if (el.enabled) {
             const remaining = Math.max(0, deadline - Date.now());
             return {
@@ -1168,6 +1218,7 @@ export class ElementHandle {
           // refreshes nor discards the last confirmed positional miss.
           if (!isStaleSnapshotError(err)) {
             lastPositionalMiss = err instanceof Error && err.message.startsWith('nth(') ? err : undefined;
+            lastSeenDisabled = false;
           }
         }
       }
@@ -1175,10 +1226,17 @@ export class ElementHandle {
         if (lastTransientErr) throw lastTransientErr;
         const desc = this._describe();
         throw new Error(
-          everFound
+          lastSeenDisabled
             ? `Element ${desc} is disabled after waiting ${timeoutMs}ms`
             : `Element ${desc} was not found after waiting ${timeoutMs}ms${positionalMissDetail(lastPositionalMiss)}`,
         );
+      }
+      // A captured (all()) element that is disabled or gone cannot change in
+      // the snapshot: re-capture by index before the next tick (see _strictResolve).
+      const refreshErr = await this._refreshSnapshot();
+      if (refreshErr) {
+        if (isRetryableResolutionError(refreshErr)) lastTransientErr = refreshErr;
+        else if (!isPollableNotFoundError(refreshErr)) throw refreshErr;
       }
       const sleepMs = Math.min(POLL_MS, Math.max(0, deadline - Date.now()));
       if (sleepMs > 0) await sleep(sleepMs, this._client._getAbortSignal?.());
@@ -1200,6 +1258,36 @@ export class ElementHandle {
    * @param preResolved - Resolved ElementInfo from the auto-wait step (avoids a
    *   redundant resolution round-trip).
    */
+  /**
+   * @internal — Re-capture an `all()` handle's snapshot from a fresh device
+   * read (by the same index) instead of dropping it: after a cached element
+   * id went stale mid-action, or when a wait cannot be satisfied from the
+   * capture. Dropping it would silently turn `rows[i]` into a live `.nth(i)`
+   * and the first()/nth()/filter()/and()/or() guards would stop firing. A
+   * handle that never had a snapshot is left alone.
+   *
+   * The read is bounded like any poll tick (a re-timed live clone), so a
+   * wedged agent cannot hold one tick for the handle timeout plus headroom.
+   * The returned promise never rejects: it resolves to the read's error, if
+   * any, so a poll loop can classify it (transient vs fatal) within its tick
+   * while callers that re-resolve immediately can ignore it. A failed refresh
+   * falls back to the previous capture so the handle is never left holding a
+   * cached rejection.
+   */
+  private _refreshSnapshot(): Promise<Error | undefined> {
+    const previous = this._options.resolvedElementsPromise;
+    if (!previous) return Promise.resolve(undefined);
+    const fresh = ElementHandle._cloneWithTimeout(this, SNAPSHOT_REFRESH_BUDGET_MS)._resolveAll();
+    this._options.resolvedElementsPromise = fresh;
+    return fresh.then(
+      () => undefined,
+      (err: unknown) => {
+        if (this._options.resolvedElementsPromise === fresh) this._options.resolvedElementsPromise = previous;
+        return err instanceof Error ? err : new Error(String(err));
+      },
+    );
+  }
+
   private async _actionTarget(preResolved?: ElementInfo): Promise<ActionTarget> {
     if (!this._hasModifiers()) return { selector: this._selector };
     const el = preResolved ?? await this._resolveOne();
@@ -1242,11 +1330,18 @@ export class ElementHandle {
       } catch (err) {
         if (isLast || !isStaleElementError(err instanceof Error ? err.message : String(err))) throw err;
       }
-      // Drop any cached all() snapshot so the re-resolve re-queries the device
-      // for a FRESH id rather than handing back the same stale one (_resolveOne
-      // short-circuits on resolvedElementsPromise).
-      this._options.resolvedElementsPromise = undefined;
-      currentTarget = await this._actionTarget();
+      // Refresh any cached all() snapshot so the re-resolve gets a FRESH id
+      // rather than the same stale one, without turning the handle live.
+      void this._refreshSnapshot(); // the re-resolve below awaits the refreshed capture
+      try {
+        currentTarget = await this._actionTarget();
+      } catch (err) {
+        if (!isPollableNotFoundError(err)) throw err;
+        const msg = err instanceof Error ? err.message : String(err);
+        throw new Error(
+          `Element ${this._describe()} changed while being acted on and could not be found again: ${msg}`,
+        );
+      }
     }
   }
 
@@ -1852,9 +1947,9 @@ export class ElementHandle {
       } catch (err) {
         if (!isStaleElementError(err instanceof Error ? err.message : String(err))) throw err;
       }
-      // Drop any cached all() snapshot on BOTH ends so each re-resolves fresh.
-      this._options.resolvedElementsPromise = undefined;
-      target._options.resolvedElementsPromise = undefined;
+      // Refresh any cached all() snapshot on BOTH ends so each re-resolves fresh.
+      void this._refreshSnapshot(); // both re-resolves below await the refreshed captures
+      void target._refreshSnapshot();
       return dispatch(await this._actionTarget(), await target._actionTarget());
     }, 'Drag and drop failed');
   }
@@ -1898,7 +1993,7 @@ export class ElementHandle {
         tapRes = synthetic(false, msg);
       }
       if (!tapRes.success && isStaleElementError(tapRes.errorMessage)) {
-        this._options.resolvedElementsPromise = undefined;
+        void this._refreshSnapshot(); // _resolveOne below awaits the refreshed capture
         const fresh = await this._resolveOne();
         if (fresh.checked === checked) return synthetic(true); // already set after the change
         tapRes = await tapByTarget(await this._actionTarget(fresh));
@@ -1923,6 +2018,9 @@ export class ElementHandle {
       while (Date.now() < deadline) {
         await sleep(POLL_MS, this._client._getAbortSignal?.());
         try {
+          // An all() snapshot would never show the change: re-capture by
+          // index so the confirmation (and the re-tap gate) reads live state.
+          void this._refreshSnapshot(); // _resolveOne below awaits the refreshed capture
           const after = await this._resolveOne();
           // The agent answered → responsive; drop any earlier transient timeout
           // so a state that simply never changes fails as such, not as infra.
@@ -2233,6 +2331,14 @@ export class ElementHandle {
    * UI to settle (best effort, bounded by {@link PROBE_MISS_CONFIRM_IDLE_MS})
    * and reads once more, exactly as `scrollIntoView` confirms its first miss.
    * A present element still answers from one read; an absent one costs two.
+   * The confirmation is itself best effort: if the re-read only produces stale
+   * snapshots (a spinner keeps the tree churning), it is retried for the same
+   * short window as a fault and then the first answer stands — an absent
+   * element must never cost the whole timeout or be reported as an error
+   * because the screen was busy. Only an infrastructure fault (agent timeout,
+   * disconnect) that does not clear within its window is still thrown, as
+   * everywhere else in the probe. As with any definitive tick, an empty read
+   * clears a remembered fault.
    *
    * `timeout: 0` is the explicit single-shot opt-out: one read, no retries and
    * no confirmation. That read is issued with a 0 deadline, which the daemon
@@ -2249,6 +2355,9 @@ export class ElementHandle {
     let staleReads = 0;
     let faultReads = 0;
     let missConfirmed = false;
+    // Set once the first empty read has been idle-waited: stale re-reads past
+    // it fall back to that answer instead of churning to the handle timeout.
+    let confirmDeadline: number | undefined;
     while (true) {
       // Floor at 1ms — the daemon treats 0 as "use the 30s default", which is
       // right only for the explicit timeout-0 opt-out.
@@ -2281,6 +2390,9 @@ export class ElementHandle {
       }
       if (miss) {
         if (missConfirmed || this._timeoutMs === 0) return undefined;
+        // A definitive answer: any earlier fault has recovered.
+        lastFault = undefined;
+        faultDeadline = undefined;
         // First empty read: let a lagging accessibility tree catch up, then
         // read again before answering "absent".
         missConfirmed = true;
@@ -2291,16 +2403,24 @@ export class ElementHandle {
           // is a best-effort idle wait that must not block the answer.
           if (isAbortError(err)) throw err;
         }
+        confirmDeadline = Date.now() + faultWindowMs;
         continue;
       }
       const now = Date.now();
-      // While a fault window is open it is the nearer deadline.
-      const nearestDeadline = lastFault && faultDeadline !== undefined ? Math.min(faultDeadline, deadline) : deadline;
+      // While a fault window is open it is the nearer deadline (a blip keeps
+      // its full grace even mid-confirmation); otherwise, once a first empty
+      // read is being confirmed, the confirmation window is.
+      let nearestDeadline = deadline;
+      if (lastFault && faultDeadline !== undefined) nearestDeadline = Math.min(nearestDeadline, faultDeadline);
+      else if (confirmDeadline !== undefined) nearestDeadline = Math.min(nearestDeadline, confirmDeadline);
       const remaining = nearestDeadline - now;
       // Stop once another poll gap no longer fits before the nearest deadline
       // (so a short handle timeout still gets its second tick, as find() does).
       if (remaining < PROBE_RETRY_POLL_MS) {
         if (lastFault) throw lastFault;
+        // The confirming re-read never produced a usable snapshot; the first
+        // empty read is still the answer.
+        if (confirmDeadline !== undefined) return undefined;
         const left = Math.max(0, deadline - now);
         const reads = staleReads + faultReads;
         const faults = faultReads
