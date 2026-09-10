@@ -47,31 +47,41 @@ prints every event to stderr, prefixed `[telemetry]`, and sends nothing. It is t
 
 ## What is collected
 
-One event is sent when a **test file finishes running**, plus a one-off `install` event the first time a machine creates its anonymous id. Every event carries:
+One event is sent when a **test file finishes running** (`tapsmith run`), plus a one-off `tapsmith install` event the first time a machine creates its anonymous id. Events go to [PostHog](https://posthog.com), hosted in its EU region, as a standard PostHog capture envelope:
 
 | Field | Example | Why |
 |---|---|---|
-| `event` | `"run"` or `"install"` | Distinguish first installs from ongoing use. |
-| `anonymousId` | `"7f3c…"` | A random UUID stored in `~/.tapsmith/telemetry.json`. Not derived from your machine, user, or project. Lets runs from one machine be counted once. |
-| `sessionId` | `"a91e…"` | A random UUID per Tapsmith process, never stored. Groups the files of one run. |
+| `event` | `"tapsmith run"` or `"tapsmith install"` | Distinguish first installs from ongoing use. |
+| `distinct_id` | `"7f3c…"` | A random UUID stored in `~/.tapsmith/telemetry.json`. Not derived from your machine, user, or project. Lets runs from one machine be counted once. |
 | `timestamp` | `"2026-09-10T14:03:11.412Z"` | When the event happened. |
-| `sdkVersion` | `"0.4.1"` | Which Tapsmith versions are in use. |
-| `nodeVersion` | `"v22.21.0"` | Which Node versions to keep supporting. |
+| `api_key` | `"phc_…"` | The Tapsmith PostHog project token. Public by design, like every PostHog client key; it can write events, never read them. |
+| `properties` | see below | Everything else. |
+
+Every event's `properties` carry:
+
+| Property | Example | Why |
+|---|---|---|
+| `session_id` | `"a91e…"` | A random UUID per Tapsmith process, never stored. Groups the files of one run. |
+| `sdk_version` | `"0.4.1"` | Which Tapsmith versions are in use. |
+| `node_version` | `"v22.21.0"` | Which Node versions to keep supporting. |
 | `os` | `"darwin"` | Host operating system (`darwin`, `linux`, `win32`). |
 | `arch` | `"arm64"` | Host CPU architecture. |
 | `ci` | `true` | Whether the run was on CI (the `CI` environment variable). |
+| `$lib` / `$lib_version` | `"tapsmith"` / `"0.4.1"` | PostHog's convention for naming the client that sent the event. |
+| `$geoip_disable` | `true` | Tells PostHog not to derive a location from the connection. The project is also configured to discard client IP addresses before storage. |
+| `$process_person_profile` | `false` | Anonymous events: PostHog builds no person profile for the id. |
 
-`run` events add:
+`tapsmith run` events add:
 
-| Field | Example | Why |
+| Property | Example | Why |
 |---|---|---|
-| `run.mode` | `"test"` | Which run path executed the file: `test` (sequential CLI), `test-parallel` (`--workers N`), `ui` (UI mode), `watch` (headless watch mode), `mcp` (the MCP server's `tapsmith_run_tests`). |
-| `run.platform` | `"android"` | `android` or `ios`. |
-| `run.devices` | `1` | Size of the device group the file ran on (`use.devices`). |
-| `run.tests` / `run.passed` / `run.failed` / `run.skipped` | `12` / `11` / `1` / `0` | Counts only. |
-| `run.durationMs` | `48211` | How long the file took. |
+| `mode` | `"test"` | Which run path executed the file: `test` (sequential CLI), `test-parallel` (`--workers N`), `ui` (UI mode), `watch` (headless watch mode), `mcp` (the MCP server's `tapsmith_run_tests`). |
+| `platform` | `"android"` | `android` or `ios`. |
+| `devices` | `1` | Size of the device group the file ran on (`use.devices`). |
+| `tests` / `passed` / `failed` / `skipped` | `12` / `11` / `1` / `0` | Counts only. |
+| `duration_ms` | `48211` | How long the file took. |
 
-That is the complete list. The payload is a closed set of fields, and Tapsmith's own unit tests assert exactly that key set so it cannot widen by accident.
+That is the complete list. The payload is a closed set of fields, and Tapsmith's own unit tests assert exactly those key sets so they cannot widen by accident.
 
 ## What is never collected
 
@@ -80,7 +90,7 @@ That is the complete list. The payload is a closed set of fields, and Tapsmith's
 - App identifiers (`package`, bundle ids), APK/app paths, or anything from your config other than the boolean `telemetry` key
 - File paths, project names, or repository names
 - Device serials, UDIDs, device names, hostnames, usernames, or email addresses
-- IP-derived location (the collector does not store addresses)
+- IP addresses or IP-derived location (each event asks PostHog not to geolocate, and the project discards client IPs before storage)
 - Anything from your app's network traffic
 
 ## The first-run notice
@@ -89,7 +99,8 @@ The first time Tapsmith runs tests on a machine it prints a short notice to stde
 
 ## How it is sent
 
-- One HTTPS `POST` per finished test file to `https://telemetry.tapsmith.dev/v1/events`, fire-and-forget, bounded by a 3-second timeout.
+- One HTTPS `POST` per finished test file to PostHog's EU capture endpoint, `https://eu.i.posthog.com/i/v0/e/`, fire-and-forget, bounded by a 3-second timeout. No PostHog SDK is involved; it is a plain `fetch` of the JSON above.
+- The processor is PostHog Inc. under its cloud terms, with data held in its EU region. Tapsmith reads the data through PostHog's dashboards and nowhere else.
 - Failures are silent. Telemetry never slows a run down, never prints a warning, and never changes an exit code — an offline CI machine behaves identically.
 - After three consecutive failures Tapsmith stops trying for the rest of the process.
 - Forked worker processes (parallel workers, UI-mode workers, watch-mode children) report their own files and inherit your opt-out.
@@ -111,13 +122,13 @@ The id lives in `~/.tapsmith/telemetry.json`, owner-readable only:
 
 ## Pointing telemetry somewhere else
 
-`TAPSMITH_TELEMETRY_ENDPOINT` overrides the collector URL, for organisations that want to receive their own copy or route through a proxy:
+`TAPSMITH_TELEMETRY_ENDPOINT` overrides the capture URL, for organisations that want to receive their own copy, route through a proxy, or keep everything inside a self-hosted PostHog:
 
 ```bash
-TAPSMITH_TELEMETRY_ENDPOINT=https://telemetry.internal.example.com/tapsmith npx tapsmith test
+TAPSMITH_TELEMETRY_ENDPOINT=https://posthog.internal.example.com/i/v0/e/ npx tapsmith test
 ```
 
-The payload is the JSON documented above, sent with `Content-Type: application/json`.
+The payload is the PostHog capture envelope documented above, sent with `Content-Type: application/json`, so any PostHog-compatible endpoint accepts it. It still carries Tapsmith's project token; a self-hosted instance ignores an unknown token, so pair the override with a proxy that swaps in your own if you want the events to land in your project.
 
 ## Where this is implemented
 

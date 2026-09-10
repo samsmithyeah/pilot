@@ -17,9 +17,21 @@ const RUN: TelemetryRunEvent = {
   mode: 'test', platform: 'android', devices: 1, tests: 3, passed: 2, failed: 1, skipped: 0, durationMs: 1234,
 };
 
-/** The complete, closed set of top-level payload keys. Widening it is a deliberate act. */
-const PAYLOAD_KEYS = ['event', 'anonymousId', 'sessionId', 'timestamp', 'sdkVersion', 'nodeVersion', 'os', 'arch', 'ci', 'run'].sort();
-const RUN_KEYS = ['mode', 'platform', 'devices', 'tests', 'passed', 'failed', 'skipped', 'durationMs'].sort();
+/**
+ * The complete, closed set of wire keys — a PostHog capture envelope and its
+ * properties. Widening either list is a deliberate act that must also update
+ * docs/telemetry.md.
+ */
+const PAYLOAD_KEYS = ['api_key', 'event', 'distinct_id', 'timestamp', 'properties'].sort();
+const COMMON_PROPERTY_KEYS = [
+  'session_id', 'sdk_version', 'node_version', 'os', 'arch', 'ci',
+  '$lib', '$lib_version', '$geoip_disable', '$process_person_profile',
+];
+const INSTALL_PROPERTY_KEYS = [...COMMON_PROPERTY_KEYS].sort();
+const RUN_PROPERTY_KEYS = [
+  ...COMMON_PROPERTY_KEYS,
+  'mode', 'platform', 'devices', 'tests', 'passed', 'failed', 'skipped', 'duration_ms',
+].sort();
 
 let tempDir: string;
 let stateFile: string;
@@ -45,6 +57,7 @@ function make(opts: {
     env: opts.env ?? {},
     fetchFn: opts.fetchFn ?? fakeFetch().fn,
     sdkVersion: '9.9.9',
+    apiKey: 'phc_test',
     writeNotice: (text) => opts.notices?.push(text),
   });
 }
@@ -112,9 +125,9 @@ describe('Telemetry state file', () => {
     const b = make({ fetchFn: second.fn });
     b.recordRun({}, RUN);
     await b.flush();
-    expect(second.calls[0].body.anonymousId).toBe(state.anonymousId);
+    expect(second.calls[0].body.distinct_id).toBe(state.anonymousId);
     // A second process on the same machine is not a second install.
-    expect(second.calls.map((c) => c.body.event)).toEqual(['run']);
+    expect(second.calls.map((c) => c.body.event)).toEqual(['tapsmith run']);
   });
 
   it('sends an install event exactly when the id is first persisted', async () => {
@@ -122,10 +135,10 @@ describe('Telemetry state file', () => {
     const t = make({ fetchFn: fn });
     t.recordRun({}, RUN);
     await t.flush();
-    expect(calls.map((c) => c.body.event)).toEqual(['install', 'run']);
-    expect(calls[0].body.run).toBeUndefined();
-    expect(calls[0].body.anonymousId).toBe(calls[1].body.anonymousId);
-    expect(calls[0].body.sessionId).toBe(calls[1].body.sessionId);
+    expect(calls.map((c) => c.body.event)).toEqual(['tapsmith install', 'tapsmith run']);
+    expect(Object.keys(calls[0].body.properties).sort()).toEqual(INSTALL_PROPERTY_KEYS);
+    expect(calls[0].body.distinct_id).toBe(calls[1].body.distinct_id);
+    expect(calls[0].body.properties.session_id).toBe(calls[1].body.properties.session_id);
   });
 
   it('regenerates a corrupt or empty state file', async () => {
@@ -134,14 +147,14 @@ describe('Telemetry state file', () => {
     const { fn, calls } = fakeFetch();
     make({ fetchFn: fn }).recordRun({}, RUN);
     await Promise.resolve();
-    expect(calls[0].body.anonymousId).toMatch(/^[0-9a-f-]{36}$/);
-    expect(JSON.parse(fs.readFileSync(stateFile, 'utf-8')).anonymousId).toBe(calls[0].body.anonymousId);
+    expect(calls[0].body.distinct_id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(JSON.parse(fs.readFileSync(stateFile, 'utf-8')).anonymousId).toBe(calls[0].body.distinct_id);
 
     fs.writeFileSync(stateFile, JSON.stringify({ anonymousId: '' }));
     const again = fakeFetch();
     make({ fetchFn: again.fn }).recordRun({}, RUN);
     await Promise.resolve();
-    expect(again.calls[0].body.anonymousId).not.toBe('');
+    expect(again.calls[0].body.distinct_id).not.toBe('');
   });
 
   it('falls back to an ephemeral id (and sends no install) when the state cannot be written', async () => {
@@ -152,8 +165,8 @@ describe('Telemetry state file', () => {
     const t = make({ fetchFn: fn });
     t.recordRun({}, RUN);
     await t.flush();
-    expect(calls.map((c) => c.body.event)).toEqual(['run']);
-    expect(calls[0].body.anonymousId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(calls.map((c) => c.body.event)).toEqual(['tapsmith run']);
+    expect(calls[0].body.distinct_id).toMatch(/^[0-9a-f-]{36}$/);
   });
 
   it('writes nothing at all when disabled', async () => {
@@ -174,26 +187,63 @@ describe('Telemetry.recordRun()', () => {
     t.recordRun({ telemetry: true }, RUN);
     await t.flush();
 
-    const run = calls.find((c) => c.body.event === 'run')!;
+    const run = calls.find((c) => c.body.event === 'tapsmith run')!;
     expect(run.url).toBe('https://collector.test/v1/events');
     expect(run.init.method).toBe('POST');
     expect((run.init.headers as Record<string, string>)['content-type']).toBe('application/json');
     expect(run.init.signal).toBeInstanceOf(AbortSignal);
 
     expect(Object.keys(run.body).sort()).toEqual(PAYLOAD_KEYS);
-    expect(Object.keys(run.body.run!).sort()).toEqual(RUN_KEYS);
+    expect(Object.keys(run.body.properties).sort()).toEqual(RUN_PROPERTY_KEYS);
     expect(run.body).toMatchObject({
-      event: 'run',
-      sdkVersion: '9.9.9',
-      nodeVersion: process.version,
-      os: process.platform,
-      arch: process.arch,
-      ci: true,
-      run: RUN,
+      api_key: 'phc_test',
+      event: 'tapsmith run',
+      properties: {
+        sdk_version: '9.9.9',
+        node_version: process.version,
+        os: process.platform,
+        arch: process.arch,
+        ci: true,
+        $lib: 'tapsmith',
+        $lib_version: '9.9.9',
+        $geoip_disable: true,
+        $process_person_profile: false,
+        mode: 'test',
+        platform: 'android',
+        devices: 1,
+        tests: 3,
+        passed: 2,
+        failed: 1,
+        skipped: 0,
+        duration_ms: 1234,
+      },
     });
     expect(Date.parse(run.body.timestamp)).not.toBeNaN();
-    expect(run.body.sessionId).toMatch(/^[0-9a-f-]{36}$/);
-    expect(run.body.sessionId).not.toBe(run.body.anonymousId);
+    expect(run.body.properties.session_id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(run.body.properties.session_id).not.toBe(run.body.distinct_id);
+  });
+
+  it('sends nothing when no project token is compiled in (a source build before the project existed)', async () => {
+    const { fn } = fakeFetch();
+    const t = new Telemetry({
+      stateFile,
+      env: {},
+      fetchFn: fn,
+      sdkVersion: '9.9.9',
+      apiKey: '',
+      writeNotice: () => undefined,
+    });
+    t.recordRun({}, RUN);
+    await t.flush();
+    expect(fn).not.toHaveBeenCalled();
+    // Still enabled from the user's point of view; the id is created as usual.
+    expect(t.status({}).enabled).toBe(true);
+    expect(fs.existsSync(stateFile)).toBe(true);
+  });
+
+  it('defaults to the PostHog EU capture endpoint', () => {
+    const t = new Telemetry({ stateFile, env: {}, fetchFn: fakeFetch().fn, writeNotice: () => undefined });
+    expect(t.status({}).endpoint).toBe('https://eu.i.posthog.com/i/v0/e/');
   });
 
   it('reads the endpoint from TAPSMITH_TELEMETRY_ENDPOINT when not given explicitly', async () => {
@@ -203,6 +253,7 @@ describe('Telemetry.recordRun()', () => {
       env: { TAPSMITH_TELEMETRY_ENDPOINT: 'http://127.0.0.1:1/x' },
       fetchFn: fn,
       sdkVersion: '1.0.0',
+      apiKey: 'phc_test',
       writeNotice: () => undefined,
     });
     t.recordRun({}, RUN);
@@ -216,7 +267,7 @@ describe('Telemetry.recordRun()', () => {
       const t = make({ fetchFn: fn, env });
       t.recordRun({}, RUN);
       await t.flush();
-      expect(calls.at(-1)!.body.ci).toBe(false);
+      expect(calls.at(-1)!.body.properties.ci).toBe(false);
     }
   });
 
@@ -363,7 +414,7 @@ describe('machine-wide switch (tapsmith telemetry enable|disable)', () => {
     const a = make({ fetchFn: first.fn });
     a.recordRun({}, RUN);
     await a.flush();
-    const id = first.calls[0].body.anonymousId;
+    const id = first.calls[0].body.distinct_id;
 
     expect(make().setMachineEnabled(false)).toBe(true);
     expect(make().isEnabled({})).toBe(false);
@@ -376,8 +427,8 @@ describe('machine-wide switch (tapsmith telemetry enable|disable)', () => {
     expect(b.printNoticeIfFirstRun({})).toBe(false);
     b.recordRun({}, RUN);
     await b.flush();
-    expect(again.calls.map((c) => c.body.event)).toEqual(['run']);
-    expect(again.calls[0].body.anonymousId).toBe(id);
+    expect(again.calls.map((c) => c.body.event)).toEqual(['tapsmith run']);
+    expect(again.calls[0].body.distinct_id).toBe(id);
     expect(notices).toEqual([]);
   });
 
@@ -425,6 +476,7 @@ describe('TAPSMITH_TELEMETRY_DEBUG dry run', () => {
       env: { TAPSMITH_TELEMETRY_DEBUG: '1' },
       fetchFn: fn,
       sdkVersion: '9.9.9',
+      apiKey: 'phc_test',
       writeNotice: () => undefined,
       writeDebug: (text) => debug.push(text),
     });
@@ -436,9 +488,10 @@ describe('TAPSMITH_TELEMETRY_DEBUG dry run', () => {
       expect(line).toMatch(/^\[telemetry\] \{.*\}\n$/);
       return JSON.parse(line.slice('[telemetry] '.length)) as TelemetryPayload;
     });
-    expect(payloads.map((p) => p.event)).toEqual(['install', 'run']);
+    expect(payloads.map((p) => p.event)).toEqual(['tapsmith install', 'tapsmith run']);
     expect(Object.keys(payloads[1]).sort()).toEqual(PAYLOAD_KEYS);
-    expect(payloads[1].run).toEqual(RUN);
+    expect(Object.keys(payloads[1].properties).sort()).toEqual(RUN_PROPERTY_KEYS);
+    expect(payloads[1].properties).toMatchObject({ mode: 'test', platform: 'android', tests: 3, duration_ms: 1234 });
     // Still counts as enabled — it is a dry run, not an opt-out.
     expect(t.status({})).toMatchObject({ enabled: true, debug: true });
   });

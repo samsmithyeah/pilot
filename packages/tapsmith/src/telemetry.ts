@@ -52,20 +52,47 @@ export interface TelemetryRunEvent {
   durationMs: number;
 }
 
-/** The complete wire payload — nothing outside this set is ever sent. */
+/**
+ * The complete wire payload — nothing outside this set is ever sent. It is a
+ * PostHog capture envelope (`POST /i/v0/e/`): the processor is PostHog's EU
+ * cloud, and any PostHog-compatible endpoint (a self-hosted instance, a
+ * proxy) can receive it via `TAPSMITH_TELEMETRY_ENDPOINT`.
+ */
 export interface TelemetryPayload {
-  event: 'install' | 'run';
+  /** PostHog project token — public by design, like every PostHog client key. */
+  api_key: string;
+  event: 'tapsmith install' | 'tapsmith run';
   /** Random UUID stored in `~/.tapsmith/telemetry.json`; not derived from anything. */
-  anonymousId: string;
-  /** Random per-process id so a run's files can be grouped; never persisted. */
-  sessionId: string;
+  distinct_id: string;
   timestamp: string;
-  sdkVersion: string;
-  nodeVersion: string;
+  properties: TelemetryProperties;
+}
+
+/** Event properties. Flat, so PostHog can break down and filter on each. */
+export interface TelemetryProperties {
+  /** Random per-process id so a run's files can be grouped; never persisted. */
+  session_id: string;
+  sdk_version: string;
+  node_version: string;
   os: NodeJS.Platform;
   arch: string;
   ci: boolean;
-  run?: TelemetryRunEvent;
+  /** Which client sent it, PostHog's convention. */
+  $lib: 'tapsmith';
+  $lib_version: string;
+  /** Never derive a location from the connection (belt; the project setting that discards IPs is braces). */
+  $geoip_disable: true;
+  /** Anonymous events: no person profile is ever built for the id. */
+  $process_person_profile: false;
+  // `tapsmith run` only:
+  mode?: RunMode;
+  platform?: 'android' | 'ios';
+  devices?: number;
+  tests?: number;
+  passed?: number;
+  failed?: number;
+  skipped?: number;
+  duration_ms?: number;
 }
 
 interface TelemetryState {
@@ -84,6 +111,8 @@ export interface TelemetryOptions {
   env?: NodeJS.ProcessEnv;
   fetchFn?: typeof fetch;
   sdkVersion?: string;
+  /** PostHog project token. Default: the Tapsmith project's. Empty disables sending (dry runs still print). */
+  apiKey?: string;
   /** Where the first-run notice is written. Default: stderr. */
   writeNotice?: (text: string) => void;
   /** Where `TAPSMITH_TELEMETRY_DEBUG` dry-run payloads are written. Default: stderr. */
@@ -109,7 +138,15 @@ export interface TelemetryStatus {
 // ─── Constants ───
 
 export const TELEMETRY_DOCS_URL = 'https://tapsmith.dev/reference/telemetry/';
-const DEFAULT_ENDPOINT = 'https://telemetry.tapsmith.dev/v1/events';
+/** PostHog EU cloud single-event capture. */
+const DEFAULT_ENDPOINT = 'https://eu.i.posthog.com/i/v0/e/';
+/**
+ * The Tapsmith PostHog project token. Public by design (every PostHog client
+ * ships one); it can only write events, never read them. Empty until the
+ * project exists — with no key nothing is sent, so a build from source
+ * before then is silent rather than erroring.
+ */
+const POSTHOG_PROJECT_KEY = '';
 const SEND_TIMEOUT_MS = 3_000;
 /** Stop trying for the rest of the process after this many consecutive failures. */
 const MAX_CONSECUTIVE_FAILURES = 3;
@@ -172,6 +209,7 @@ export class Telemetry {
   private readonly _writeNotice: (text: string) => void;
   private readonly _writeDebug: (text: string) => void;
   private readonly _sessionId = randomUUID();
+  private readonly _apiKey: string;
   private _sdkVersion: string | undefined;
   private _state: TelemetryState | undefined;
   private readonly _pending = new Set<Promise<void>>();
@@ -183,6 +221,7 @@ export class Telemetry {
     this._endpoint = opts.endpoint ?? this._env.TAPSMITH_TELEMETRY_ENDPOINT ?? DEFAULT_ENDPOINT;
     this._fetch = opts.fetchFn ?? ((input, init) => fetch(input, init));
     this._sdkVersion = opts.sdkVersion;
+    this._apiKey = opts.apiKey ?? POSTHOG_PROJECT_KEY;
     this._writeNotice = opts.writeNotice ?? ((text) => process.stderr.write(text));
     this._writeDebug = opts.writeDebug ?? ((text) => process.stderr.write(text));
   }
@@ -282,20 +321,37 @@ export class Telemetry {
 
   // ─── Internals ───
 
-  private _payload(event: TelemetryPayload['event'], run?: TelemetryRunEvent): TelemetryPayload {
-    const payload: TelemetryPayload = {
-      event,
-      anonymousId: this._loadState().anonymousId,
-      sessionId: this._sessionId,
-      timestamp: new Date().toISOString(),
-      sdkVersion: this._sdkVersion ?? (this._sdkVersion = readSdkVersion()),
-      nodeVersion: process.version,
+  private _payload(event: 'install' | 'run', run?: TelemetryRunEvent): TelemetryPayload {
+    const sdkVersion = this._sdkVersion ?? (this._sdkVersion = readSdkVersion());
+    const properties: TelemetryProperties = {
+      session_id: this._sessionId,
+      sdk_version: sdkVersion,
+      node_version: process.version,
       os: process.platform,
       arch: process.arch,
       ci: isCI(this._env),
+      $lib: 'tapsmith',
+      $lib_version: sdkVersion,
+      $geoip_disable: true,
+      $process_person_profile: false,
     };
-    if (run) payload.run = run;
-    return payload;
+    if (run) {
+      properties.mode = run.mode;
+      properties.platform = run.platform;
+      properties.devices = run.devices;
+      properties.tests = run.tests;
+      properties.passed = run.passed;
+      properties.failed = run.failed;
+      properties.skipped = run.skipped;
+      properties.duration_ms = run.durationMs;
+    }
+    return {
+      api_key: this._apiKey,
+      event: event === 'run' ? 'tapsmith run' : 'tapsmith install',
+      distinct_id: this._loadState().anonymousId,
+      timestamp: new Date().toISOString(),
+      properties,
+    };
   }
 
   private _send(payload: TelemetryPayload): void {
@@ -304,6 +360,9 @@ export class Telemetry {
       this._writeDebug(`[telemetry] ${JSON.stringify(payload)}\n`);
       return;
     }
+    // No project token compiled in (a source build before the project
+    // existed): there is nowhere to send to.
+    if (!this._apiKey) return;
     if (this._consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) return;
     const attempt = (async () => {
       try {
