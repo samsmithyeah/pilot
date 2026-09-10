@@ -183,16 +183,16 @@ const STALE_SNAPSHOT_SIGNATURE = 'is stale (UI changed)';
  */
 const PROBE_FAULT_RETRY_WINDOW_MS = 2000;
 const PROBE_RETRY_POLL_MS = 250;
-/**
- * Smallest command deadline a probe re-read is issued with. A hierarchy dump
- * on a starved CI emulator can take most of a second (the scroll probe budgets
- * {@link SCROLL_PROBE_TIMEOUT_MS} for the same read), and an agent timeout on
- * a read is thrown as an infrastructure error — so a re-read must never be
- * short enough that the budget, rather than the agent, is what times out.
- * Deliberately a separate quantity from the poll gap: coupling the two is what
- * let the final re-read shrink to a deadline no device could meet.
+/*
+ * What a `findElements` budget actually buys (see agent_comms.rs in the
+ * daemon): the on-device agent runs a hierarchy dump to completion IGNORING
+ * the client timeout — it is one uninterruptible native call — and the daemon
+ * waits `budget + 5s headroom` (TAPSMITH_AGENT_READ_HEADROOM_MS) for the
+ * answer. So a 1ms budget is a 5.001s read window and a 30s budget a 35s one;
+ * the ceiling on how long a dump may take is the headroom, not the budget.
+ * That is why the poll loops in this file can floor a tick's budget at 1ms
+ * without manufacturing timeouts, and why no minimum read budget is needed.
  */
-const PROBE_MIN_READ_BUDGET_MS = 1000;
 
 function isPollableNotFoundError(err: unknown): boolean {
   // A strict mode violation means the selector DID resolve — to too many
@@ -971,20 +971,18 @@ export class ElementHandle {
    *
    * `_resolveOne` reads with the handle's own timeout (and an and/or operand's
    * own, often long, one), so a tick issued late in a 30s wait could run a
-   * whole extra 30s past the deadline. Re-time the tree to the time left,
-   * capped at {@link PROBE_MIN_READ_BUDGET_MS} rather than the 250ms unmodified
-   * reads use: the loop still wakes every 250ms on a miss, and a full-second
-   * cap keeps a slow-but-healthy dump on a starved emulator from timing out
-   * on every tick (a timeout here is retried, but a read that can NEVER fit
-   * its budget would turn into "not found" at the deadline).
+   * whole extra 30s past the deadline. Re-time the tree to the time left — no
+   * artificial ceiling: the daemon's fixed read headroom (see the note by
+   * {@link PROBE_RETRY_POLL_MS}) is what bounds a dump, so shrinking the
+   * budget below the time left would only narrow the window a slow-but-
+   * healthy emulator gets, for no gain.
    *
    * A handle from `all()` answers from its snapshot — no device read to bound
    * — and the clone would drop that cache, so it resolves as-is.
    */
   private _resolveOneBounded(deadline: number): Promise<ElementInfo> {
     if (this._options.resolvedElementsPromise) return this._resolveOne();
-    const budget = Math.min(PROBE_MIN_READ_BUDGET_MS, Math.max(1, deadline - Date.now()));
-    return ElementHandle._cloneWithTimeout(this, budget)._resolveOne();
+    return ElementHandle._cloneWithTimeout(this, Math.max(1, deadline - Date.now()))._resolveOne();
   }
 
   /**
@@ -1236,7 +1234,16 @@ export class ElementHandle {
         // through to _strictResolve, which returns early at 0 for actions —
         // they pass the raw selector to the agent — so find() threw "not
         // found" without ever querying the device.)
-        const el = this._hasModifiers() ? await this._resolveOne() : await this._findOneStrict(0);
+        let el: ElementInfo | undefined;
+        try {
+          el = this._hasModifiers() ? await this._resolveOne() : await this._findOneStrict(0);
+        } catch (err) {
+          // Same error shape as the unmodified branch for a plain miss
+          // (`nth(0): expected at least 1 …` is an implementation detail);
+          // a stale snapshot or a strict violation propagates as itself.
+          if (!isPollableNotFoundError(err) || isStaleSnapshotError(err)) throw err;
+          el = undefined;
+        }
         if (!el) throw new Error(`Element not found: ${this._describe()}`);
         result = el;
       } else {
@@ -2151,22 +2158,19 @@ export class ElementHandle {
    * throws rather than reporting the first match's state.
    *
    * The first read gets the handle's full timeout as its command deadline,
-   * like `count()`, so a slow-but-healthy hierarchy dump on a starved CI
-   * emulator completes rather than timing out against an artificially short
-   * read budget (`_strictResolve` instead caps each tick at 250ms and relies
-   * on retrying the resulting agent timeouts). Re-reads get what is left of
-   * the nearest deadline (handle timeout, or the fault window while one is
-   * open), never less than {@link PROBE_MIN_READ_BUDGET_MS}; the loop stops
-   * once a poll gap plus that minimum no longer fits, so the last read is
-   * never one whose deadline no device could meet. Every read on every
-   * handle shape is bounded this way ({@link _readOnce} re-times modified
-   * handles as `_resolveForWaitTick` does; a filter/scope chain issues its
-   * reads sequentially, each bounded). An agent command timeout on the FIRST
-   * read means the agent did not answer within the handle's whole timeout — a
-   * probe does not grant it a second one; it throws at once. On a capped
-   * re-read it is retried like a momentary fault: the cap, not the agent,
-   * may be what ran out, and that string is a session-recovery trigger in the
-   * worker, which must not fire for a screen that was merely animating.
+   * like `count()`. Re-reads get what is left of the nearest deadline (handle
+   * timeout, or the fault window while one is open); the loop stops once a
+   * poll gap plus one more poll interval of budget no longer fits. The budget
+   * is not what bounds a dump — the daemon's fixed read headroom is (see the
+   * note by {@link PROBE_RETRY_POLL_MS}) — so a short late re-read is as
+   * likely to complete as any other. Every read on every handle shape is
+   * bounded this way ({@link _readOnce} re-times modified handles as
+   * `_resolveForWaitTick` does; a filter/scope chain issues its reads
+   * sequentially, each bounded). An agent command timeout on the FIRST read
+   * means the agent did not answer within the handle's whole timeout plus
+   * headroom — a probe does not grant it a second one; it throws at once. On
+   * a re-read it is retried like a momentary fault, so a persistent one still
+   * surfaces after the short window.
    *
    * Two kinds of *unreliable tick* — a read that carries no information about
    * presence — are re-probed, on different budgets:
@@ -2240,12 +2244,11 @@ export class ElementHandle {
       // takes seconds to refuse) cannot stretch "retried briefly" into the
       // handle timeout.
       const nearestDeadline = lastFault && faultDeadline !== undefined ? Math.min(faultDeadline, staleDeadline) : staleDeadline;
-      // Stop while a re-read can still be meaningful: one poll gap, then at
-      // least PROBE_MIN_READ_BUDGET_MS of read budget. Anything shorter would
-      // only time out — and a persistent one would be thrown as an infra error
-      // on a screen that was merely animating.
+      // Stop while a re-read still fits: one poll gap, then at least one poll
+      // interval of budget (a token amount — the daemon's headroom does the
+      // real bounding — that keeps the last read from being a 1ms one).
       const remaining = staleDeadline - now;
-      if (nearestDeadline - now < PROBE_RETRY_POLL_MS + PROBE_MIN_READ_BUDGET_MS) {
+      if (nearestDeadline - now < 2 * PROBE_RETRY_POLL_MS) {
         if (lastFault) throw lastFault;
         const reads = staleReads + faultReads;
         const faults = faultReads
@@ -2259,7 +2262,7 @@ export class ElementHandle {
           const why = this._timeoutMs === 0
             ? 'timeout is 0 (single-shot), so it was not retried'
             : `it took ${now - start}ms, and the ${Math.max(0, remaining)}ms left of the ${this._timeoutMs}ms timeout ` +
-              `is not enough for another read (a re-read needs at least ${PROBE_RETRY_POLL_MS + PROBE_MIN_READ_BUDGET_MS}ms)`;
+              `is not enough for another read (a re-read needs at least ${2 * PROBE_RETRY_POLL_MS}ms)`;
           detail = `a single read returned a stale snapshot (the UI changed mid-read); ${why}`;
         } else {
           detail =
@@ -2272,9 +2275,9 @@ export class ElementHandle {
         );
       }
       await sleep(PROBE_RETRY_POLL_MS, this._client._getAbortSignal?.());
-      // ≥ PROBE_MIN_READ_BUDGET_MS by the check above; never more than what is
+      // ≥ ~PROBE_RETRY_POLL_MS by the check above; never more than what is
       // left of the nearest deadline.
-      readBudget = Math.max(PROBE_MIN_READ_BUDGET_MS, nearestDeadline - Date.now());
+      readBudget = Math.max(1, nearestDeadline - Date.now());
     }
   }
 

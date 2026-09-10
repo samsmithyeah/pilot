@@ -840,10 +840,10 @@ describe('isVisible()', () => {
         elapsed = Date.now() - start;
       }
     })).rejects.toThrow(/findElements failed/);
-    // Re-reads are issued while a poll gap plus a 1s minimum read budget still
+    // Re-reads are issued while a poll gap plus one more poll interval still
     // fit in the 2s window (fast-failing reads at 250ms steps → the last is
-    // issued at 1000ms); a slow-failing read runs to the window's end.
-    expect(elapsed).toBeGreaterThanOrEqual(1000);
+    // issued at 1750ms); a slow-failing read runs to the window's end.
+    expect(elapsed).toBeGreaterThanOrEqual(1500);
     expect(elapsed).toBeLessThan(5000);
   });
 
@@ -916,21 +916,21 @@ describe('isVisible()', () => {
     expect(err).toBeInstanceOf(Error);
     expect(err.message).toMatch(/Could not read the state of .*Spinner/);
     // Reports what happened (reads + elapsed), not a budget: reads every
-    // 250ms from 0 to 4000ms; after the read at 4000ms less than a poll gap
-    // plus the 1s minimum read budget remains, so stop.
-    expect(err.message).toMatch(/kept changing \(stale snapshot\) across 17 reads over 4000ms/);
+    // 250ms from 0 to 4750ms; after the read at 4750ms less than two poll
+    // intervals remain, so stop.
+    expect(err.message).toMatch(/kept changing \(stale snapshot\) across 20 reads over 4750ms/);
     expect(err.message).toMatch(/not\.toBeVisible\(\) or waitFor\(\)/);
-    expect(findElements).toHaveBeenCalledTimes(17);
+    expect(findElements).toHaveBeenCalledTimes(20);
   });
 
-  it('stops re-reading while a re-read could still be meaningful — every re-read gets at least the 1s minimum read budget (review follow-up)', async () => {
+  it('stops re-reading while a re-read still fits — the last read never gets a ~1ms budget (review follow-up)', async () => {
     // The loop used to continue whenever ≥250ms remained, then sleep exactly
-    // 250ms, leaving the final re-read a max(1, ~0) = 1ms deadline; a first fix
-    // raised that floor to 250ms. Neither is a deadline a starved CI emulator
-    // can dump a hierarchy within (the scroll probe budgets 1s for the same
-    // read), so the read came back "Agent command timed out" — a string the
-    // worker treats as a session-recovery trigger — on a screen that was
-    // merely animating. The minimum read budget is its own constant now.
+    // 250ms, leaving the final re-read a max(1, ~0) = 1ms deadline. The
+    // daemon's fixed 5s read headroom means even that read would usually
+    // complete — but a token floor of one poll interval keeps the budget
+    // honest and the trace readable. (A 1s "minimum read budget" was tried
+    // and reverted: the budget does not bound the dump, the headroom does, so
+    // it only removed retries from handles with timeouts ≤1.25s.)
     const budgets: number[] = [];
     const findElements = vi.fn(async (_sel: unknown, budget?: number): Promise<FindElementsResponse> => {
       budgets.push(budget!);
@@ -942,8 +942,22 @@ describe('isVisible()', () => {
       await expect(withFakeClock(10_000, () => new ElementHandle(client, _text('X'), timeoutMs).isVisible()))
         .rejects.toThrow(/Could not read the state of/);
       expect(budgets[0]).toBe(timeoutMs);
-      for (const b of budgets.slice(1)) expect(b).toBeGreaterThanOrEqual(1000);
+      for (const b of budgets.slice(1)) expect(b).toBeGreaterThanOrEqual(250);
     }
+  });
+
+  it('still retries stale snapshots on a short handle timeout, like find() does (review follow-up)', async () => {
+    // A project with `timeout: 1000` for fast local runs: a tap re-renders the
+    // screen and the next isVisible() reads stale. It must re-read, not throw
+    // after one read (a 1s minimum read budget made it single-shot here).
+    let calls = 0;
+    const findElements = vi.fn(async (): Promise<FindElementsResponse> =>
+      ++calls < 3
+        ? { requestId: '1', elements: [], errorMessage: 'Element is stale (UI changed): null' }
+        : makeFindElementsResponse([makeElementInfo({ visible: true })]));
+    const client = makeMockClient({ findElements });
+    expect(await withFakeClock(5000, () => new ElementHandle(client, _text('X'), 1000).isVisible())).toBe(true);
+    expect(calls).toBe(3);
   });
 
   it('retries an agent command timeout on a capped re-read instead of throwing it — the cap, not the agent, may have run out (review follow-up)', async () => {
@@ -964,7 +978,7 @@ describe('isVisible()', () => {
     expect(await withFakeClock(60_000, () => new ElementHandle(client, _text('X'), 30_000).isVisible())).toBe(true);
     expect(calls).toBe(3);
     expect(budgets[0]).toBe(30_000);
-    expect(budgets[1]).toBeGreaterThanOrEqual(1000);
+    expect(budgets[1]).toBeGreaterThanOrEqual(250);
   });
 
   it('still surfaces agent command timeouts that persist on re-reads, after the short fault window (review follow-up)', async () => {
@@ -1035,10 +1049,10 @@ describe('isVisible()', () => {
     for (let i = 0; i < reads.length; i += 2) {
       expect(reads[i + 1].budget).toBe(reads[i].budget);
       expect(reads[i].budget).toBeLessThanOrEqual(3000);
-      expect(reads[i].budget).toBeGreaterThanOrEqual(1000);
+      expect(reads[i].budget).toBeGreaterThanOrEqual(250);
     }
     expect(reads[0].budget).toBe(3000);
-    expect(reads.at(-1)!.budget).toBe(1000);
+    expect(reads.at(-1)!.budget).toBe(250);
   });
 
   it('explains a single stale read that left no room for another as the read using the budget — not as a too-short timeout (review follow-up)', async () => {
@@ -1051,7 +1065,7 @@ describe('isVisible()', () => {
     const client = makeMockClient({ findElements });
     const err = await withFakeClock(10_000, () => new ElementHandle(client, _text('X'), 5000).isVisible()).catch((e) => e);
     expect(err.message).toMatch(
-      /a single read returned a stale snapshot .*; it took 4900ms, and the 100ms left of the 5000ms timeout is not enough for another read \(a re-read needs at least 1250ms\)/,
+      /a single read returned a stale snapshot .*; it took 4900ms, and the 100ms left of the 5000ms timeout is not enough for another read \(a re-read needs at least 500ms\)/,
     );
     expect(err.message).not.toMatch(/so it was not retried/);
     expect(findElements).toHaveBeenCalledTimes(1);
@@ -1072,7 +1086,7 @@ describe('isVisible()', () => {
     for (const handle of [base.first(), base.nth(2), base.filter({ hasText: 'Y' })]) {
       budgets.length = 0;
       await expect(withFakeClock(5000, () => handle.isVisible())).rejects.toThrow(/Could not read the state of/);
-      expect(budgets).toEqual([3000, 2750, 2500, 2250, 2000, 1750, 1500, 1250, 1000]);
+      expect(budgets).toEqual([3000, 2750, 2500, 2250, 2000, 1750, 1500, 1250, 1000, 750, 500, 250]);
     }
   });
 
@@ -1124,7 +1138,7 @@ describe('isVisible()', () => {
     const client = makeMockClient({ findElements });
     await expect(withFakeClock(5000, () => new ElementHandle(client, _text('X'), 3000).isVisible()))
       .rejects.toThrow(/kept changing/);
-    expect(budgets).toEqual([3000, 2750, 2500, 2250, 2000, 1750, 1500, 1250, 1000]);
+    expect(budgets).toEqual([3000, 2750, 2500, 2250, 2000, 1750, 1500, 1250, 1000, 750, 500, 250]);
   });
 
   it('a later stale tick clears a momentary fault, so stale churn reports churn — not the recovered fault (review follow-up)', async () => {
@@ -1142,8 +1156,8 @@ describe('isVisible()', () => {
     expect(err.message).toMatch(/Could not read the state of/);
     expect(err.message).not.toMatch(/Not connected to agent/);
     // The diagnostic counts stale reads as stale reads, and says a fault occurred.
-    expect(err.message).toMatch(/across 16 reads over 4000ms \(plus 1 momentary agent fault that cleared\)/);
-    expect(calls).toBe(17);
+    expect(err.message).toMatch(/across 19 reads over 4750ms \(plus 1 momentary agent fault that cleared\)/);
+    expect(calls).toBe(20);
   });
 
   it('re-queries the device for a handle from all() instead of answering from the cached snapshot (review follow-up)', async () => {
@@ -1512,8 +1526,8 @@ describe('nth()', () => {
     // _strictResolve/_waitForEnabled read modified handles through
     // _resolveOne(), which used the handle's OWN timeout per read (and an
     // and/or operand's own, often 30s, one): a tick issued late in the wait
-    // could run a whole extra timeout. Each tick is now capped at 1s (not the
-    // 250ms unmodified reads use — a starved emulator's dump must still fit).
+    // could run a whole extra timeout. Each tick is now bounded by the time
+    // left (no artificial ceiling: the daemon's read headroom bounds a dump).
     const budgets: number[] = [];
     const findElements = vi.fn(async (_sel: unknown, budget?: number): Promise<FindElementsResponse> => {
       budgets.push(budget!);
@@ -1539,7 +1553,11 @@ describe('nth()', () => {
         }
       })).rejects.toThrow(/was not found after waiting 2000ms/);
       expect(budgets.length).toBeGreaterThan(1);
-      for (const b of budgets) expect(b).toBeLessThanOrEqual(1000);
+      expect(budgets[0]).toBeLessThanOrEqual(2000);
+      // Non-increasing (an and/or tick reads both operands with one budget),
+      // and shrinking overall as the deadline nears.
+      for (let i = 1; i < budgets.length; i++) expect(budgets[i]).toBeLessThanOrEqual(budgets[i - 1]);
+      expect(budgets.at(-1)!).toBeLessThan(budgets[0]);
       expect(elapsed).toBeLessThanOrEqual(2250);
     }
   });
@@ -3065,7 +3083,9 @@ describe('isEditable', () => {
   it('keeps the timeout: 0 opt-out single-shot on a modified handle', async () => {
     const findElements = vi.fn(async () => makeFindElementsResponse([]));
     const client = makeMockClient({ findElements });
-    await expect(new ElementHandle(client, _role('button'), 0).first().isEnabled()).rejects.toThrow(/nth\(0\)/);
+    // One error shape for a plain miss, whatever the handle shape (the
+    // positional `nth(0): expected at least 1 …` is an implementation detail).
+    await expect(new ElementHandle(client, _role('button'), 0).first().isEnabled()).rejects.toThrow(/^Element not found: /);
     expect(findElements).toHaveBeenCalledTimes(1);
   });
 

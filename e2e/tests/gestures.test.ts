@@ -105,8 +105,12 @@ describe("Gestures screen", () => {
   // slow shard as a regression in the code under test.
   test("isVisible/isHidden answer for an absent element without waiting", async ({ device }) => {
     const absent = device.getByText("Definitely not on this screen", { exact: true })
-    const start = Date.now()
+    // Bound each call on its own: one shared budget would let two legitimately
+    // slow first reads on a starved shard add up to a false failure.
+    let start = Date.now()
     expect(await absent.isVisible()).toBe(false)
+    expect(Date.now() - start).toBeLessThan(25_000)
+    start = Date.now()
     expect(await absent.isHidden()).toBe(true)
     expect(Date.now() - start).toBeLessThan(25_000)
   })

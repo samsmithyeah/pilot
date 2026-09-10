@@ -1134,9 +1134,10 @@ that does not respond within the read throws at once, and a momentary agent faul
 a couple of seconds (capped by the handle's timeout; a fault that is slow to fail is bounded by that
 window too) and then thrown. A stale mid-re-render snapshot
 just means the screen is busy, so — like `find()` and `waitFor()` — it is re-read until the handle's
-timeout; if the hierarchy never settles (a screen that never stops animating) the call costs the full
-timeout and then throws a descriptive error, pointing at `expect(locator).toBeVisible()` /
-`.not.toBeVisible()` and `waitFor()`, rather than guessing an answer. A handle
+timeout; if the hierarchy never settles (a screen that never stops animating) the call keeps re-reading
+for the handle's timeout and then throws a descriptive error, pointing at `expect(locator).toBeVisible()` /
+`.not.toBeVisible()` and `waitFor()`, rather than guessing an answer. Each read is bounded by the
+timeout; a `filter({ has })` or scoped chain issues a few reads in sequence. A handle
 obtained from `all()` re-queries the device rather than answering from the snapshot it was created
 from (see `all()`).
 
